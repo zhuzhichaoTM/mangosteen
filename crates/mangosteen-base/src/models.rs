@@ -129,11 +129,10 @@ impl ModelStore {
 
         // 3. 构造规格
         let spec = info.to_model_spec();
-        spec.validate()
-            .map_err(|reason| MnError::GgufFormat {
-                path: real.clone(),
-                reason,
-            })?;
+        spec.validate().map_err(|reason| MnError::GgufFormat {
+            path: real.clone(),
+            reason,
+        })?;
 
         // 4. 可选哈希
         let sha256 = if self.verify_hash {
@@ -179,7 +178,8 @@ impl ModelStore {
         instance_id: &str,
         remote_path: &str,
     ) -> MnResult<ModelEntry> {
-        spec.validate().map_err(|reason| MnError::bad_request(reason))?;
+        spec.validate()
+            .map_err(|reason| MnError::bad_request(reason))?;
         let id = ModelEntry::derive_id(&spec.name, spec.quant);
         let entry = ModelEntry {
             id: id.clone(),
@@ -447,7 +447,10 @@ mod tests {
         assert!(s.remove(&reg.entry.id, false).unwrap());
         assert!(f.exists(), "未要求删文件时磁盘文件必须保留");
         assert!(s.list().unwrap().is_empty());
-        assert!(!s.remove(&reg.entry.id, false).unwrap(), "重复删除返回 false");
+        assert!(
+            !s.remove(&reg.entry.id, false).unwrap(),
+            "重复删除返回 false"
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -493,7 +496,9 @@ mod tests {
             native_context: 32_768,
             file_size_bytes: 0,
         };
-        let e = s.register_cloud(spec, "i-abc", "/root/models/q.gguf").unwrap();
+        let e = s
+            .register_cloud(spec, "i-abc", "/root/models/q.gguf")
+            .unwrap();
         assert!(!e.is_local());
         assert!(matches!(e.location, ModelLocation::Cloud { .. }));
         // 云端模型无法本地校验哈希

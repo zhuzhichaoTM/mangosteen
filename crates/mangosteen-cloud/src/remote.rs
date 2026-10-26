@@ -154,11 +154,7 @@ pub fn wait_http_ready(url: &str, budget: Duration, interval: Duration) -> MnRes
 ///
 /// 代价是**量化版本可能与本地不同**（远端按官方 tag 拉）。这一点必须
 /// 在阶段说明里写清楚，不能让用户以为跑的是他本地那个 q2_k。
-pub fn ensure_ollama_model(
-    base_url: &str,
-    model: &str,
-    budget: Duration,
-) -> MnResult<Duration> {
+pub fn ensure_ollama_model(base_url: &str, model: &str, budget: Duration) -> MnResult<Duration> {
     let started = Instant::now();
 
     // 1. 已存在就直接用（重复部署不重复下载）
@@ -730,7 +726,11 @@ pub fn download_model_remote(
         if size == last_size {
             stalled += 1;
             if stalled >= 6 {
-                ssh_exec(target, &format!("kill $(cat '{pid_file}') 2>/dev/null || true"), 30)?;
+                ssh_exec(
+                    target,
+                    &format!("kill $(cat '{pid_file}') 2>/dev/null || true"),
+                    30,
+                )?;
                 let resume = format!(
                     "nohup curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20                           -o '{dest}' '{url}' >> '{log}' 2>&1 < /dev/null &                      echo $! > '{pid_file}'; echo resumed"
                 );
@@ -755,10 +755,15 @@ pub fn download_model_remote(
 pub fn remote_file_size(target: &SshTarget, path: &str) -> MnResult<u64> {
     let out = ssh_exec(
         target,
-        &format!(
-            "if [ -f '{path}' ]; then stat -c %s '{path}'; else echo 0; fi"
-        ),
+        &format!("if [ -f '{path}' ]; then stat -c %s '{path}'; else echo 0; fi"),
         60,
     )?;
-    Ok(out.trim().lines().last().unwrap_or("0").trim().parse().unwrap_or(0))
+    Ok(out
+        .trim()
+        .lines()
+        .last()
+        .unwrap_or("0")
+        .trim()
+        .parse()
+        .unwrap_or(0))
 }

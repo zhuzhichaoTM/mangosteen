@@ -103,7 +103,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match client.check_net_optimizer() {
         Ok(r) => {
             println!("RetCode    : {}", r.ret_code);
-            println!("全局加速   : {}", if r.optimized { "已开通" } else { "未开通" });
+            println!(
+                "全局加速   : {}",
+                if r.optimized {
+                    "已开通"
+                } else {
+                    "未开通"
+                }
+            );
             for i in &r.info {
                 println!("  {:<10} {}", i.region, if i.optimized { "✓" } else { "✗" });
             }

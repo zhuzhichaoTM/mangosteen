@@ -18,7 +18,13 @@
 //! 由于用途单一且明确，本实现不含任何可配置项，避免被误用于其它场景。
 
 /// SHA-1 计算的初始状态（FIPS 180-1 定义的常量）。
-const H0: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+const H0: [u32; 5] = [
+    0x6745_2301,
+    0xEFCD_AB89,
+    0x98BA_DCFE,
+    0x1032_5476,
+    0xC3D2_E1F0,
+];
 
 /// 计算 SHA-1 摘要。
 pub fn digest(data: &[u8]) -> [u8; 20] {
@@ -110,10 +116,7 @@ mod tests {
     #[test]
     fn official_test_vectors() {
         // FIPS 180-1 / RFC 3174 附录给出的标准向量
-        assert_eq!(
-            hex_digest(b""),
-            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
-        );
+        assert_eq!(hex_digest(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
         assert_eq!(
             hex_digest(b"abc"),
             "a9993e364706816aba3e25717850c26c9cd0d89d"

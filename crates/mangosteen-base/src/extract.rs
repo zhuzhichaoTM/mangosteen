@@ -74,12 +74,8 @@ const RICH_EXTS: &[&str] = &[
 ///
 /// 调用方必须先做访问控制校验（见模块文档的安全边界）。
 pub fn extract(path: &Path, max_chars: usize) -> MnResult<ExtractedText> {
-    let meta = std::fs::metadata(path).map_err(|e| {
-        MnError::io(
-            format!("读取附件信息 {}", path.display()),
-            &e,
-        )
-    })?;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| MnError::io(format!("读取附件信息 {}", path.display()), &e))?;
     if !meta.is_file() {
         return Err(MnError::bad_request(format!(
             "{} 不是普通文件",
@@ -211,8 +207,8 @@ fn temp_input_path(filename: &str, ext: &str) -> PathBuf {
 
 /// 纯文本读取。
 fn extract_plain(path: &Path, original_bytes: u64, max_chars: usize) -> MnResult<ExtractedText> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| MnError::io(format!("读取 {}", path.display()), &e))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| MnError::io(format!("读取 {}", path.display()), &e))?;
 
     // 二进制探测：前 8KB 里出现 NUL 基本可以确定不是文本
     let probe_len = bytes.len().min(8192);
@@ -267,8 +263,9 @@ fn extract_rich(
 
     // 平台差异（用哪个工具、传什么参数）由平台层决定。
     // 基础能力层不判断操作系统——这是「跨平台兼容原则」的要求。
-    let cmd = mangosteen_platform::docconv::convert_command(path, ext)
-        .ok_or_else(|| MnError::bad_request(mangosteen_platform::docconv::missing_tool_hint(ext)))?;
+    let cmd = mangosteen_platform::docconv::convert_command(path, ext).ok_or_else(|| {
+        MnError::bad_request(mangosteen_platform::docconv::missing_tool_hint(ext))
+    })?;
     let (program, args, method) = (cmd.program, cmd.args, cmd.method);
 
     let out = Command::new(&program)
@@ -284,7 +281,11 @@ fn extract_rich(
         return Err(MnError::bad_request(format!(
             "{program} 转换失败（退出码 {:?}）：{}",
             out.status.code(),
-            if err.is_empty() { "（无错误输出）" } else { &err }
+            if err.is_empty() {
+                "（无错误输出）"
+            } else {
+                &err
+            }
         )));
     }
 

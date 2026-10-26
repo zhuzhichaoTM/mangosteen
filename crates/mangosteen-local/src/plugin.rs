@@ -220,11 +220,7 @@ mod tests {
             InferenceEngine::Sglang,
             InferenceEngine::TensorrtLlm,
         ] {
-            assert!(
-                !r.has(e),
-                "{} 尚未适配，不应有插件",
-                e.display_name()
-            );
+            assert!(!r.has(e), "{} 尚未适配，不应有插件", e.display_name());
             assert!(r.get(e).is_none());
         }
     }

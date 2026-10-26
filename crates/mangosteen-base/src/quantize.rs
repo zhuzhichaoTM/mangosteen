@@ -54,13 +54,7 @@ pub enum QuantType {
 impl QuantType {
     /// 全部可选档位。
     pub fn all() -> &'static [QuantType] {
-        &[
-            Self::Q4_0,
-            Self::Q4KM,
-            Self::Q5KM,
-            Self::Q8_0,
-            Self::F16,
-        ]
+        &[Self::Q4_0, Self::Q4KM, Self::Q5KM, Self::Q8_0, Self::F16]
     }
 
     /// llama-quantize 的参数值（第二个位置参数）。

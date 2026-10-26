@@ -41,13 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credential = Credential::new(public_key, private_key)?;
     // 地域留空：先不限地域查实例，拿到实例真实地域再查监控。
     // 这正是驱动内部的做法——按配置地域硬查会把「地域不同」误判成「不存在」。
-    let client = CompshareClient::new(
-        DEFAULT_ENDPOINT,
-        credential,
-        CurlTransport::new(30),
-        "",
-        "",
-    )?;
+    let client =
+        CompshareClient::new(DEFAULT_ENDPOINT, credential, CurlTransport::new(30), "", "")?;
 
     // ---- 1. 找到要监控的实例 ----
     println!("=== 1. 定位实例（不限地域） ===");
@@ -65,12 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for u in &list.uhost_set {
         println!(
             "  {:<22} {:<10} {:<10} {} 卡  {}/{}",
-            u.id,
-            u.state,
-            u.gpu_type,
-            u.gpu,
-            u.region,
-            u.zone
+            u.id, u.state, u.gpu_type, u.gpu, u.region, u.zone
         );
     }
     println!();
@@ -132,7 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 3. 原始指标（厂商原文，百分数） ----
     println!("=== 4. 厂商原始指标 ===");
-    println!("{:<36} {:>10}  {:>10}  采样时间", "MetricKey", "最新值", "最大值");
+    println!(
+        "{:<36} {:>10}  {:>10}  采样时间",
+        "MetricKey", "最新值", "最大值"
+    );
     println!("{}", "-".repeat(84));
     for m in &inst.metrics {
         let latest = m.latest().map(|v| v.value);
@@ -140,7 +133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "{:<36} {:>10}  {:>10}  {}",
             m.key,
-            latest.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into()),
+            latest
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "—".into()),
             max.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into()),
             m.latest_timestamp()
                 .map(|t| t.to_string())

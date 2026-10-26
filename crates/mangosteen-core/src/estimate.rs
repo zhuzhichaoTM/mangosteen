@@ -145,11 +145,9 @@ impl Placement {
     pub fn describe(&self, total_layers: u32) -> String {
         match self {
             Placement::FullGpu => "全部层驻显存（GPU 全量卸载）".to_string(),
-            Placement::PartialOffload { gpu_layers } => format!(
-                "部分卸载：{}/{} 层驻显存",
-                gpu_layers,
-                total_layers + 1
-            ),
+            Placement::PartialOffload { gpu_layers } => {
+                format!("部分卸载：{}/{} 层驻显存", gpu_layers, total_layers + 1)
+            }
             Placement::CpuOnly => "纯 CPU 推理（无加速卡参与）".to_string(),
             Placement::Impossible => "本地无法承载".to_string(),
         }
@@ -161,9 +159,16 @@ impl Placement {
 #[serde(tag = "code", rename_all = "snake_case")]
 pub enum Warning {
     /// 声明的量化格式与实际文件尺寸不符
-    QuantMismatch { declared_bpw: String, measured_bpw: String },
+    QuantMismatch {
+        declared_bpw: String,
+        measured_bpw: String,
+    },
     /// 请求上下文超过模型原生上限
-    ContextClamped { requested: u32, native: u32, actual: u32 },
+    ContextClamped {
+        requested: u32,
+        native: u32,
+        actual: u32,
+    },
     /// KV Cache 被降档
     KvCacheDowngraded { from: String, to: String },
     /// 发生部分卸载，吞吐会明显低于全量卸载
@@ -290,8 +295,10 @@ impl Assessment {
     pub fn accelerator_headroom_bytes(&self) -> i64 {
         self.accelerator_budget_bytes as i64
             - (self.requirement.weights_bytes
-                + self.requirement.kv_cache_bytes.min(self.requirement.kv_cache_bytes))
-                as i64
+                + self
+                    .requirement
+                    .kv_cache_bytes
+                    .min(self.requirement.kv_cache_bytes)) as i64
     }
 
     /// 一行摘要。
@@ -328,7 +335,9 @@ fn runtime_overhead(vendor: AcceleratorVendor) -> u64 {
 /// 开启 FlashAttention 后实际更低，这里取保守值（不启用 FA 时的量级）。
 fn compute_buffer(spec: &ModelSpec, batch_size: u32) -> u64 {
     // 单 token 激活量级：hidden_dim × 若干中间张量（QKV + MLP 中间层约 8×hidden）
-    let per_token = (spec.embedding_dim as u64).saturating_mul(8).saturating_mul(2);
+    let per_token = (spec.embedding_dim as u64)
+        .saturating_mul(8)
+        .saturating_mul(2);
     let raw = per_token.saturating_mul(batch_size as u64);
     // 分母系数：llama.cpp 复用缓冲，实际远小于逐 token 累加
     let scaled = raw / 4;
@@ -373,7 +382,8 @@ fn max_gpu_layers(spec: &ModelSpec, kv_cache: KvCacheType, ctx: u32, budget: u64
         .saturating_mul(spec.quant.bits_per_weight() as u64)
         / 8;
     let per_layer_w = w_total.saturating_sub(output_layer_bytes) / total_layers as u64;
-    let per_layer_kv = (spec.kv_bytes(ctx / ctx.max(1)) as f64 * kv_cache.size_factor() as f64) as u64;
+    let per_layer_kv =
+        (spec.kv_bytes(ctx / ctx.max(1)) as f64 * kv_cache.size_factor() as f64) as u64;
 
     if budget < per_layer_w {
         return 0;
@@ -381,8 +391,8 @@ fn max_gpu_layers(spec: &ModelSpec, kv_cache: KvCacheType, ctx: u32, budget: u64
     // 先按权重算层数，再校验 KV 是否也放得下，取小者
     let mut layers = (budget / per_layer_w.max(1)).min(total_layers as u64) as u32;
     while layers > 0 {
-        let need = per_layer_w.saturating_mul(layers as u64)
-            + per_layer_kv.saturating_mul(layers as u64);
+        let need =
+            per_layer_w.saturating_mul(layers as u64) + per_layer_kv.saturating_mul(layers as u64);
         if need <= budget {
             break;
         }
@@ -548,13 +558,20 @@ pub fn assess(spec: &ModelSpec, hw: &HardwareProfile, req: &AssessRequest) -> As
     // 部分卸载
     if req.allow_partial_offload && gpu_budget > 0 {
         for kv in &kv_candidates {
-            let layers = max_gpu_layers(spec, *kv, ctx, gpu_budget.saturating_sub(compute_buffer(spec, batch)));
+            let layers = max_gpu_layers(
+                spec,
+                *kv,
+                ctx,
+                gpu_budget.saturating_sub(compute_buffer(spec, batch)),
+            );
             if layers == 0 || layers >= spec.n_layers + 1 {
                 continue;
             }
             let r = requirement(spec, ctx, *kv, batch);
             // 校验：留在 CPU 的那部分权重 + KV 必须能被主机内存兜住
-            let cpu_share = (r.weights_bytes as f64 * (1.0 - layers as f64 / (spec.n_layers + 1) as f64)) as u64;
+            let cpu_share = (r.weights_bytes as f64
+                * (1.0 - layers as f64 / (spec.n_layers + 1) as f64))
+                as u64;
             if cpu_share + r.compute_buffer_bytes <= host_budget {
                 warnings.push(Warning::PartialOffloadPenalty { gpu_layers: layers });
                 return Assessment {
@@ -766,7 +783,11 @@ mod tests {
 
     #[test]
     fn seven_b_fits_fully_on_8gb_card() {
-        let a = assess(&qwen_7b_q4(), &hw_with_vram(8, false, 32), &AssessRequest::default().with_context(4096));
+        let a = assess(
+            &qwen_7b_q4(),
+            &hw_with_vram(8, false, 32),
+            &AssessRequest::default().with_context(4096),
+        );
         // 4.36GiB 权重 + KV 0.22GiB + 缓冲/开销 ≈ 0.7GiB → 略超 8GiB？
         // 预算 8GiB，总需求约 5.3GiB → 全量放得下
         assert_eq!(a.placement, Placement::FullGpu, "{}", a.summary());
@@ -775,11 +796,18 @@ mod tests {
 
     #[test]
     fn thirty_two_b_needs_partial_offload_on_8gb() {
-        let a = assess(&qwen_32b_q4(), &hw_with_vram(8, false, 64), &AssessRequest::default().with_context(4096));
+        let a = assess(
+            &qwen_32b_q4(),
+            &hw_with_vram(8, false, 64),
+            &AssessRequest::default().with_context(4096),
+        );
         match a.placement {
             Placement::PartialOffload { gpu_layers } => {
                 assert!(gpu_layers > 0 && gpu_layers < 65, "layers={gpu_layers}");
-                assert!(a.warnings.iter().any(|w| matches!(w, Warning::PartialOffloadPenalty { .. })));
+                assert!(a
+                    .warnings
+                    .iter()
+                    .any(|w| matches!(w, Warning::PartialOffloadPenalty { .. })));
             }
             other => panic!("expected partial offload, got {other:?}"),
         }
@@ -787,7 +815,11 @@ mod tests {
 
     #[test]
     fn no_accelerator_falls_back_to_cpu() {
-        let a = assess(&qwen_7b_q4(), &hw_with_vram(0, false, 32), &AssessRequest::default().with_context(4096));
+        let a = assess(
+            &qwen_7b_q4(),
+            &hw_with_vram(0, false, 32),
+            &AssessRequest::default().with_context(4096),
+        );
         assert_eq!(a.placement, Placement::CpuOnly);
         assert!(a.warnings.iter().any(|w| matches!(w, Warning::CpuFallback)));
     }
@@ -797,7 +829,9 @@ mod tests {
         let a = assess(
             &qwen_7b_q4(),
             &hw_with_vram(0, false, 32),
-            &AssessRequest::default().with_context(4096).no_cpu_fallback(),
+            &AssessRequest::default()
+                .with_context(4096)
+                .no_cpu_fallback(),
         );
         assert_eq!(a.placement, Placement::Impossible);
         assert!(!a.placement.is_local_satisfiable());
@@ -830,7 +864,11 @@ mod tests {
     #[test]
     fn auto_context_picks_max_that_fits() {
         // 24GiB 卡，7B Q4，不指定 ctx → 应尽量吃满原生 32K
-        let a = assess(&qwen_7b_q4(), &hw_with_vram(24, false, 64), &AssessRequest::default());
+        let a = assess(
+            &qwen_7b_q4(),
+            &hw_with_vram(24, false, 64),
+            &AssessRequest::default(),
+        );
         assert_eq!(a.context_len, 32_768);
         assert_eq!(a.placement, Placement::FullGpu);
     }
@@ -838,7 +876,11 @@ mod tests {
     #[test]
     fn auto_context_shrinks_on_small_vram() {
         // 6GiB 卡放 7B：ctx 会被压缩
-        let a = assess(&qwen_7b_q4(), &hw_with_vram(6, false, 32), &AssessRequest::default());
+        let a = assess(
+            &qwen_7b_q4(),
+            &hw_with_vram(6, false, 32),
+            &AssessRequest::default(),
+        );
         if a.placement == Placement::FullGpu {
             assert!(a.context_len <= 32_768);
             assert!(a.context_len >= 2048);
@@ -850,7 +892,11 @@ mod tests {
         // 非 GQA 模型 KV 巨大，8K 上下文在 8GiB 上需要降 KV 精度
         let mut s = qwen_7b_q4();
         s.n_kv_heads = 28; // 退化为 MHA，KV 放大 7 倍
-        let a = assess(&s, &hw_with_vram(8, false, 32), &AssessRequest::default().with_context(8192));
+        let a = assess(
+            &s,
+            &hw_with_vram(8, false, 32),
+            &AssessRequest::default().with_context(8192),
+        );
         // 要么降档 KV，要么部分卸载，总之要能部署
         assert!(a.placement.is_deployable(), "{}", a.summary());
     }
@@ -875,7 +921,11 @@ mod tests {
     fn quant_mismatch_warning_when_declared_wrong() {
         let mut s = qwen_7b_q4();
         s.quant = Quantization::F16; // 声明 f16 但文件只有 4.36GiB
-        let a = assess(&s, &hw_with_vram(24, false, 64), &AssessRequest::default().with_context(4096));
+        let a = assess(
+            &s,
+            &hw_with_vram(24, false, 64),
+            &AssessRequest::default().with_context(4096),
+        );
         assert!(a
             .warnings
             .iter()
@@ -887,10 +937,15 @@ mod tests {
         let a = assess(
             &qwen_32b_q4(),
             &hw_with_vram(8, false, 64),
-            &AssessRequest::default().with_context(4096).require_full_gpu(),
+            &AssessRequest::default()
+                .with_context(4096)
+                .require_full_gpu(),
         );
         // 不允许部分卸载 → 只能 CPU 或不可行
-        assert!(matches!(a.placement, Placement::CpuOnly | Placement::Impossible));
+        assert!(matches!(
+            a.placement,
+            Placement::CpuOnly | Placement::Impossible
+        ));
     }
 
     #[test]
@@ -924,7 +979,9 @@ mod tests {
         let mut s = qwen_32b_q4();
         s.file_size_bytes = 0;
         let hw = hw_with_vram(4, false, 8);
-        let req = AssessRequest::default().with_context(4096).no_cpu_fallback();
+        let req = AssessRequest::default()
+            .with_context(4096)
+            .no_cpu_fallback();
         assert!(best_quant_within(&s, &hw, &req, 4 * GIB).is_none());
     }
 

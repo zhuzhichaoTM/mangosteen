@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mangosteen_core::estimate::{self, Assessment, AssessRequest, KvCacheType, Placement};
+use mangosteen_core::estimate::{self, AssessRequest, Assessment, KvCacheType, Placement};
 use mangosteen_core::gguf;
 use mangosteen_core::hardware::HardwareProfile;
 use mangosteen_core::model::ModelSpec;
@@ -332,12 +332,7 @@ impl Assessor {
         req: &DeploymentRequest,
         budget_bytes: u64,
     ) -> Option<(mangosteen_core::model::Quantization, Assessment)> {
-        estimate::best_quant_within(
-            spec,
-            &self.hardware,
-            &req.to_assess_request(),
-            budget_bytes,
-        )
+        estimate::best_quant_within(spec, &self.hardware, &req.to_assess_request(), budget_bytes)
     }
 
     /// 云端实例需要多少显存才能承载。
@@ -419,7 +414,9 @@ mod tests {
         let f = d.join("bad.gguf");
         std::fs::write(&f, b"not a gguf at all, just text padding here").unwrap();
         let a = Assessor::new(hw(24, 64));
-        let err = a.evaluate_file(&f, &DeploymentRequest::default()).unwrap_err();
+        let err = a
+            .evaluate_file(&f, &DeploymentRequest::default())
+            .unwrap_err();
         assert!(matches!(err, MnError::GgufFormat { .. }));
         std::fs::remove_dir_all(&d).ok();
     }
@@ -428,7 +425,10 @@ mod tests {
     fn missing_file_returns_model_not_found() {
         let a = Assessor::new(hw(24, 64));
         let err = a
-            .evaluate_file(Path::new("/no/such/model.gguf"), &DeploymentRequest::default())
+            .evaluate_file(
+                Path::new("/no/such/model.gguf"),
+                &DeploymentRequest::default(),
+            )
             .unwrap_err();
         assert!(matches!(err, MnError::ModelNotFound { .. }));
     }
@@ -450,7 +450,10 @@ mod tests {
         let a = Assessor::new(hw(8, 64));
         let e = a.evaluate_spec(&spec, &DeploymentRequest::default().with_context(4096));
         // 8GB 卡放 18.4GiB 权重 → 只能部分卸载
-        assert!(matches!(e.assessment.placement, Placement::PartialOffload { .. }));
+        assert!(matches!(
+            e.assessment.placement,
+            Placement::PartialOffload { .. }
+        ));
         assert!(e.is_local_viable());
         assert!(!e.is_full_gpu());
     }

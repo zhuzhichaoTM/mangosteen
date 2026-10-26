@@ -98,7 +98,11 @@ impl ModelRef {
     /// 取仓库内文件名的最后一段：避免把 `Qwen/Qwen2.5-...-GGUF` 这种
     /// 目录结构带进本地路径。
     pub fn local_file_name(&self) -> String {
-        self.file.rsplit('/').next().unwrap_or(&self.file).to_string()
+        self.file
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.file)
+            .to_string()
     }
 
     /// 解析标识字符串。
@@ -381,10 +385,7 @@ impl ModelSource {
     /// 校验。
     pub fn validate(&self) -> MnResult<()> {
         if self.name.trim().is_empty() {
-            return Err(MnError::config(
-                "model_sources.<name>",
-                "源名不能为空",
-            ));
+            return Err(MnError::config("model_sources.<name>", "源名不能为空"));
         }
         if self.base_url.trim().is_empty() {
             return Err(MnError::config(
@@ -605,7 +606,10 @@ mod tests {
         s.url_template = Some("{base}/dl/{repo}/{file}".into());
         assert!(s.validate().is_ok());
         let r = ModelRef::new("modelscope", "o/r", "a.gguf");
-        assert_eq!(s.download_url(&r).unwrap(), "https://www.modelscope.cn/dl/o/r/a.gguf");
+        assert_eq!(
+            s.download_url(&r).unwrap(),
+            "https://www.modelscope.cn/dl/o/r/a.gguf"
+        );
     }
 
     #[test]

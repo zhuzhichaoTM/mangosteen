@@ -39,10 +39,10 @@
 //! 这四条由本模块单测中的 `invariant_*` 用例逐条守护。
 
 use mangosteen_core::cloud::InstanceState;
+use mangosteen_core::config::SchedulerConfig;
 use mangosteen_core::estimate::Placement;
 use mangosteen_core::plan::{CloudPlan, ComputeOrigin, DeploymentPlan, LocalPlan};
 use mangosteen_core::policy::SelectionConstraints;
-use mangosteen_core::config::SchedulerConfig;
 use mangosteen_core::{MnError, MnResult};
 
 use crate::assess::{Assessor, DeploymentRequest, Evaluated};
@@ -185,8 +185,7 @@ impl Scheduler {
         let start_offset = self.next_port_offset.fetch_add(1, Ordering::Relaxed);
 
         for i in 0..span {
-            let port = self.local_port_base()
-                + ((start_offset.wrapping_add(i)) % span) as u16;
+            let port = self.local_port_base() + ((start_offset.wrapping_add(i)) % span) as u16;
             if reserved.contains(&port) {
                 continue;
             }
@@ -224,11 +223,14 @@ impl Scheduler {
     /// 分配器本身只做区间轮转，不知道外部占用情况；网关在构造时把台账里
     /// 已有端口灌进来，避免新部署撞端口。
     pub fn reserve_port(&self, port: u16) {
-        self.reserved.lock().map(|mut v| {
-            if !v.contains(&port) {
-                v.push(port);
-            }
-        }).ok();
+        self.reserved
+            .lock()
+            .map(|mut v| {
+                if !v.contains(&port) {
+                    v.push(port);
+                }
+            })
+            .ok();
     }
 
     /// 释放一个已预留的端口。
@@ -264,11 +266,7 @@ impl Scheduler {
     ///
     /// 这是「本地优先」的核心实现。执行由网关负责，
     /// 执行失败后再调用 [`Scheduler::degrade_after_local_failure`]。
-    pub fn decide(
-        &self,
-        evaluated: &Evaluated,
-        req: &DeploymentRequest,
-    ) -> MnResult<Decision> {
+    pub fn decide(&self, evaluated: &Evaluated, req: &DeploymentRequest) -> MnResult<Decision> {
         // ---- 0. 用户显式指定的落位优先 ----
         //
         // 默认是「本地优先、不足降级云端」（产品基线）。但用户可以在部署页
@@ -401,7 +399,10 @@ impl Scheduler {
         let engine = LocalPlan::from_assessment(
             &evaluated.spec,
             // 云端路径约定：模型放在实例的数据盘目录下
-            format!("/root/mangosteen/models/{}", model_file_name(&evaluated.spec.name)),
+            format!(
+                "/root/mangosteen/models/{}",
+                model_file_name(&evaluated.spec.name)
+            ),
             &evaluated.assessment,
             // 云端跑的是 llama.cpp，端口用 `LLAMA_CPP_PORT`（8080）。
             // 隧道必须转发到服务真正监听的端口，否则隧道建好了也连不上。
@@ -508,7 +509,13 @@ impl Scheduler {
     }
 
     /// 把节点选择结果回填到云端方案。
-    pub fn apply_selection(plan: &mut CloudPlan, provider: &str, spec_id: &str, gpu_model: &str, vram: u64) {
+    pub fn apply_selection(
+        plan: &mut CloudPlan,
+        provider: &str,
+        spec_id: &str,
+        gpu_model: &str,
+        vram: u64,
+    ) {
         plan.provider = provider.to_string();
         plan.gpu_model = gpu_model.to_string();
         plan.vram_bytes_per_gpu = vram;
@@ -619,7 +626,9 @@ mod tests {
     fn invariant_i1_local_only_never_yields_cloud() {
         let s = scheduler(4, 8); // 放不下 70B
         let e = evaluated(spec_70b(), &s);
-        let req = DeploymentRequest::for_model("m").with_context(4096).local_only();
+        let req = DeploymentRequest::for_model("m")
+            .with_context(4096)
+            .local_only();
         let d = s.decide(&e, &req).unwrap();
         assert!(!d.is_cloud(), "禁止云端时不得返回云端方案：{d:?}");
         assert!(matches!(d, Decision::Reject { .. }));
@@ -764,7 +773,9 @@ mod tests {
         let mut cfg = SchedulerConfig::default();
         cfg.max_fallbacks = 1;
         let a = Assessor::new(hw(4, 8));
-        let s = Scheduler::new(a, cfg).with_port_range(11500, 11600).unwrap();
+        let s = Scheduler::new(a, cfg)
+            .with_port_range(11500, 11600)
+            .unwrap();
         let e = evaluated(spec_70b(), &s);
         let req = DeploymentRequest::for_model("m").with_context(4096);
 
@@ -798,9 +809,7 @@ mod tests {
         let s = scheduler(24, 64);
         let e = evaluated(spec_7b(), &s);
         let req = DeploymentRequest::for_model("m").local_only();
-        let d = s
-            .degrade_after_local_failure(&e, &req, "OOM", 0)
-            .unwrap();
+        let d = s.degrade_after_local_failure(&e, &req, "OOM", 0).unwrap();
         assert!(matches!(d, Decision::Reject { .. }));
     }
 
@@ -851,7 +860,9 @@ mod tests {
         let mut cfg = SchedulerConfig::default();
         cfg.max_price_per_hour = Some(9.9);
         let a = Assessor::new(hw(4, 8));
-        let s = Scheduler::new(a, cfg).with_port_range(11500, 11600).unwrap();
+        let s = Scheduler::new(a, cfg)
+            .with_port_range(11500, 11600)
+            .unwrap();
         let e = evaluated(spec_70b(), &s);
         // 请求未指定 → 用配置
         let d = s
@@ -961,7 +972,10 @@ mod tests {
 
     #[test]
     fn model_file_name_is_slugged() {
-        assert_eq!(model_file_name("qwen2.5 7B/instruct"), "qwen2.5-7B-instruct.gguf");
+        assert_eq!(
+            model_file_name("qwen2.5 7B/instruct"),
+            "qwen2.5-7B-instruct.gguf"
+        );
         assert_eq!(model_file_name("simple"), "simple.gguf");
     }
 
@@ -1068,7 +1082,10 @@ mod tests {
         let e = evaluated(spec_7b(), &s);
         let req = DeploymentRequest::for_model("m").with_context(4096);
         assert_eq!(req.target, ComputeTarget::Auto);
-        assert!(matches!(s.decide(&e, &req).unwrap(), Decision::Local { .. }));
+        assert!(matches!(
+            s.decide(&e, &req).unwrap(),
+            Decision::Local { .. }
+        ));
 
         // 本地不足 → 降级云端
         let s2 = scheduler(4, 8);

@@ -179,12 +179,8 @@ impl EngineHandle {
         if !child.is_running() {
             return EngineStatus::Absent;
         }
-        match process::wait_http_ready(
-            &self.host,
-            self.port,
-            "/health",
-            Duration::from_millis(600),
-        ) {
+        match process::wait_http_ready(&self.host, self.port, "/health", Duration::from_millis(600))
+        {
             Ok(_) => EngineStatus::Serving,
             Err(_) => {
                 if load_grace.is_zero() {
@@ -225,7 +221,11 @@ impl EngineHandle {
             let alive = self.status(Duration::from_secs(0)).is_serving();
             return format!(
                 "外部服务 {svc}{}",
-                if alive { "运行正常（由用户自行管理）" } else { "未在监听" }
+                if alive {
+                    "运行正常（由用户自行管理）"
+                } else {
+                    "未在监听"
+                }
             );
         };
         let tail = child.stderr_tail(max_lines);
@@ -300,10 +300,7 @@ impl LlamaCppEngine {
     }
 
     /// 设置用户显式指定的环境变量。
-    pub fn with_engine_env(
-        mut self,
-        env: std::collections::BTreeMap<String, String>,
-    ) -> Self {
+    pub fn with_engine_env(mut self, env: std::collections::BTreeMap<String, String>) -> Self {
         self.engine_env = env;
         self
     }
@@ -319,10 +316,7 @@ impl LlamaCppEngine {
     /// `extra_dirs` 默认包含：
     /// * 可执行文件同级目录与 `bin/`（把 llama-server 放在 mangosteen 旁边）
     /// * `runtime/` 及其子目录（随包分发的引擎，Ollama runner 风格布局）
-    pub fn from_config(
-        engine_path: Option<PathBuf>,
-        log_dir: Option<PathBuf>,
-    ) -> Self {
+    pub fn from_config(engine_path: Option<PathBuf>, log_dir: Option<PathBuf>) -> Self {
         let mut extra = Vec::new();
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
@@ -358,14 +352,11 @@ impl LlamaCppEngine {
             // 不再自动拼接（否则用户无法关掉注入的目录）。
             let explicit = self.engine_env.get(var);
             if explicit.is_none() {
-                let dirs =
-                    mangosteen_platform::dlpath::detect_library_dirs(bin, &self.extra_dirs);
+                let dirs = mangosteen_platform::dlpath::detect_library_dirs(bin, &self.extra_dirs);
                 if !dirs.is_empty() {
                     let existing = std::env::var(var).ok();
-                    let value = mangosteen_platform::dlpath::join_library_path(
-                        &dirs,
-                        existing.as_deref(),
-                    );
+                    let value =
+                        mangosteen_platform::dlpath::join_library_path(&dirs, existing.as_deref());
                     if !value.is_empty() {
                         env.push((var.to_string(), value));
                     }
@@ -459,7 +450,11 @@ impl LlamaCppEngine {
                 reason: format!(
                     "`--version` 失败（退出码 {:?}）：{}",
                     out.status.code(),
-                    if first.is_empty() { "（无输出）" } else { &first }
+                    if first.is_empty() {
+                        "（无输出）"
+                    } else {
+                        &first
+                    }
                 ),
             });
         }
@@ -559,7 +554,11 @@ impl LlamaCppEngine {
                         "引擎在 {}s 内未通过 /health 就绪（可能是模型过大或显存不足）。\
                          进程已清理。stderr 尾部：{}",
                         ready_timeout.as_secs(),
-                        if tail.trim().is_empty() { "（空）" } else { &tail }
+                        if tail.trim().is_empty() {
+                            "（空）"
+                        } else {
+                            &tail
+                        }
                     ),
                 });
             }
@@ -660,7 +659,12 @@ impl OllamaEngine {
     /// 后者在没有任何模型时也可能返回 200，无法区分「服务在跑」与
     /// 「服务没跑但端口被占用」。
     pub fn probe(&self) -> bool {
-        process::probe_http_ok(&self.host, self.port, "/api/version", Duration::from_millis(800))
+        process::probe_http_ok(
+            &self.host,
+            self.port,
+            "/api/version",
+            Duration::from_millis(800),
+        )
     }
 
     /// 列出 Ollama 库里已有的模型名。
@@ -723,7 +727,11 @@ impl OllamaEngine {
         // 用户完全不知道该怎么修。
         let have = self.list_models();
         let want = model_name.to_string();
-        if !have.is_empty() && !have.iter().any(|m| m == &want || m.split(':').next() == Some(&want)) {
+        if !have.is_empty()
+            && !have
+                .iter()
+                .any(|m| m == &want || m.split(':').next() == Some(&want))
+        {
             return Err(MnError::Provider {
                 provider: "ollama".to_string(),
                 code: "model_not_found".to_string(),
@@ -790,10 +798,7 @@ mod ollama_tests {
 
         let err = e.attach("qwen2.5").expect_err("未运行时必须报错");
         let msg = err.to_string();
-        assert!(
-            msg.contains("Ollama"),
-            "错误里应指明是 Ollama，实际：{msg}"
-        );
+        assert!(msg.contains("Ollama"), "错误里应指明是 Ollama，实际：{msg}");
         assert!(
             msg.contains("ollama serve") || msg.contains("Ollama 应用"),
             "应告诉用户怎么启动，实际：{msg}"
@@ -854,9 +859,7 @@ mod ollama_tests {
 mod tests {
     use super::*;
     use mangosteen_core::estimate::{AssessRequest, KvCacheType};
-    use mangosteen_core::hardware::{
-        Accelerator, AcceleratorVendor, HardwareProfile, HostProfile,
-    };
+    use mangosteen_core::hardware::{Accelerator, AcceleratorVendor, HardwareProfile, HostProfile};
     use mangosteen_core::model::{ModelSpec, Quantization};
 
     fn tmpdir(tag: &str) -> PathBuf {
@@ -1068,10 +1071,7 @@ mod tests {
             let err = e.launch(&plan, Duration::from_millis(600)).unwrap_err();
             // 必须真的超时，不能立刻返回
             assert!(started.elapsed() >= Duration::from_millis(500));
-            assert!(
-                err.to_string().contains("未通过 /health 就绪"),
-                "got {err}"
-            );
+            assert!(err.to_string().contains("未通过 /health 就绪"), "got {err}");
         }
         std::fs::remove_dir_all(&d).ok();
     }

@@ -47,7 +47,10 @@ pub enum AuthStyle {
     /// 自定义头名，如 `Authorization: <token>`（阿里云风格）
     Header { name: String },
     /// 两个头（AccessKeyId + Secret），常见于国内云
-    DoubleHeader { id_header: String, secret_header: String },
+    DoubleHeader {
+        id_header: String,
+        secret_header: String,
+    },
     /// Token 作为查询参数（部分厂商）
     QueryParam { name: String },
 }
@@ -178,10 +181,7 @@ impl EndpointProfile {
     /// 校验模板里必须含 `{id}` 的端点。
     pub fn validate(&self) -> MnResult<()> {
         if self.base_url.trim().is_empty() {
-            return Err(MnError::config(
-                "provider.endpoints.base_url",
-                "不能为空",
-            ));
+            return Err(MnError::config("provider.endpoints.base_url", "不能为空"));
         }
         for (name, tpl) in [
             ("start", &self.start),
@@ -434,10 +434,7 @@ impl<T: Transport> RestDriver<T> {
                 secret_header,
             } => {
                 req = req.with_header(id_header, self.creds.id.clone());
-                req = req.with_header(
-                    secret_header,
-                    self.creds.secret.clone().unwrap_or_default(),
-                );
+                req = req.with_header(secret_header, self.creds.secret.clone().unwrap_or_default());
             }
             AuthStyle::QueryParam { name } => {
                 let sep = if req.url.contains('?') { '&' } else { '?' };
@@ -456,7 +453,12 @@ impl<T: Transport> RestDriver<T> {
     }
 
     /// 解释响应：处理 HTTP 状态、业务状态字段、JSON 解析。
-    fn interpret(&self, resp: HttpResponse, method: &str, url: &str) -> MnResult<serde_json::Value> {
+    fn interpret(
+        &self,
+        resp: HttpResponse,
+        method: &str,
+        url: &str,
+    ) -> MnResult<serde_json::Value> {
         let p = &self.profile;
 
         if !resp.is_success() {
@@ -488,8 +490,11 @@ impl<T: Transport> RestDriver<T> {
             serde_json::from_str(&resp.body).map_err(|e| MnError::Provider {
                 provider: p.name.clone(),
                 code: "invalid_json".to_string(),
-                message: format!("{method} {url} 返回非 JSON（凭证 {}-{}）：{e}",
-                    p.name, self.creds.redacted()),
+                message: format!(
+                    "{method} {url} 返回非 JSON（凭证 {}-{}）：{e}",
+                    p.name,
+                    self.creds.redacted()
+                ),
             })?
         };
 
@@ -563,10 +568,7 @@ impl<T: Transport> RestDriver<T> {
             .get_u64(item)
             .unwrap_or(1)
             .max(1) as u32;
-        let vram = f.scaled(
-            FieldPath::new(f.vram.clone()).get_u64(item),
-            &f.vram_unit,
-        );
+        let vram = f.scaled(FieldPath::new(f.vram.clone()).get_u64(item), &f.vram_unit);
         let cpu_cores = FieldPath::new(f.cpu_cores.clone())
             .get_u64(item)
             .unwrap_or(1)
@@ -575,10 +577,7 @@ impl<T: Transport> RestDriver<T> {
             FieldPath::new(f.memory.clone()).get_u64(item),
             &f.memory_unit,
         );
-        let disk = f.scaled(
-            FieldPath::new(f.disk.clone()).get_u64(item),
-            &f.disk_unit,
-        );
+        let disk = f.scaled(FieldPath::new(f.disk.clone()).get_u64(item), &f.disk_unit);
 
         let image = f
             .image
@@ -645,11 +644,7 @@ impl<T: Transport> RestDriver<T> {
     }
 
     /// 把厂商条目归一化为 [`AvailableSpec`]。
-    fn to_available_spec(
-        &self,
-        item: &serde_json::Value,
-        index: usize,
-    ) -> Option<AvailableSpec> {
+    fn to_available_spec(&self, item: &serde_json::Value, index: usize) -> Option<AvailableSpec> {
         let f = &self.profile.fields;
         // 规格 ID 兼容 `spec_id` 与实例 ID 字段
         let spec_id = FieldPath::new("spec_id".to_string())
@@ -662,10 +657,7 @@ impl<T: Transport> RestDriver<T> {
             .get_u64(item)
             .unwrap_or(1)
             .max(1) as u32;
-        let vram = f.scaled(
-            FieldPath::new(f.vram.clone()).get_u64(item),
-            &f.vram_unit,
-        );
+        let vram = f.scaled(FieldPath::new(f.vram.clone()).get_u64(item), &f.vram_unit);
         if vram == 0 {
             return None; // 无显存信息的条目无法参与打分
         }
@@ -677,10 +669,7 @@ impl<T: Transport> RestDriver<T> {
             FieldPath::new(f.memory.clone()).get_u64(item),
             &f.memory_unit,
         );
-        let disk = f.scaled(
-            FieldPath::new(f.disk.clone()).get_u64(item),
-            &f.disk_unit,
-        );
+        let disk = f.scaled(FieldPath::new(f.disk.clone()).get_u64(item), &f.disk_unit);
         let image = f
             .image
             .as_ref()
@@ -733,7 +722,10 @@ impl<T: Transport> RestDriver<T> {
             Some(item) => self.to_instance(&item),
             // 部分厂商的启停接口只返回成功，不带实例体 → 回查一次
             None => {
-                let url = self.profile.endpoints.url(&self.profile.endpoints.describe, Some(id), None);
+                let url =
+                    self.profile
+                        .endpoints
+                        .url(&self.profile.endpoints.describe, Some(id), None);
                 let v = self.send(HttpRequest::get(url))?;
                 let item = self.extract_item(&v).ok_or_else(|| MnError::Provider {
                     provider: self.profile.name.clone(),
@@ -760,7 +752,10 @@ impl<T: Transport + 'static> ProviderDriver for RestDriver<T> {
     }
 
     fn list_available_specs(&self) -> MnResult<Vec<AvailableSpec>> {
-        let url = self.profile.endpoints.url(&self.profile.endpoints.list_specs, None, None);
+        let url = self
+            .profile
+            .endpoints
+            .url(&self.profile.endpoints.list_specs, None, None);
         let value = self.send(HttpRequest::get(url))?;
         Ok(self
             .extract_items(&value)
@@ -807,13 +802,19 @@ impl<T: Transport + 'static> ProviderDriver for RestDriver<T> {
     }
 
     fn destroy(&self, instance_id: &str) -> MnResult<()> {
-        let url = self.profile.endpoints.url(&self.profile.endpoints.destroy, Some(instance_id), None);
+        let url =
+            self.profile
+                .endpoints
+                .url(&self.profile.endpoints.destroy, Some(instance_id), None);
         let _ = self.send(HttpRequest::delete(url))?;
         Ok(())
     }
 
     fn describe(&self, instance_id: &str) -> MnResult<Instance> {
-        let url = self.profile.endpoints.url(&self.profile.endpoints.describe, Some(instance_id), None);
+        let url =
+            self.profile
+                .endpoints
+                .url(&self.profile.endpoints.describe, Some(instance_id), None);
         let value = self.send(HttpRequest::get(url))?;
         let item = self.extract_item(&value).ok_or_else(|| MnError::Provider {
             provider: self.profile.name.clone(),
@@ -824,7 +825,10 @@ impl<T: Transport + 'static> ProviderDriver for RestDriver<T> {
     }
 
     fn list(&self) -> MnResult<Vec<Instance>> {
-        let url = self.profile.endpoints.url(&self.profile.endpoints.list, None, None);
+        let url = self
+            .profile
+            .endpoints
+            .url(&self.profile.endpoints.list, None, None);
         let value = self.send(HttpRequest::get(url))?;
         self.extract_items(&value)
             .iter()
@@ -993,12 +997,13 @@ mod tests {
 
     #[test]
     fn field_path_navigation() {
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"a":{"b":[{"c":42}]},"s":"txt","n":7}"#,
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"a":{"b":[{"c":42}]},"s":"txt","n":7}"#).unwrap();
         assert_eq!(FieldPath::new("a.b[0].c".to_string()).get_u64(&v), Some(42));
-        assert_eq!(FieldPath::new("s".to_string()).get_str(&v).as_deref(), Some("txt"));
+        assert_eq!(
+            FieldPath::new("s".to_string()).get_str(&v).as_deref(),
+            Some("txt")
+        );
         assert_eq!(FieldPath::new("n".to_string()).get_u64(&v), Some(7));
         assert_eq!(FieldPath::new("missing".to_string()).get(&v), None);
         assert_eq!(FieldPath::new("a.b[9].c".to_string()).get(&v), None);
@@ -1082,12 +1087,7 @@ mod tests {
         // 通过内部 recorded 验证（同一 mock 实例已被 move，改为新建验证）
         // 这里改用直接构造验证 authorize 行为
         let mock2 = MockTransport::always(200, r#"{"code":"Success","data":{"list":[]}}"#);
-        let d2 = RestDriver::new(
-            profile(),
-            Credentials::token("secret-token"),
-            mock2,
-        )
-        .unwrap();
+        let d2 = RestDriver::new(profile(), Credentials::token("secret-token"), mock2).unwrap();
         let req = d2.authorize(HttpRequest::get("https://x/y"));
         assert_eq!(req.header("Authorization"), Some("Bearer secret-token"));
         assert_eq!(req.header("Accept"), Some("application/json"));
@@ -1113,8 +1113,12 @@ mod tests {
         p2.auth = AuthStyle::QueryParam {
             name: "token".into(),
         };
-        let d2 = RestDriver::new(p2, Credentials::token("q"), MockTransport::always(200, "{}"))
-            .unwrap();
+        let d2 = RestDriver::new(
+            p2,
+            Credentials::token("q"),
+            MockTransport::always(200, "{}"),
+        )
+        .unwrap();
         let r2 = d2.authorize(HttpRequest::get("https://x/y?a=1"));
         assert_eq!(r2.url, "https://x/y?a=1&token=q");
 
@@ -1170,7 +1174,11 @@ mod tests {
         let d = driver(MockTransport::always(401, r#"{"msg":"invalid token"}"#));
         let e = d.list().unwrap_err();
         match &e {
-            MnError::Provider { provider, code, message } => {
+            MnError::Provider {
+                provider,
+                code,
+                message,
+            } => {
                 assert_eq!(provider, "autodl");
                 assert_eq!(code, "http_401");
                 assert!(message.contains("invalid token"), "got {message}");
@@ -1206,7 +1214,10 @@ mod tests {
 
     #[test]
     fn missing_id_field_is_reported() {
-        let d = driver(MockTransport::always(200, r#"{"code":"Success","data":{"x":1}}"#));
+        let d = driver(MockTransport::always(
+            200,
+            r#"{"code":"Success","data":{"x":1}}"#,
+        ));
         let e = d.describe("u-1").unwrap_err();
         assert!(e.to_string().contains("uuid"), "got {e}");
     }
@@ -1283,15 +1294,21 @@ mod tests {
     fn invalid_profile_rejected() {
         let mut p = profile();
         p.name = "".into();
-        assert!(RestDriver::new(p, Credentials::token("t"), MockTransport::always(200, "{}")).is_err());
+        assert!(
+            RestDriver::new(p, Credentials::token("t"), MockTransport::always(200, "{}")).is_err()
+        );
 
         let mut p = profile();
         p.states.mapping.clear();
-        assert!(RestDriver::new(p, Credentials::token("t"), MockTransport::always(200, "{}")).is_err());
+        assert!(
+            RestDriver::new(p, Credentials::token("t"), MockTransport::always(200, "{}")).is_err()
+        );
 
         let mut p = profile();
         p.fields.vram_unit = "kb".into();
-        assert!(RestDriver::new(p, Credentials::token("t"), MockTransport::always(200, "{}")).is_err());
+        assert!(
+            RestDriver::new(p, Credentials::token("t"), MockTransport::always(200, "{}")).is_err()
+        );
     }
 
     #[test]

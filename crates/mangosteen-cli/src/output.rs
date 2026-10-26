@@ -53,8 +53,7 @@ pub fn term_width() -> usize {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Console::{
-            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO,
-            STD_OUTPUT_HANDLE,
+            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
         };
         unsafe {
             let h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -84,8 +83,7 @@ pub fn term_height() -> usize {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Console::{
-            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO,
-            STD_OUTPUT_HANDLE,
+            GetConsoleScreenBufferInfo, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFO, STD_OUTPUT_HANDLE,
         };
         unsafe {
             let h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -199,8 +197,7 @@ pub fn suggest(e: &MnError) -> Option<String> {
                 .to_string()
         }
         MnError::InsufficientLocalResource { .. } => {
-            "降低上下文长度或改用更低比特量化；也可以确认云端服务商配置后让它自动降级"
-                .to_string()
+            "降低上下文长度或改用更低比特量化；也可以确认云端服务商配置后让它自动降级".to_string()
         }
         MnError::EngineLaunch { .. } => {
             "先执行 `mangosteen doctor` 检查本地推理引擎是否就绪".to_string()
@@ -243,7 +240,11 @@ pub fn suggest(e: &MnError) -> Option<String> {
 
 /// 打印一个键值表格。
 pub fn print_kv(pairs: &[(String, String)]) {
-    let width = pairs.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let width = pairs
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
     for (k, v) in pairs {
         // 必须先按显示宽度补齐，再上色。若先上色，ANSI 转义序列会被
         // `{:<width$}` 计入宽度，导致对齐错乱、甚至把 `\x1b[0m` 挤到内容里。
@@ -273,7 +274,14 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
         .map(|(i, h)| format!("{:<w$}", h, w = widths[i]))
         .collect();
     println!("  {}", bold(&head.join("  ")));
-    println!("  {}", dim(&widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("  ")));
+    println!(
+        "  {}",
+        dim(&widths
+            .iter()
+            .map(|w| "-".repeat(*w))
+            .collect::<Vec<_>>()
+            .join("  "))
+    );
     for row in rows {
         let cells: Vec<String> = row
             .iter()
@@ -289,13 +297,14 @@ pub fn print_banner() {
     if !color_enabled() {
         return;
     }
-    let title = format!("{} {}", mangosteen_core::identity::PRODUCT_NAME, mangosteen_core::identity::VERSION);
+    let title = format!(
+        "{} {}",
+        mangosteen_core::identity::PRODUCT_NAME,
+        mangosteen_core::identity::VERSION
+    );
     println!();
     println!("  {}  {}", paint("●", Color::Magenta), bold(&title));
-    println!(
-        "  {}",
-        dim("本地算力优先 · 云端算力弹性补位")
-    );
+    println!("  {}", dim("本地算力优先 · 云端算力弹性补位"));
     println!();
 }
 
@@ -414,22 +423,63 @@ mod tests {
     fn every_error_has_a_suggestion() {
         use std::path::PathBuf;
         let cases = vec![
-            MnError::ModelNotFound { path: PathBuf::from("/m") },
-            MnError::GgufFormat { path: PathBuf::from("/m"), reason: "x".into() },
-            MnError::HashMismatch { path: PathBuf::from("/m"), expected: "a".into(), actual: "b".into() },
+            MnError::ModelNotFound {
+                path: PathBuf::from("/m"),
+            },
+            MnError::GgufFormat {
+                path: PathBuf::from("/m"),
+                reason: "x".into(),
+            },
+            MnError::HashMismatch {
+                path: PathBuf::from("/m"),
+                expected: "a".into(),
+                actual: "b".into(),
+            },
             MnError::InsufficientLocalResource { detail: "x".into() },
-            MnError::EngineLaunch { binary: PathBuf::from("x"), reason: "y".into() },
-            MnError::EngineExited { pid: 1, code: Some(1), stderr_tail: "z".into() },
-            MnError::DriverUnavailable { provider: "p".into() },
-            MnError::Provider { provider: "p".into(), code: "c".into(), message: "m".into() },
+            MnError::EngineLaunch {
+                binary: PathBuf::from("x"),
+                reason: "y".into(),
+            },
+            MnError::EngineExited {
+                pid: 1,
+                code: Some(1),
+                stderr_tail: "z".into(),
+            },
+            MnError::DriverUnavailable {
+                provider: "p".into(),
+            },
+            MnError::Provider {
+                provider: "p".into(),
+                code: "c".into(),
+                message: "m".into(),
+            },
             MnError::NoViableCandidate { reason: "r".into() },
-            MnError::Network { stage: "s".into(), reason: "r".into() },
-            MnError::AccessDenied { path: PathBuf::from("/x"), reason: "r".into() },
-            MnError::Config { field: "f".into(), reason: "r".into() },
-            MnError::ConfigIo { path: PathBuf::from("/c"), reason: "r".into() },
-            MnError::InvalidTransition { instance: "i".into(), from: "a".into(), action: "b".into() },
+            MnError::Network {
+                stage: "s".into(),
+                reason: "r".into(),
+            },
+            MnError::AccessDenied {
+                path: PathBuf::from("/x"),
+                reason: "r".into(),
+            },
+            MnError::Config {
+                field: "f".into(),
+                reason: "r".into(),
+            },
+            MnError::ConfigIo {
+                path: PathBuf::from("/c"),
+                reason: "r".into(),
+            },
+            MnError::InvalidTransition {
+                instance: "i".into(),
+                from: "a".into(),
+                action: "b".into(),
+            },
             MnError::BadRequest { reason: "r".into() },
-            MnError::Io { context: "c".into(), reason: "r".into() },
+            MnError::Io {
+                context: "c".into(),
+                reason: "r".into(),
+            },
         ];
         for e in cases {
             let s = suggest(&e);
@@ -450,7 +500,10 @@ mod tests {
         print_table(&["A", "B"], &[]);
         print_table(
             &["名字", "状态"],
-            &[vec!["m1".into(), "ready".into()], vec!["m2".into(), "stopped".into()]],
+            &[
+                vec!["m1".into(), "ready".into()],
+                vec!["m2".into(), "stopped".into()],
+            ],
         );
     }
 

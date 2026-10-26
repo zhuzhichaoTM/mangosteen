@@ -70,10 +70,7 @@ fn example_config_is_valid_toml_and_loads() {
         cfg.scheduler.local_first,
         "示例配置必须保持 local_first = true（产品基线）"
     );
-    assert!(
-        cfg.gateway.port >= 1024,
-        "网关端口不得使用特权端口"
-    );
+    assert!(cfg.gateway.port >= 1024, "网关端口不得使用特权端口");
     assert!(
         !cfg.providers.is_empty(),
         "示例配置应至少包含一个服务商，让用户知道怎么写"
@@ -90,10 +87,7 @@ fn example_config_is_valid_toml_and_loads() {
     // 凭证默认用 env 形式（不要把明文密钥写进示例）
     for (name, p) in &cfg.providers {
         assert!(
-            !matches!(
-                p.secret,
-                mangosteen_core::config::SecretRef::Inline(_)
-            ),
+            !matches!(p.secret, mangosteen_core::config::SecretRef::Inline(_)),
             "示例配置里 `{name}` 不应使用内联明文密钥"
         );
     }
@@ -163,10 +157,7 @@ fn design_doc_covers_all_layers() {
         "mangosteen-gateway",
         "mangosteen-cli",
     ] {
-        assert!(
-            design.contains(layer),
-            "设计文档未覆盖 `{layer}`"
-        );
+        assert!(design.contains(layer), "设计文档未覆盖 `{layer}`");
     }
     // 关键机制必须有文档
     for topic in [
@@ -185,11 +176,13 @@ fn design_doc_covers_all_layers() {
 #[test]
 fn versus_doc_compares_key_dimensions() {
     let doc = read("docs/VERSUS-OLLAMA.md");
-    for dim in ["资源需求评估", "云端算力调度", "多云厂商统一抽象", "节点选择"] {
-        assert!(
-            doc.contains(dim),
-            "差异化分析缺少维度 `{dim}`"
-        );
+    for dim in [
+        "资源需求评估",
+        "云端算力调度",
+        "多云厂商统一抽象",
+        "节点选择",
+    ] {
+        assert!(doc.contains(dim), "差异化分析缺少维度 `{dim}`");
     }
     // 诚实地列出"不做的事"比罗列优点更重要
     assert!(
@@ -271,10 +264,7 @@ fn ci_runs_architecture_constraint_tests() {
         ci.contains("layering"),
         "CI 必须运行架构约束测试（否则分层会腐化）"
     );
-    assert!(
-        ci.contains("cargo test --workspace"),
-        "CI 必须运行全量测试"
-    );
+    assert!(ci.contains("cargo test --workspace"), "CI 必须运行全量测试");
 }
 
 #[test]
@@ -314,10 +304,7 @@ fn example_config_documents_model_sources() {
         c.contains("model_sources"),
         "示例配置缺少 [model_sources.*] 说明"
     );
-    assert!(
-        c.contains("models pull"),
-        "示例配置应提示 models pull 用法"
-    );
+    assert!(c.contains("models pull"), "示例配置应提示 models pull 用法");
 }
 
 #[test]
@@ -411,7 +398,8 @@ fn web_ui_stays_self_contained() {
     let src = read("crates/mangosteen-gateway/src/webui.rs");
     // rust 源里出现这些就说明页面开始依赖外部资源
     assert!(
-        !src.contains("cdn.jsdelivr") && !src.contains("unpkg.com")
+        !src.contains("cdn.jsdelivr")
+            && !src.contains("unpkg.com")
             && !src.contains("cdnjs.cloudflare.com"),
         "webui 不得引用 CDN"
     );

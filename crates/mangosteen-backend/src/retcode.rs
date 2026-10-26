@@ -52,7 +52,9 @@ impl ApiFailure {
     pub fn is_worth_retry(self) -> bool {
         matches!(
             self,
-            ApiFailure::ResourceNotEnough | ApiFailure::ServiceError | ApiFailure::OperationInProgress
+            ApiFailure::ResourceNotEnough
+                | ApiFailure::ServiceError
+                | ApiFailure::OperationInProgress
         )
     }
 
@@ -65,15 +67,11 @@ impl ApiFailure {
             ApiFailure::Arrears => {
                 "账户存在欠费，厂商侧拒绝创建。请到优云智算控制台「订单管理」结清欠费后重试。"
             }
-            ApiFailure::Expired => {
-                "实例或资源已过期。请到控制台「续费管理」处理后再试。"
-            }
+            ApiFailure::Expired => "实例或资源已过期。请到控制台「续费管理」处理后再试。",
             ApiFailure::ImageIncompatible => {
                 "所选镜像不支持该 GPU 卡型。请换一个卡型，或改用该卡型支持的镜像。"
             }
-            ApiFailure::NotVerified => {
-                "账号尚未实名认证。优云智算要求实名后才能创建实例。"
-            }
+            ApiFailure::NotVerified => "账号尚未实名认证。优云智算要求实名后才能创建实例。",
             ApiFailure::OperationInProgress => {
                 "该实例上已有操作正在进行（厂商侧操作锁 10 分钟）。请等待上一条操作完成后再试。"
             }

@@ -62,7 +62,9 @@ pub fn run(args: Args) -> MnResult<i32> {
 
     let require_key = cfg.gateway.require_api_key;
     let api_key = if require_key {
-        cfg.gateway.api_key.resolve(&mangosteen_platform::paths::real_env)?
+        cfg.gateway
+            .api_key
+            .resolve(&mangosteen_platform::paths::real_env)?
     } else {
         String::new()
     };
@@ -73,10 +75,7 @@ pub fn run(args: Args) -> MnResult<i32> {
         output::print_success(&format!("Mangosteen 控制台已启动：{url}"));
         output::print_kv(&[
             ("控制台".into(), url.clone()),
-            (
-                "OpenAI 兼容".into(),
-                format!("http://127.0.0.1:{port}/v1"),
-            ),
+            ("OpenAI 兼容".into(), format!("http://127.0.0.1:{port}/v1")),
             (
                 "鉴权".into(),
                 if require_key {
@@ -112,9 +111,7 @@ pub fn run(args: Args) -> MnResult<i32> {
             Ok(()) => {}
             Err(e) => {
                 // 打不开浏览器不是致命错误：用户可手工粘贴地址
-                output::print_warning(&format!(
-                    "无法自动打开浏览器（{e}）。请手工访问：{url}"
-                ));
+                output::print_warning(&format!("无法自动打开浏览器（{e}）。请手工访问：{url}"));
             }
         }
     }
@@ -179,24 +176,16 @@ mod tests {
 
     #[test]
     fn rejects_privileged_port() {
-        let a = crate::cli::parse_args(&[
-            "ui".to_string(),
-            "--port".to_string(),
-            "80".to_string(),
-        ])
-        .unwrap();
+        let a = crate::cli::parse_args(&["ui".to_string(), "--port".to_string(), "80".to_string()])
+            .unwrap();
         let e = run(a).unwrap_err();
         assert!(e.to_string().contains("特权端口"), "got {e}");
     }
 
     #[test]
     fn rejects_unknown_option() {
-        let a = crate::cli::parse_args(&[
-            "ui".to_string(),
-            "--wat".to_string(),
-            "1".to_string(),
-        ])
-        .unwrap();
+        let a = crate::cli::parse_args(&["ui".to_string(), "--wat".to_string(), "1".to_string()])
+            .unwrap();
         let e = run(a).unwrap_err();
         assert!(e.to_string().contains("--wat"), "got {e}");
     }

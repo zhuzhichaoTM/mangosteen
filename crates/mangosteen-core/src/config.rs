@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::estimate::KvCacheType;
 use crate::error::{MnError, MnResult};
+use crate::estimate::KvCacheType;
 use crate::policy::{ScoreWeights, SelectionStrategy};
 
 /// 密钥引用。三种来源互斥，按顺序解析。
@@ -63,15 +63,11 @@ impl SecretRef {
                 }
             }
             SecretRef::Env(key) => env_lookup(key).ok_or_else(|| {
-                MnError::config(
-                    "secret.env",
-                    format!("环境变量 `{key}` 未设置或非 UTF-8"),
-                )
+                MnError::config("secret.env", format!("环境变量 `{key}` 未设置或非 UTF-8"))
             }),
             SecretRef::File(path) => {
-                let content = std::fs::read_to_string(path).map_err(|e| {
-                    MnError::io(format!("读取密钥文件 {}", path.display()), &e)
-                })?;
+                let content = std::fs::read_to_string(path)
+                    .map_err(|e| MnError::io(format!("读取密钥文件 {}", path.display()), &e))?;
                 let trimmed = content.trim().to_string();
                 if trimmed.is_empty() {
                     Err(MnError::config(
@@ -324,10 +320,7 @@ impl SchedulerConfig {
             ));
         }
         if self.launch_timeout_secs == 0 {
-            return Err(MnError::config(
-                "scheduler.launch_timeout_secs",
-                "不能为 0",
-            ));
+            return Err(MnError::config("scheduler.launch_timeout_secs", "不能为 0"));
         }
         if let Some(p) = self.max_price_per_hour {
             if !p.is_finite() || p <= 0.0 {
@@ -574,10 +567,7 @@ impl LocalConfig {
             ));
         }
         if self.batch_size == 0 || self.batch_size > 8192 {
-            return Err(MnError::config(
-                "local.batch_size",
-                "必须在 1..=8192 之间",
-            ));
+            return Err(MnError::config("local.batch_size", "必须在 1..=8192 之间"));
         }
         if self.port_range_start >= self.port_range_end {
             return Err(MnError::config(
@@ -643,10 +633,7 @@ impl StorageConfig {
             return Err(MnError::config("storage.models_dir", "不能为空"));
         }
         if self.max_model_bytes == 0 {
-            return Err(MnError::config(
-                "storage.max_model_bytes",
-                "不能为 0",
-            ));
+            return Err(MnError::config("storage.max_model_bytes", "不能为 0"));
         }
         Ok(())
     }
@@ -734,10 +721,7 @@ impl GatewayConfig {
     /// 校验。
     pub fn validate(&self) -> MnResult<()> {
         if self.port < 1024 {
-            return Err(MnError::config(
-                "gateway.port",
-                "不得使用特权端口（<1024）",
-            ));
+            return Err(MnError::config("gateway.port", "不得使用特权端口（<1024）"));
         }
         if self.require_api_key && self.api_key.is_none() {
             return Err(MnError::config(
@@ -797,9 +781,7 @@ impl Config {
         // 只改了后者，于是配置路径上永远看不到新源。
         // 现在统一从 builtin() 取，避免两处再次分叉。
         let mut sources: Vec<crate::source::ModelSource> =
-            crate::source::ModelSourceRegistry::builtin()
-                .all()
-                .to_vec();
+            crate::source::ModelSourceRegistry::builtin().all().to_vec();
         for (name, cfg) in &self.model_sources {
             let mut s = cfg.clone();
             if s.name.trim().is_empty() {
@@ -810,10 +792,7 @@ impl Config {
                 None => sources.push(s),
             }
         }
-        crate::source::ModelSourceRegistry::new(
-            sources,
-            self.storage.default_source.clone(),
-        )
+        crate::source::ModelSourceRegistry::new(sources, self.storage.default_source.clone())
     }
 
     /// 校验全部配置。
@@ -848,8 +827,8 @@ impl Config {
 
     /// 从 TOML 文本解析并校验。
     pub fn from_toml(text: &str) -> MnResult<Self> {
-        let cfg: Config = toml::from_str(text)
-            .map_err(|e| MnError::config("toml", format!("解析失败：{e}")))?;
+        let cfg: Config =
+            toml::from_str(text).map_err(|e| MnError::config("toml", format!("解析失败：{e}")))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -862,11 +841,9 @@ impl Config {
 
     /// 从文件加载。
     pub fn load(path: &Path) -> MnResult<Self> {
-        let text = std::fs::read_to_string(path).map_err(|e| {
-            MnError::ConfigIo {
-                path: path.to_path_buf(),
-                reason: e.to_string(),
-            }
+        let text = std::fs::read_to_string(path).map_err(|e| MnError::ConfigIo {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
         })?;
         Config::from_toml(&text).map_err(|e| match e {
             MnError::Config { field, reason } => MnError::ConfigIo {
@@ -884,8 +861,7 @@ impl Config {
                 .map_err(|e| MnError::io(format!("创建目录 {}", parent.display()), &e))?;
         }
         let text = self.to_toml()?;
-        std::fs::write(path, text)
-            .map_err(|e| MnError::io(format!("写入 {}", path.display()), &e))
+        std::fs::write(path, text).map_err(|e| MnError::io(format!("写入 {}", path.display()), &e))
     }
 
     /// 内置示例配置。`mangosteen init` 输出此内容。
@@ -990,7 +966,10 @@ mod tests {
     use crate::model::Quantization;
 
     fn base_config() -> Config {
-        Config::sample(PathBuf::from("/tmp/m/models"), PathBuf::from("/tmp/m/cache"))
+        Config::sample(
+            PathBuf::from("/tmp/m/models"),
+            PathBuf::from("/tmp/m/cache"),
+        )
     }
 
     #[test]
@@ -1039,8 +1018,12 @@ cache_dir = "/c"
 
         let s = SecretRef::Env("MY_KEY".into());
         assert_eq!(
-            s.resolve(|k| if k == "MY_KEY" { Some("v".into()) } else { None })
-                .unwrap(),
+            s.resolve(|k| if k == "MY_KEY" {
+                Some("v".into())
+            } else {
+                None
+            })
+            .unwrap(),
             "v"
         );
         assert!(s.resolve(|_| None).is_err());
@@ -1146,7 +1129,10 @@ cache_dir = "/c"
         let c = p.candidates();
         assert_eq!(c.len(), 3);
         assert_eq!(c[0], PathBuf::from("/explicit/config.toml"));
-        assert_eq!(c[1], PathBuf::from("/home/u/.config/mangosteen/config.toml"));
+        assert_eq!(
+            c[1],
+            PathBuf::from("/home/u/.config/mangosteen/config.toml")
+        );
         assert_eq!(c[2], PathBuf::from("/etc/mangosteen/config.toml"));
     }
 

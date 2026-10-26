@@ -328,7 +328,10 @@ const META_LIMIT: u64 = 256 * 1024 * 1024;
 /// 从实现了 `Read` 的数据流解析 GGUF 元数据。
 ///
 /// `file_size_bytes` 由调用方提供（数据流本身可能不知道总长）。
-pub fn parse_reader<R: Read>(inner: R, file_size_bytes: u64) -> MnResult<(u32, u64, BTreeMap<String, MetaValue>)> {
+pub fn parse_reader<R: Read>(
+    inner: R,
+    file_size_bytes: u64,
+) -> MnResult<(u32, u64, BTreeMap<String, MetaValue>)> {
     let mut r = Reader::new(BufReader::with_capacity(64 * 1024, inner), META_LIMIT);
 
     let magic = r.u32()?;
@@ -345,9 +348,7 @@ pub fn parse_reader<R: Read>(inner: R, file_size_bytes: u64) -> MnResult<(u32, u
     if version == 0 || version > MAX_SUPPORTED_VERSION {
         return Err(MnError::GgufFormat {
             path: std::path::PathBuf::from("<stream>"),
-            reason: format!(
-                "不支持的 GGUF 版本 {version}（支持 1..={MAX_SUPPORTED_VERSION}）"
-            ),
+            reason: format!("不支持的 GGUF 版本 {version}（支持 1..={MAX_SUPPORTED_VERSION}）"),
         });
     }
 
@@ -424,8 +425,8 @@ pub fn parse_file(path: &Path) -> MnResult<GgufInfo> {
 /// 流式解析拿到的是前几 MB，不能据此当总大小——必须由调用方从
 /// 源的元数据（`Content-Range` / 搜索结果里的 size）传进来。
 pub fn parse_stream<R: Read>(inner: R, file_size_bytes: u64) -> MnResult<GgufInfo> {
-    let (version, tensor_count, metadata) = parse_reader(inner, file_size_bytes)
-        .map_err(|e| enrich(e, Path::new("<stream>")))?;
+    let (version, tensor_count, metadata) =
+        parse_reader(inner, file_size_bytes).map_err(|e| enrich(e, Path::new("<stream>")))?;
     extract_info(
         Path::new("<stream>"),
         version,
@@ -488,9 +489,8 @@ fn extract_info(
     // 架构专属键名形如 `qwen2.block_count`，键前缀即 architecture
     let key = |suffix: &str| format!("{architecture}.{suffix}");
 
-    let get_u32 = |k: &str| -> Option<u32> {
-        metadata.get(k).and_then(|v| v.as_u64()).map(|v| v as u32)
-    };
+    let get_u32 =
+        |k: &str| -> Option<u32> { metadata.get(k).and_then(|v| v.as_u64()).map(|v| v as u32) };
 
     let n_layers = get_u32(&key("block_count"));
     let n_heads = get_u32(&key("attention.head_count"));
@@ -600,7 +600,8 @@ fn extract_info(
 pub fn sha256_file(path: &Path) -> MnResult<String> {
     use sha2::{Digest, Sha256};
 
-    let mut f = File::open(path).map_err(|e| MnError::io(format!("打开 {}", path.display()), &e))?;
+    let mut f =
+        File::open(path).map_err(|e| MnError::io(format!("打开 {}", path.display()), &e))?;
     f.seek(SeekFrom::Start(0))
         .map_err(|e| MnError::io("定位文件头", &e))?;
     let mut hasher = Sha256::new();
@@ -629,7 +630,14 @@ pub fn hex_lower(bytes: &[u8]) -> String {
 }
 
 /// 构造最小合法 GGUF 字节序列（测试与自检用，`mangosteen doctor` 会用它验证解析器）。
-pub fn build_test_gguf(architecture: &str, n_layers: u32, n_heads: u32, n_kv_heads: u32, embedding: u32, ctx: u32) -> Vec<u8> {
+pub fn build_test_gguf(
+    architecture: &str,
+    n_layers: u32,
+    n_heads: u32,
+    n_kv_heads: u32,
+    embedding: u32,
+    ctx: u32,
+) -> Vec<u8> {
     fn push_str(out: &mut Vec<u8>, s: &str) {
         out.extend_from_slice(&(s.len() as u64).to_le_bytes());
         out.extend_from_slice(s.as_bytes());
@@ -803,7 +811,11 @@ mod tests {
         // 无 file_type → 默认 Q4_K_M
         assert_eq!(spec.quant, Quantization::Q4KM);
         // 参数量应在 7~9B 量级
-        assert!((7.0..9.0).contains(&spec.params_b), "params={}", spec.params_b);
+        assert!(
+            (7.0..9.0).contains(&spec.params_b),
+            "params={}",
+            spec.params_b
+        );
         assert!(spec.validate().is_ok());
     }
 
@@ -830,7 +842,7 @@ mod tests {
         out.extend_from_slice(&1u64.to_le_bytes()); // key 长度
         out.extend_from_slice(b"k");
         out.extend_from_slice(&9u32.to_le_bytes()); // 值是数组
-        // 逐层嵌套：每层 elem_type=9, n=1
+                                                    // 逐层嵌套：每层 elem_type=9, n=1
         for _ in 0..6 {
             out.extend_from_slice(&9u32.to_le_bytes());
             out.extend_from_slice(&1u64.to_le_bytes());
@@ -920,10 +932,7 @@ mod gguf_type_tests {
             msg.contains("不是可推理的模型文件"),
             "必须直说「这不是模型」，实际：{msg}"
         );
-        assert!(
-            msg.contains("imatrix"),
-            "应指出具体类型，实际：{msg}"
-        );
+        assert!(msg.contains("imatrix"), "应指出具体类型，实际：{msg}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -64,7 +64,9 @@ pub struct ParsedRequest {
 impl ParsedRequest {
     /// 取头部。
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_ascii_lowercase()).map(|s| s.as_str())
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(|s| s.as_str())
     }
 
     /// 请求体转字符串。
@@ -592,14 +594,16 @@ impl GatewayServer {
 
     /// 处理一个连接。
     pub fn handle_connection(&self, stream: TcpStream) -> MnResult<()> {
-        stream
-            .set_read_timeout(Some(Duration::from_secs(120)))
-            .ok();
+        stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
         stream
             .set_write_timeout(Some(Duration::from_secs(300)))
             .ok();
 
-        let mut reader = BufReader::new(stream.try_clone().map_err(|e| MnError::io("复制连接", &e))?);
+        let mut reader = BufReader::new(
+            stream
+                .try_clone()
+                .map_err(|e| MnError::io("复制连接", &e))?,
+        );
         let req = match parse_request(&mut reader) {
             Ok(Some(r)) => r,
             Ok(None) => return Ok(()),
@@ -669,11 +673,7 @@ impl GatewayServer {
     }
 
     /// 流式直通的实际实现（错误由 [`Self::relay_stream`] 统一回写）。
-    fn relay_stream_inner(
-        &self,
-        client: &mut TcpStream,
-        req: &ParsedRequest,
-    ) -> MnResult<()> {
+    fn relay_stream_inner(&self, client: &mut TcpStream, req: &ParsedRequest) -> MnResult<()> {
         // ---- 选后端 ----
         let model = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
@@ -749,8 +749,7 @@ impl GatewayServer {
                 continue;
             }
             // SSE 的有效帧：`data:` / `event:` / 注释 `:`
-            if probe.starts_with("data:") || probe.starts_with("event:") || probe.starts_with(':')
-            {
+            if probe.starts_with("data:") || probe.starts_with("event:") || probe.starts_with(':') {
                 is_sse = true;
                 head_lines.push(text);
                 break;
@@ -927,10 +926,7 @@ impl GatewayServer {
             (m, p) => {
                 let mut r = Response::not_found(p);
                 if p.starts_with("/api/") || p.starts_with("/v1/") {
-                    r = Response::text(
-                        405,
-                        format!("方法 {m} 不被 {p} 支持"),
-                    );
+                    r = Response::text(405, format!("方法 {m} 不被 {p} 支持"));
                 }
                 r
             }
@@ -1197,7 +1193,8 @@ impl GatewayServer {
                 Err(_) => return Response::text(500, "网关状态锁中毒"),
             };
             let models_dir = gw.config().storage.models_dir.clone();
-            gw.list_deployments().unwrap_or_default()
+            gw.list_deployments()
+                .unwrap_or_default()
                 .into_iter()
                 .map(|r| {
                     let pid = r.pid;
@@ -1238,26 +1235,29 @@ impl GatewayServer {
         // 每次都打云端会让页面明显卡顿并触发厂商限流。
         let cloud = self.cloud_section();
 
-        Response::json(200, &serde_json::json!({
-            "cpu_usage": snap.cpu_usage,
-            "physical_cores": snap.physical_cores,
-            "logical_cores": snap.logical_cores,
-            "total_memory_bytes": snap.total_memory_bytes,
-            "available_memory_bytes": snap.available_memory_bytes,
-            "memory_usage": snap.memory_usage(),
-            "sampled_at_ms": snap.sampled_at_ms,
-            "os": hardware.0.os,
-            "arch": hardware.0.arch,
-            "cpu_model": hardware.0.host.cpu_model,
-            "accelerators": hardware.0.accelerators.iter().map(|a| serde_json::json!({
-                "name": a.name,
-                "vendor": format!("{:?}", a.vendor),
-                "vram_bytes": a.usable_accelerator_memory(),
-            })).collect::<Vec<_>>(),
-            "disk_free_bytes": disk_free,
-            "deployments": dep_json,
-            "cloud": cloud,
-        }))
+        Response::json(
+            200,
+            &serde_json::json!({
+                "cpu_usage": snap.cpu_usage,
+                "physical_cores": snap.physical_cores,
+                "logical_cores": snap.logical_cores,
+                "total_memory_bytes": snap.total_memory_bytes,
+                "available_memory_bytes": snap.available_memory_bytes,
+                "memory_usage": snap.memory_usage(),
+                "sampled_at_ms": snap.sampled_at_ms,
+                "os": hardware.0.os,
+                "arch": hardware.0.arch,
+                "cpu_model": hardware.0.host.cpu_model,
+                "accelerators": hardware.0.accelerators.iter().map(|a| serde_json::json!({
+                    "name": a.name,
+                    "vendor": format!("{:?}", a.vendor),
+                    "vram_bytes": a.usable_accelerator_memory(),
+                })).collect::<Vec<_>>(),
+                "disk_free_bytes": disk_free,
+                "deployments": dep_json,
+                "cloud": cloud,
+            }),
+        )
     }
 
     /// 设备页的「云端算力」段。
@@ -1278,16 +1278,18 @@ impl GatewayServer {
         };
 
         // 指标保持 0~1 比例，与本地 `cpu_usage` 语义一致，格式化交给前端。
-        let metrics = snap.metrics.as_ref().map(|m| serde_json::json!({
-            "cpu_usage": m.cpu_usage,
-            "memory_usage": m.memory_usage,
-            "gpu_usage": m.gpu_usage,
-            "gpu_memory_usage": m.gpu_memory_usage,
-            "disk_usage": m.disk_usage,
-            "data_disk_usage": m.data_disk_usage,
-            "sampled_at": m.sampled_at,
-            "has_any": m.has_any(),
-        }));
+        let metrics = snap.metrics.as_ref().map(|m| {
+            serde_json::json!({
+                "cpu_usage": m.cpu_usage,
+                "memory_usage": m.memory_usage,
+                "gpu_usage": m.gpu_usage,
+                "gpu_memory_usage": m.gpu_memory_usage,
+                "disk_usage": m.disk_usage,
+                "data_disk_usage": m.data_disk_usage,
+                "sampled_at": m.sampled_at,
+                "has_any": m.has_any(),
+            })
+        });
 
         serde_json::json!({
             "active": true,
@@ -1693,7 +1695,8 @@ impl GatewayServer {
 
         let mut opts = mangosteen_base::webfetch::FetchOptions::default();
         if let Some(n) = parsed.get("max_chars").and_then(|v| v.as_u64()) {
-            opts.max_chars = (n as usize).min(mangosteen_base::webfetch::FetchOptions::default().max_chars);
+            opts.max_chars =
+                (n as usize).min(mangosteen_base::webfetch::FetchOptions::default().max_chars);
         }
 
         match mangosteen_base::webfetch::fetch(url, &opts) {
@@ -1768,7 +1771,10 @@ impl GatewayServer {
                             if ev.is_local_viable() {
                                 (true, None)
                             } else {
-                                (false, Some("本地资源不足（点「部署」可查看云端方案）".to_string()))
+                                (
+                                    false,
+                                    Some("本地资源不足（点「部署」可查看云端方案）".to_string()),
+                                )
                             }
                         }
                         Err(e) => (false, Some(e.to_string())),
@@ -1851,10 +1857,7 @@ impl GatewayServer {
                 None => {
                     return Response::json(
                         400,
-                        &ErrorResponse::bad_request(
-                            format!("未知模型源 `{s}`"),
-                            Some("source"),
-                        ),
+                        &ErrorResponse::bad_request(format!("未知模型源 `{s}`"), Some("source")),
                     )
                 }
             },
@@ -2034,18 +2037,16 @@ impl GatewayServer {
                     opts.expected_bytes = Some(f.size);
                     opts.expected_sha256 = f.sha256.clone();
                 }
-                None => {
-                    return Response::json(
-                        400,
-                        &ErrorResponse::bad_request(
-                            format!(
-                                "仓库 {} 中不存在文件 `{target}`。先用「搜索」查看该仓库可下载的文件",
-                                model.repo
-                            ),
-                            Some("model"),
+                None => return Response::json(
+                    400,
+                    &ErrorResponse::bad_request(
+                        format!(
+                            "仓库 {} 中不存在文件 `{target}`。先用「搜索」查看该仓库可下载的文件",
+                            model.repo
                         ),
-                    )
-                }
+                        Some("model"),
+                    ),
+                ),
             },
             Err(e) => {
                 // 元数据取不到不算致命：仍然允许下载（只是没有大小与哈希校验）。
@@ -2204,10 +2205,7 @@ impl GatewayServer {
                                 &jid_p,
                                 crate::progress::DeployStage::Assessing,
                                 crate::progress::StageOutcome::Done,
-                                format!(
-                                    "{}（元数据来自远端文件头）",
-                                    probe_assessed_detail(&ev)
-                                ),
+                                format!("{}（元数据来自远端文件头）", probe_assessed_detail(&ev)),
                             );
                             ev
                         }
@@ -2262,7 +2260,8 @@ impl GatewayServer {
                 // prepare 在下载**之前**执行，那时文件还不存在，
                 // plan.model_path 是空的。这里补上真实落盘路径，
                 // 否则引擎会报「模型文件不存在：」（冒号后为空）。
-                let prepared = prepared.with_model_path(final_path_for_commit.to_string_lossy().to_string());
+                let prepared =
+                    prepared.with_model_path(final_path_for_commit.to_string_lossy().to_string());
                 let sink_jobs = jobs_c.clone();
                 let sink_id = jid_c.clone();
                 let sink = move |stage: crate::progress::DeployStage,
@@ -2578,10 +2577,7 @@ impl GatewayServer {
             true => Response::json(200, &serde_json::json!({ "ok": true, "id": id })),
             false => Response::json(
                 400,
-                &ErrorResponse::bad_request(
-                    format!("任务 `{id}` 不存在或已结束"),
-                    Some("id"),
-                ),
+                &ErrorResponse::bad_request(format!("任务 `{id}` 不存在或已结束"), Some("id")),
             ),
         }
     }
@@ -2909,9 +2905,7 @@ impl GatewayServer {
         };
         let body = match serde_json::to_vec(&normalized) {
             Ok(b) => b,
-            Err(e) => {
-                return Response::error(&MnError::bad_request(format!("序列化失败：{e}")))
-            }
+            Err(e) => return Response::error(&MnError::bad_request(format!("序列化失败：{e}"))),
         };
         self.forward_json("chat/completions", &body, &target)
     }
@@ -2940,9 +2934,7 @@ impl GatewayServer {
         };
         let body = match serde_json::to_vec(&normalized) {
             Ok(b) => b,
-            Err(e) => {
-                return Response::error(&MnError::bad_request(format!("序列化失败：{e}")))
-            }
+            Err(e) => return Response::error(&MnError::bad_request(format!("序列化失败：{e}"))),
         };
         self.forward_json("completions", &body, &target)
     }
@@ -2971,9 +2963,7 @@ impl GatewayServer {
         };
         let body = match serde_json::to_vec(&normalized) {
             Ok(b) => b,
-            Err(e) => {
-                return Response::error(&MnError::bad_request(format!("序列化失败：{e}")))
-            }
+            Err(e) => return Response::error(&MnError::bad_request(format!("序列化失败：{e}"))),
         };
         self.forward_json("embeddings", &body, &target)
     }
@@ -3049,7 +3039,10 @@ fn is_stream_request(req: &ParsedRequest) -> bool {
     if req.method != "POST" {
         return false;
     }
-    if !matches!(req.path.as_str(), "/v1/chat/completions" | "/v1/completions") {
+    if !matches!(
+        req.path.as_str(),
+        "/v1/chat/completions" | "/v1/completions"
+    ) {
         return false;
     }
     serde_json::from_slice::<serde_json::Value>(&req.body)
@@ -3083,18 +3076,15 @@ fn write_chunk(stream: &mut TcpStream, data: &[u8]) -> bool {
 /// 极简 HTTP POST（仅用于转发到本机/隧道后的上游）。
 ///
 /// 上游一定是 `127.0.0.1`，因此不需要 TLS。
-pub fn http_post_json(
-    url: &str,
-    body: &[u8],
-    timeout: Duration,
-) -> MnResult<(u16, String)> {
+pub fn http_post_json(url: &str, body: &[u8], timeout: Duration) -> MnResult<(u16, String)> {
     let (host_port, path) = split_url(url)?;
-    let mut stream = TcpStream::connect_timeout(&host_port.parse().map_err(|_| {
-        MnError::Network {
+    let mut stream = TcpStream::connect_timeout(
+        &host_port.parse().map_err(|_| MnError::Network {
             stage: "连接上游".to_string(),
             reason: format!("非法地址 {host_port}"),
-        }
-    })?, timeout)
+        })?,
+        timeout,
+    )
     .map_err(|e| MnError::Network {
         stage: "连接上游推理服务".to_string(),
         reason: format!("{host_port}：{e}。请确认部署仍在运行"),
@@ -3115,12 +3105,10 @@ pub fn http_post_json(
         })?;
 
     let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .map_err(|e| MnError::Network {
-            stage: "读取上游响应".to_string(),
-            reason: e.to_string(),
-        })?;
+    stream.read_to_end(&mut raw).map_err(|e| MnError::Network {
+        stage: "读取上游响应".to_string(),
+        reason: e.to_string(),
+    })?;
 
     parse_http_response(&raw)
 }
@@ -3344,7 +3332,10 @@ mod tests {
 
     #[test]
     fn percent_decode_leaves_plain_paths_untouched() {
-        assert_eq!(percent_decode_path("/v1/chat/completions"), "/v1/chat/completions");
+        assert_eq!(
+            percent_decode_path("/v1/chat/completions"),
+            "/v1/chat/completions"
+        );
         assert_eq!(percent_decode_path("/api/models"), "/api/models");
     }
 
@@ -3416,7 +3407,8 @@ mod tests {
     #[test]
     fn parsed_request_header_is_case_insensitive() {
         let mut p = req("GET", "/x");
-        p.headers.insert("content-type".into(), "application/json".into());
+        p.headers
+            .insert("content-type".into(), "application/json".into());
         assert_eq!(p.header("Content-Type"), Some("application/json"));
         assert_eq!(p.header("CONTENT-TYPE"), Some("application/json"));
     }
@@ -3467,9 +3459,17 @@ mod stream_tests {
             r#"{"model":"m","messages":[]}"#
         )));
         // 非推理路由
-        assert!(!is_stream_request(&req("POST", "/api/deploy", r#"{"stream":true}"#)));
+        assert!(!is_stream_request(&req(
+            "POST",
+            "/api/deploy",
+            r#"{"stream":true}"#
+        )));
         // 非 POST
-        assert!(!is_stream_request(&req("GET", "/v1/chat/completions", "{}")));
+        assert!(!is_stream_request(&req(
+            "GET",
+            "/v1/chat/completions",
+            "{}"
+        )));
         // body 不是 JSON → 不能崩，按非流式处理
         assert!(!is_stream_request(&req(
             "POST",
@@ -3481,21 +3481,25 @@ mod stream_tests {
     /// SSE 单行改写：只改 `model`，帧结构必须原样保留。
     #[test]
     fn rewrites_single_sse_line() {
-        let line = r#"data: {"model":"/abs/path/model.gguf","choices":[{"delta":{"content":"你"}}]}"#;
+        let line =
+            r#"data: {"model":"/abs/path/model.gguf","choices":[{"delta":{"content":"你"}}]}"#;
         let out = protocol::rewrite_sse_line(line, "qwen2.5:q4_k_m");
         assert!(out.starts_with("data: "), "帧前缀必须保留：{out}");
         let payload = out.trim_start_matches("data: ");
         let v: serde_json::Value = serde_json::from_str(payload).expect("仍是合法 JSON");
         assert_eq!(v["model"], "qwen2.5:q4_k_m", "model 必须改写为模型 ID");
-        assert_eq!(
-            v["choices"][0]["delta"]["content"], "你",
-            "内容不能丢"
-        );
+        assert_eq!(v["choices"][0]["delta"]["content"], "你", "内容不能丢");
 
         // [DONE] 与非 data 行原样返回
-        assert_eq!(protocol::rewrite_sse_line("data: [DONE]", "x"), "data: [DONE]");
+        assert_eq!(
+            protocol::rewrite_sse_line("data: [DONE]", "x"),
+            "data: [DONE]"
+        );
         assert_eq!(protocol::rewrite_sse_line("", "x"), "");
-        assert_eq!(protocol::rewrite_sse_line("event: ping", "x"), "event: ping");
+        assert_eq!(
+            protocol::rewrite_sse_line("event: ping", "x"),
+            "event: ping"
+        );
     }
 
     /// chunked 帧格式必须严格符合 HTTP/1.1：`<hex len>\r\n<data>\r\n`。

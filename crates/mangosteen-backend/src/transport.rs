@@ -256,12 +256,12 @@ impl Transport for CurlTransport {
                 stage: "写入请求体".to_string(),
                 reason: "curl 子进程的 stdin 不可用".to_string(),
             })?;
-            stdin.write_all(body.as_bytes()).map_err(|e| {
-                MnError::Network {
+            stdin
+                .write_all(body.as_bytes())
+                .map_err(|e| MnError::Network {
                     stage: "写入请求体".to_string(),
                     reason: format!("管道写入失败：{e}"),
-                }
-            })?;
+                })?;
         }
         let out = child.wait_with_output().map_err(|e| MnError::Network {
             stage: "等待 curl".to_string(),
@@ -287,7 +287,11 @@ impl MockTransport {
     pub fn always(status: u16, body: impl Into<String>) -> Self {
         let body = body.into();
         Self {
-            responses: Mutex::new((0..32).map(|_| Ok(HttpResponse::new(status, body.clone()))).collect()),
+            responses: Mutex::new(
+                (0..32)
+                    .map(|_| Ok(HttpResponse::new(status, body.clone())))
+                    .collect(),
+            ),
             recorded: Mutex::new(Vec::new()),
         }
     }
@@ -330,10 +334,7 @@ impl MockTransport {
 
     /// 复制收到的请求列表。
     pub fn requests(&self) -> Vec<HttpRequest> {
-        self.recorded
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
+        self.recorded.lock().map(|v| v.clone()).unwrap_or_default()
     }
 }
 
@@ -416,7 +417,10 @@ mod tests {
             !args.iter().any(|a| a.contains("secret-value")),
             "请求体内容不得进入进程参数：{args:?}"
         );
-        assert_eq!(args.last().map(|s| s.as_str()), Some("https://api.compshare.cn"));
+        assert_eq!(
+            args.last().map(|s| s.as_str()),
+            Some("https://api.compshare.cn")
+        );
     }
 
     #[test]
@@ -436,8 +440,14 @@ mod tests {
     fn mock_records_and_sequences() {
         let m = MockTransport::sequence(vec!["a".to_string(), "b".to_string()]);
         let t: &dyn Transport = &m;
-        assert_eq!(t.execute(&HttpRequest::form_post("u", "x")).unwrap().body, "a");
-        assert_eq!(t.execute(&HttpRequest::form_post("u", "x")).unwrap().body, "b");
+        assert_eq!(
+            t.execute(&HttpRequest::form_post("u", "x")).unwrap().body,
+            "a"
+        );
+        assert_eq!(
+            t.execute(&HttpRequest::form_post("u", "x")).unwrap().body,
+            "b"
+        );
         assert_eq!(m.call_count(), 2);
         assert_eq!(m.requests()[0].body.as_deref(), Some("x"));
     }
@@ -456,7 +466,9 @@ mod tests {
             timeout_secs: 3,
             curl_bin: "/nonexistent/curl-xyz".to_string(),
         };
-        let e = t.execute(&HttpRequest::form_post("https://x/y", "a=b")).unwrap_err();
+        let e = t
+            .execute(&HttpRequest::form_post("https://x/y", "a=b"))
+            .unwrap_err();
         assert!(e.to_string().contains("curl"), "got {e}");
     }
 

@@ -88,7 +88,10 @@ fn show(args: Args) -> MnResult<i32> {
             },
             "providers": providers,
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         return Ok(0);
     }
 
@@ -98,7 +101,10 @@ fn show(args: Args) -> MnResult<i32> {
 
     println!("{}", output::bold("网关"));
     output::print_kv(&[
-        ("监听".into(), format!("{}:{}", cfg.gateway.host, cfg.gateway.port)),
+        (
+            "监听".into(),
+            format!("{}:{}", cfg.gateway.host, cfg.gateway.port),
+        ),
         (
             "鉴权".into(),
             if cfg.gateway.require_api_key {
@@ -130,7 +136,10 @@ fn show(args: Args) -> MnResult<i32> {
                 cfg.scheduler.weights.hardware
             ),
         ),
-        ("降级重试上限".into(), cfg.scheduler.max_fallbacks.to_string()),
+        (
+            "降级重试上限".into(),
+            cfg.scheduler.max_fallbacks.to_string(),
+        ),
         ("价格上限".into(), opt_num(cfg.scheduler.max_price_per_hour)),
     ]);
 
@@ -146,30 +155,54 @@ fn show(args: Args) -> MnResult<i32> {
                 .unwrap_or_else(|| output::dim("自动在 PATH 中查找").to_string()),
         ),
         ("默认上下文".into(), cfg.local.default_context.to_string()),
-        ("KV 精度".into(), cfg.local.kv_cache.as_cli_value().to_string()),
+        (
+            "KV 精度".into(),
+            cfg.local.kv_cache.as_cli_value().to_string(),
+        ),
         ("批大小".into(), cfg.local.batch_size.to_string()),
         (
             "CPU 回退".into(),
-            if cfg.local.allow_cpu_fallback { "允许" } else { "禁止" }.to_string(),
+            if cfg.local.allow_cpu_fallback {
+                "允许"
+            } else {
+                "禁止"
+            }
+            .to_string(),
         ),
         (
             "部分卸载".into(),
-            if cfg.local.allow_partial_offload { "允许" } else { "禁止" }.to_string(),
+            if cfg.local.allow_partial_offload {
+                "允许"
+            } else {
+                "禁止"
+            }
+            .to_string(),
         ),
         (
             "端口区间".into(),
-            format!("{}-{}", cfg.local.port_range_start, cfg.local.port_range_end),
+            format!(
+                "{}-{}",
+                cfg.local.port_range_start, cfg.local.port_range_end
+            ),
         ),
     ]);
 
     println!();
     println!("{}", output::bold("存储与访问控制"));
     output::print_kv(&[
-        ("模型库".into(), cfg.storage.models_dir.display().to_string()),
+        (
+            "模型库".into(),
+            cfg.storage.models_dir.display().to_string(),
+        ),
         ("缓存".into(), cfg.storage.cache_dir.display().to_string()),
         (
             "哈希校验".into(),
-            if cfg.storage.verify_hash { "开启" } else { "关闭" }.to_string(),
+            if cfg.storage.verify_hash {
+                "开启"
+            } else {
+                "关闭"
+            }
+            .to_string(),
         ),
         (
             "单文件上限".into(),
@@ -274,23 +307,33 @@ fn path(args: Args) -> MnResult<i32> {
         ),
         (
             "模型库".into(),
-            mangosteen_platform::paths::models_dir(env).display().to_string(),
+            mangosteen_platform::paths::models_dir(env)
+                .display()
+                .to_string(),
         ),
         (
             "下载缓存".into(),
-            mangosteen_platform::paths::cache_dir(env).display().to_string(),
+            mangosteen_platform::paths::cache_dir(env)
+                .display()
+                .to_string(),
         ),
         (
             "日志".into(),
-            mangosteen_platform::paths::log_dir(env).display().to_string(),
+            mangosteen_platform::paths::log_dir(env)
+                .display()
+                .to_string(),
         ),
         (
             "部署台账".into(),
-            mangosteen_platform::paths::state_file(env).display().to_string(),
+            mangosteen_platform::paths::state_file(env)
+                .display()
+                .to_string(),
         ),
         (
             "模型台账".into(),
-            mangosteen_platform::paths::model_index_file(env).display().to_string(),
+            mangosteen_platform::paths::model_index_file(env)
+                .display()
+                .to_string(),
         ),
     ]);
     Ok(0)

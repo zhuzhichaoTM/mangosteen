@@ -144,11 +144,12 @@ pub fn detect_library_dirs(exe: &Path, extra: &[PathBuf]) -> Vec<PathBuf> {
 /// 保留调用方已存在的环境变量内容（追加而非覆盖），
 /// 这样用户自己设置的路径不会失效。
 pub fn join_library_path(dirs: &[PathBuf], existing: Option<&str>) -> String {
-    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
-    let mut parts: Vec<String> = dirs
-        .iter()
-        .map(|d| d.display().to_string())
-        .collect();
+    let sep = if cfg!(target_os = "windows") {
+        ";"
+    } else {
+        ":"
+    };
+    let mut parts: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
     if let Some(e) = existing {
         if !e.trim().is_empty() {
             parts.push(e.to_string());
@@ -205,10 +206,7 @@ mod tests {
     fn detect_respects_extra_dirs() {
         let tmp = std::env::temp_dir();
         let dirs = detect_library_dirs(Path::new("/nonexistent/bin/llama-server"), &[tmp.clone()]);
-        assert!(
-            dirs.iter().any(|d| d == &tmp),
-            "显式追加的目录应被包含"
-        );
+        assert!(dirs.iter().any(|d| d == &tmp), "显式追加的目录应被包含");
     }
 
     #[test]

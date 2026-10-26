@@ -18,9 +18,7 @@
 
 use std::process::Command;
 
-use mangosteen_core::hardware::{
-    Accelerator, AcceleratorVendor, HardwareProfile, HostProfile,
-};
+use mangosteen_core::hardware::{Accelerator, AcceleratorVendor, HardwareProfile, HostProfile};
 use serde::{Deserialize, Serialize};
 
 /// 采集结果。
@@ -715,7 +713,10 @@ core id\t\t: 1
     #[test]
     fn json_field_extraction() {
         assert_eq!(
-            json_field(r#"  "sppci_model" : "AMD Radeon Pro 5500M","#, "sppci_model"),
+            json_field(
+                r#"  "sppci_model" : "AMD Radeon Pro 5500M","#,
+                "sppci_model"
+            ),
             Some("AMD Radeon Pro 5500M".to_string())
         );
         assert_eq!(json_field(r#""foo" : "bar","#, "sppci_model"), None);

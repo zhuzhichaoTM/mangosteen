@@ -80,7 +80,10 @@ impl ConfigStore {
 
     /// 使用平台默认路径构造。
     pub fn platform_default(explicit: Option<PathBuf>) -> Self {
-        let paths = mangosteen_platform::paths::config_paths(&mangosteen_platform::paths::real_env, explicit);
+        let paths = mangosteen_platform::paths::config_paths(
+            &mangosteen_platform::paths::real_env,
+            explicit,
+        );
         Self::new(paths)
     }
 
@@ -282,7 +285,10 @@ mod tests {
         });
         let l = s2.load().unwrap();
         assert_eq!(l.source, ConfigSource::Explicit(explicit));
-        assert_eq!(l.config.storage.models_dir, PathBuf::from("/explicit-models"));
+        assert_eq!(
+            l.config.storage.models_dir,
+            PathBuf::from("/explicit-models")
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -299,7 +305,8 @@ mod tests {
             user_config_dir: user.clone(),
             system_config_dir: Some(sys.clone()),
         });
-        s.save_to(&minimal_config(), &sys.join("config.toml")).unwrap();
+        s.save_to(&minimal_config(), &sys.join("config.toml"))
+            .unwrap();
 
         let l = s.load().unwrap();
         assert!(matches!(l.source, ConfigSource::System(_)));

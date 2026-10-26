@@ -40,18 +40,18 @@ pub mod cloudmon;
 pub mod gateway;
 pub mod progress;
 pub mod protocol;
-pub mod scheduler;
 pub mod pulljobs;
+pub mod scheduler;
 pub mod server;
 pub mod webui;
 
 pub use assess::{Assessor, DeploymentRequest, Evaluated};
 pub use cloudmon::{spawn_cloud_monitor, CloudMonitor};
-pub use progress::{DeployStage, StageEvent, StageOutcome};
 pub use gateway::{
     ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot, Gateway, GatewayBuilder,
     GatewayStatus,
 };
+pub use progress::{DeployStage, StageEvent, StageOutcome};
 
 /// 在后台预热网关的慢速探测（引擎版本）。
 ///
@@ -87,8 +87,8 @@ pub fn spawn_warm_up(gateway: std::sync::Arc<std::sync::Mutex<Gateway>>) {
     });
 }
 pub use protocol::BackendTarget;
-pub use server::GatewayServer;
 pub use scheduler::{Decision, Scheduler, SchedulerOutcome};
+pub use server::GatewayServer;
 
 /// 云端能力诊断（供 `mangosteen doctor` / `config validate` 使用）。
 ///
@@ -110,7 +110,12 @@ pub fn probe_providers(
     config: &mangosteen_core::config::Config,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let build = mangosteen_cloud::build_registry(config);
-    let names = build.registry.names().iter().map(|s| s.to_string()).collect();
+    let names = build
+        .registry
+        .names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     (names, build.skipped)
 }
 
@@ -197,15 +202,12 @@ pub fn diagnose_engine_cached(
     }
 }
 
-
 /// 诊断本地推理引擎（含动态库路径探测）。
 ///
 /// 这里刻意复用 `mangosteen_local::LlamaCppEngine` 的定位与环境注入逻辑，
 /// 而不是自己拼一遍——两处逻辑一旦分叉，doctor 的结论就会与实际部署行为
 /// 不一致（曾出现过：doctor 说 OK，部署却因库路径失败）。
-pub fn diagnose_engine(
-    config: Option<&mangosteen_core::config::Config>,
-) -> EngineDiagnosis {
+pub fn diagnose_engine(config: Option<&mangosteen_core::config::Config>) -> EngineDiagnosis {
     let local = config.map(|c| c.local.clone()).unwrap_or_default();
     let engine = mangosteen_local::LlamaCppEngine::from_config(local.engine_path.clone(), None)
         .with_engine_env(local.engine_env.clone())
@@ -259,10 +261,7 @@ pub fn engine_runtime_layout() -> Vec<(String, String)> {
     let mut out = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            out.push((
-                "可执行文件同级".to_string(),
-                dir.display().to_string(),
-            ));
+            out.push(("可执行文件同级".to_string(), dir.display().to_string()));
             out.push((
                 "随包运行时".to_string(),
                 dir.join("runtime").display().to_string(),
@@ -272,9 +271,7 @@ pub fn engine_runtime_layout() -> Vec<(String, String)> {
     out.push((
         "系统 PATH".to_string(),
         // 分隔符由平台层给：网关层不得出现平台分支（跨平台兼容原则）
-        mangosteen_platform::process::join_paths(
-            &mangosteen_platform::process::search_dirs(&[]),
-        ),
+        mangosteen_platform::process::join_paths(&mangosteen_platform::process::search_dirs(&[])),
     ));
     out
 }

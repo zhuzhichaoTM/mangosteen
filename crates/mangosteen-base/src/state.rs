@@ -282,9 +282,7 @@ impl StateStore {
     pub fn prune_destroyed(&self) -> MnResult<usize> {
         let mut state = self.load()?;
         let before = state.deployments.len();
-        state
-            .deployments
-            .retain(|r| !r.status.is_terminal());
+        state.deployments.retain(|r| !r.status.is_terminal());
         let removed = before - state.deployments.len();
         if removed > 0 {
             self.save(&state)?;
@@ -364,7 +362,8 @@ mod tests {
     fn upsert_persists_immediately() {
         let d = tmpdir("upsert");
         let s = StateStore::new(d.join("state.json"));
-        s.upsert(DeploymentRecord::from_plan(sample_plan("d1"))).unwrap();
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
 
         // 新建 store 实例模拟进程重启
         let s2 = StateStore::new(d.join("state.json"));
@@ -379,9 +378,11 @@ mod tests {
     fn happy_path_transitions() {
         let d = tmpdir("trans");
         let s = StateStore::new(d.join("state.json"));
-        s.upsert(DeploymentRecord::from_plan(sample_plan("d1"))).unwrap();
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
 
-        s.set_status("d1", DeploymentStatus::Provisioning, None).unwrap();
+        s.set_status("d1", DeploymentStatus::Provisioning, None)
+            .unwrap();
         s.set_pid("d1", 4242).unwrap();
         let r = s.set_status("d1", DeploymentStatus::Ready, None).unwrap();
         assert_eq!(r.status, DeploymentStatus::Ready);
@@ -397,10 +398,13 @@ mod tests {
     fn illegal_transition_rejected() {
         let d = tmpdir("illegal");
         let s = StateStore::new(d.join("state.json"));
-        s.upsert(DeploymentRecord::from_plan(sample_plan("d1"))).unwrap();
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
 
         // Planned 不能直接到 Ready
-        let e = s.set_status("d1", DeploymentStatus::Ready, None).unwrap_err();
+        let e = s
+            .set_status("d1", DeploymentStatus::Ready, None)
+            .unwrap_err();
         assert!(matches!(e, MnError::InvalidTransition { .. }));
         std::fs::remove_dir_all(&d).ok();
     }
@@ -409,8 +413,10 @@ mod tests {
     fn destroyed_is_terminal() {
         let d = tmpdir("terminal");
         let s = StateStore::new(d.join("state.json"));
-        s.upsert(DeploymentRecord::from_plan(sample_plan("d1"))).unwrap();
-        s.set_status("d1", DeploymentStatus::Destroyed, None).unwrap();
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Destroyed, None)
+            .unwrap();
         assert!(s
             .set_status("d1", DeploymentStatus::Provisioning, None)
             .is_err());
@@ -422,8 +428,10 @@ mod tests {
     fn failure_path_records_reason() {
         let d = tmpdir("fail");
         let s = StateStore::new(d.join("state.json"));
-        s.upsert(DeploymentRecord::from_plan(sample_plan("d1"))).unwrap();
-        s.set_status("d1", DeploymentStatus::Provisioning, None).unwrap();
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Provisioning, None)
+            .unwrap();
         let r = s
             .set_status(
                 "d1",
@@ -440,11 +448,14 @@ mod tests {
         let d = tmpdir("active");
         let s = StateStore::new(d.join("state.json"));
         for id in ["a", "b", "c"] {
-            s.upsert(DeploymentRecord::from_plan(sample_plan(id))).unwrap();
+            s.upsert(DeploymentRecord::from_plan(sample_plan(id)))
+                .unwrap();
         }
-        s.set_status("a", DeploymentStatus::Provisioning, None).unwrap();
+        s.set_status("a", DeploymentStatus::Provisioning, None)
+            .unwrap();
         s.set_status("a", DeploymentStatus::Ready, None).unwrap();
-        s.set_status("b", DeploymentStatus::Provisioning, None).unwrap();
+        s.set_status("b", DeploymentStatus::Provisioning, None)
+            .unwrap();
         // c 保持 Planned
         let active = s.list_active().unwrap();
         assert_eq!(active.len(), 2);
@@ -457,9 +468,12 @@ mod tests {
     fn remove_and_prune() {
         let d = tmpdir("prune");
         let s = StateStore::new(d.join("state.json"));
-        s.upsert(DeploymentRecord::from_plan(sample_plan("a"))).unwrap();
-        s.upsert(DeploymentRecord::from_plan(sample_plan("b"))).unwrap();
-        s.set_status("a", DeploymentStatus::Destroyed, None).unwrap();
+        s.upsert(DeploymentRecord::from_plan(sample_plan("a")))
+            .unwrap();
+        s.upsert(DeploymentRecord::from_plan(sample_plan("b")))
+            .unwrap();
+        s.set_status("a", DeploymentStatus::Destroyed, None)
+            .unwrap();
 
         assert_eq!(s.prune_destroyed().unwrap(), 1);
         assert_eq!(s.list().unwrap().len(), 1);

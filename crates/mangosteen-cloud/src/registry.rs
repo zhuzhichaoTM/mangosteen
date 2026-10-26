@@ -28,10 +28,8 @@ use mangosteen_core::cloud::{DriverRegistry, ProviderDriver};
 use mangosteen_core::config::{Config, ProviderConfig, SecretRef};
 use mangosteen_core::{MnError, MnResult};
 
-use super::drivers::{
-    builtin_profile, Credentials, CurlTransport, RestDriverProfile, Transport,
-};
 use super::drivers::rest::SharedRestDriver;
+use super::drivers::{builtin_profile, Credentials, CurlTransport, RestDriverProfile, Transport};
 
 /// 构建结果。
 pub struct RegistryBuild {
@@ -122,7 +120,10 @@ impl mangosteen_backend::Transport for BackendTransport {
             body: req.body.clone(),
         };
         let resp = self.0.execute(&converted)?;
-        Ok(mangosteen_backend::HttpResponse::new(resp.status, resp.body))
+        Ok(mangosteen_backend::HttpResponse::new(
+            resp.status,
+            resp.body,
+        ))
     }
 }
 
@@ -204,13 +205,12 @@ fn resolve_private_key(name: &str, pc: &ProviderConfig) -> MnResult<String> {
 fn resolve_profile(name: &str, pc: &ProviderConfig) -> MnResult<RestDriverProfile> {
     // 优先用配置里覆盖的 profile（用户自定义或厂商改版后的修正）
     if let Some(overridden) = pc.profile.as_ref() {
-        let mut p: RestDriverProfile =
-            serde_json::from_value(overridden.clone()).map_err(|e| {
-                MnError::config(
-                    format!("providers.{name}.profile"),
-                    format!("profile 结构非法：{e}"),
-                )
-            })?;
+        let mut p: RestDriverProfile = serde_json::from_value(overridden.clone()).map_err(|e| {
+            MnError::config(
+                format!("providers.{name}.profile"),
+                format!("profile 结构非法：{e}"),
+            )
+        })?;
         if p.name.trim().is_empty() {
             p.name = name.to_string();
         }
@@ -218,13 +218,11 @@ fn resolve_profile(name: &str, pc: &ProviderConfig) -> MnResult<RestDriverProfil
         return Ok(p);
     }
     // 退回内置
-    builtin_profile(&pc.driver).ok_or_else(|| {
-        MnError::DriverUnavailable {
-            provider: format!(
-                "{}（驱动 `{}` 既无内置 profile，配置里也没有 profile 段）",
-                name, pc.driver
-            ),
-        }
+    builtin_profile(&pc.driver).ok_or_else(|| MnError::DriverUnavailable {
+        provider: format!(
+            "{}（驱动 `{}` 既无内置 profile，配置里也没有 profile 段）",
+            name, pc.driver
+        ),
     })
 }
 
@@ -347,9 +345,7 @@ pub fn diagnose(config: &Config) -> Vec<String> {
         .map(|p| p.secret.clone())
         .unwrap_or(SecretRef::None)
     {
-        out.push(
-            "检测到内联明文密钥：建议改用 secret = { env = \"VAR_NAME\" } 形式".to_string(),
-        );
+        out.push("检测到内联明文密钥：建议改用 secret = { env = \"VAR_NAME\" } 形式".to_string());
     }
     out
 }
@@ -451,10 +447,8 @@ mod tests {
     #[test]
     fn missing_secret_is_skipped_not_fatal() {
         let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider("autodl", SecretRef::None, true),
-        );
+        c.providers
+            .insert("autodl".into(), provider("autodl", SecretRef::None, true));
         c.providers.insert(
             "ucloud".into(),
             provider("ucloud", SecretRef::Inline("tok".into()), true),
@@ -535,10 +529,8 @@ mod tests {
     #[test]
     fn diagnose_flags_missing_credentials() {
         let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider("autodl", SecretRef::None, true),
-        );
+        c.providers
+            .insert("autodl".into(), provider("autodl", SecretRef::None, true));
         let d = diagnose(&c);
         assert!(d.iter().any(|s| s.contains("未配置")), "{d:?}");
     }
@@ -669,7 +661,8 @@ mod tests {
         );
         let d = diagnose(&c);
         assert!(
-            d.iter().any(|s| s.contains("compshare") && s.contains("私钥")),
+            d.iter()
+                .any(|s| s.contains("compshare") && s.contains("私钥")),
             "{d:?}"
         );
     }
@@ -682,10 +675,7 @@ mod tests {
         let mut c = base_config();
         c.providers.insert(
             "compshare".into(),
-            compshare_provider(
-                SecretRef::Env("MANGOSTEEN_TEST_COMPSHARE_SK".into()),
-                true,
-            ),
+            compshare_provider(SecretRef::Env("MANGOSTEEN_TEST_COMPSHARE_SK".into()), true),
         );
         let d = diagnose(&c);
         assert!(d.is_empty(), "合法配置不应有告警：{d:?}");

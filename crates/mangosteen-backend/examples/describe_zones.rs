@@ -45,7 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== DescribeCompShareSupportZone ===");
     println!(
         "筛选地域 : {}",
-        filter.clone().unwrap_or_else(|| "不筛选（全部地域）".to_string())
+        filter
+            .clone()
+            .unwrap_or_else(|| "不筛选（全部地域）".to_string())
     );
     println!();
 
@@ -91,7 +93,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             z.zone_id,
             z.describe,
             z.resource_kind(),
-            if z.is_deployable() { "✓" } else { "✗ 仅容器" },
+            if z.is_deployable() {
+                "✓"
+            } else {
+                "✗ 仅容器"
+            },
             if z.unsupported_image_types.is_empty() {
                 "-".to_string()
             } else {
@@ -106,7 +112,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ok = true;
 
     // 字段完整性：地域与可用区名不能为空（否则无法用于其它接口）
-    let fields_ok = resp.zones.iter().all(|z| !z.region.is_empty() && !z.zone.is_empty());
+    let fields_ok = resp
+        .zones
+        .iter()
+        .all(|z| !z.region.is_empty() && !z.zone.is_empty());
     println!(
         "  {} Region/Zone 字段完整",
         if fields_ok { "✓" } else { "✗" }
@@ -114,7 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ok &= fields_ok;
 
     // ID 字段：文档承诺有值，实测应全部非 0
-    let ids_ok = resp.zones.iter().all(|z| z.region_id != 0 && z.zone_id != 0);
+    let ids_ok = resp
+        .zones
+        .iter()
+        .all(|z| z.region_id != 0 && z.zone_id != 0);
     println!(
         "  {} RegionId/ZoneId 均有值（{} 个）",
         if ids_ok { "✓" } else { "✗" },
@@ -125,11 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 类型区分：应能正确识别虚机与容器
     let vm = resp.deployable();
     let pod = resp.zones.len() - vm.len();
-    println!(
-        "  ✓ 可用区分类：虚机 {} 个 / 容器 {} 个",
-        vm.len(),
-        pod
-    );
+    println!("  ✓ 可用区分类：虚机 {} 个 / 容器 {} 个", vm.len(), pod);
 
     // 镜像兼容性：能识别「不支持 System 镜像」的可用区
     let sys_zones = resp
@@ -157,7 +165,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     z.zone,
                     z.describe,
                     z.resource_kind(),
-                    if good { "" } else { "，无系统镜像兼容区" }
+                    if good {
+                        ""
+                    } else {
+                        "，无系统镜像兼容区"
+                    }
                 );
                 // 只对「存在兼容区的地域」要求选中兼容区
                 let has_compat = resp

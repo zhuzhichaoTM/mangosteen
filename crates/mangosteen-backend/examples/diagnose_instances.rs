@@ -78,11 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 total_across_zones += n;
                 println!(
                     "  {:<12} {:<12} {:<10} TotalCount={:<4} 本页={}",
-                    z.region,
-                    z.zone,
-                    z.describe,
-                    total,
-                    n
+                    z.region, z.zone, z.describe, total, n
                 );
                 // 有数据就把 ID 列出来
                 if let Some(arr) = v.get("UHostSet").and_then(|x| x.as_array()) {
@@ -133,12 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_ref()
                         .map(|g| format!("{}GB", g.value_gb))
                         .unwrap_or_else(|| "?".to_string());
-                    let max_gpu = t
-                        .machine_sizes
-                        .iter()
-                        .map(|s| s.gpu)
-                        .max()
-                        .unwrap_or(0);
+                    let max_gpu = t.machine_sizes.iter().map(|s| s.gpu).max().unwrap_or(0);
                     println!(
                         "      {:<10} 显存{:<6} 最多{}卡  {}",
                         t.name, vram, max_gpu, t.description

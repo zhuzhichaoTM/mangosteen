@@ -73,8 +73,9 @@ pub fn normalize_chat(mut req: ChatRequest, target: &BackendTarget) -> MnResult<
         req.model = target.model_id.clone();
     }
 
-    req.validate()
-        .map_err(|(param, reason)| MnError::bad_request(format!("参数 `{param}` 非法：{reason}")))?;
+    req.validate().map_err(|(param, reason)| {
+        MnError::bad_request(format!("参数 `{param}` 非法：{reason}"))
+    })?;
 
     Ok(req)
 }
@@ -87,9 +88,9 @@ pub fn normalize_completion(
     if req.model == AUTO_MODEL_ID || req.model.trim().is_empty() {
         req.model = target.model_id.clone();
     }
-    req.sampling
-        .validate()
-        .map_err(|(param, reason)| MnError::bad_request(format!("参数 `{param}` 非法：{reason}")))?;
+    req.sampling.validate().map_err(|(param, reason)| {
+        MnError::bad_request(format!("参数 `{param}` 非法：{reason}"))
+    })?;
     Ok(req)
 }
 
@@ -395,10 +396,7 @@ mod tests {
     fn embedding_normalization_rejects_blank_input() {
         let r = EmbeddingRequest {
             model: "auto".into(),
-            input: mangosteen_core::openai::EmbeddingInput::Multiple(vec![
-                "  ".into(),
-                "".into(),
-            ]),
+            input: mangosteen_core::openai::EmbeddingInput::Multiple(vec!["  ".into(), "".into()]),
         };
         assert!(normalize_embedding(r, &target()).is_err());
 
@@ -444,14 +442,7 @@ mod tests {
 
     #[test]
     fn parses_valid_chat_response() {
-        let r = ChatResponse::single(
-            "id1",
-            "m",
-            0,
-            "hello",
-            FinishReason::Stop,
-            Usage::new(3, 1),
-        );
+        let r = ChatResponse::single("id1", "m", 0, "hello", FinishReason::Stop, Usage::new(3, 1));
         let body = serde_json::to_string(&r).unwrap();
         let parsed = parse_chat_response(&body, 200).unwrap();
         assert_eq!(parsed.choices[0].message.content, "hello");
@@ -498,9 +489,7 @@ mod tests {
         });
         assert_eq!(code, 400);
 
-        let (code, _) = error_payload(&MnError::InsufficientLocalResource {
-            detail: "x".into(),
-        });
+        let (code, _) = error_payload(&MnError::InsufficientLocalResource { detail: "x".into() });
         assert_eq!(code, 503);
     }
 

@@ -124,7 +124,8 @@ pub fn fetch(url: &str, opts: &FetchOptions) -> MnResult<FetchedPage> {
     // 从 stdout 尾部解析 meta 行
     let raw = out.stdout;
     let (body_bytes, meta) = split_meta(&raw);
-    let (status, content_type, bytes, final_url) = meta.unwrap_or((0, String::new(), 0, url.to_string()));
+    let (status, content_type, bytes, final_url) =
+        meta.unwrap_or((0, String::new(), 0, url.to_string()));
 
     let mut warnings = Vec::new();
 
@@ -143,7 +144,8 @@ pub fn fetch(url: &str, opts: &FetchOptions) -> MnResult<FetchedPage> {
     }
 
     let body = String::from_utf8_lossy(&body_bytes).to_string();
-    let (title, text) = if ct_lower.contains("html") || body.trim_start().starts_with("<!DOCTYPE")
+    let (title, text) = if ct_lower.contains("html")
+        || body.trim_start().starts_with("<!DOCTYPE")
         || body.trim_start().starts_with("<html")
     {
         html_to_text(&body)
@@ -200,9 +202,7 @@ fn validate_url(url: &str) -> MnResult<()> {
 fn split_meta(raw: &[u8]) -> (Vec<u8>, Option<(u16, String, u64, String)>) {
     const MARK: &[u8] = b"\n__META__";
     // 从尾部找标记（正文里理论上不会出现该串，但仍从后往前找更稳）
-    let pos = raw
-        .windows(MARK.len())
-        .rposition(|w| w == MARK);
+    let pos = raw.windows(MARK.len()).rposition(|w| w == MARK);
     let Some(pos) = pos else {
         return (raw.to_vec(), None);
     };
@@ -246,8 +246,27 @@ pub fn html_to_text(html: &str) -> (Option<String>, String) {
     // 因此保留 head 不会引入噪声。
     const SKIP: &[&str] = &["script", "style", "noscript", "svg", "iframe", "canvas"];
     const BLOCK: &[&str] = &[
-        "p", "div", "br", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
-        "blockquote", "pre", "hr", "table", "ul", "ol", "dt", "dd",
+        "p",
+        "div",
+        "br",
+        "tr",
+        "li",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "section",
+        "article",
+        "blockquote",
+        "pre",
+        "hr",
+        "table",
+        "ul",
+        "ol",
+        "dt",
+        "dd",
     ];
 
     let mut out = String::with_capacity(html.len() / 2);
@@ -380,11 +399,12 @@ fn decode_entity(name: &str) -> char {
         _ => {
             // 数字实体 &#123; / &#x1F600;
             if let Some(rest) = name.strip_prefix('#') {
-                let code = if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
-                    u32::from_str_radix(hex, 16).ok()
-                } else {
-                    rest.parse::<u32>().ok()
-                };
+                let code =
+                    if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        rest.parse::<u32>().ok()
+                    };
                 if let Some(c) = code.and_then(char::from_u32) {
                     return c;
                 }

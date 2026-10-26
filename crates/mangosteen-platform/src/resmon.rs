@@ -197,8 +197,15 @@ fn read_cpu_times() -> Option<(u64, u64)> {
 fn memory_bytes() -> Option<(u64, u64)> {
     // 总量：hw.memsize；可用：vm_stat 的 free + inactive（inactive 可被回收）
     let total = {
-        let out = Command::new("sysctl").arg("-n").arg("hw.memsize").output().ok()?;
-        String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok()?
+        let out = Command::new("sysctl")
+            .arg("-n")
+            .arg("hw.memsize")
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()?
     };
 
     let out = Command::new("vm_stat").output().ok()?;

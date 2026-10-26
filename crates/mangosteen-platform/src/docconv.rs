@@ -38,7 +38,10 @@ pub fn convert_command(path: &Path, ext: &str) -> Option<ConvertCommand> {
     #[cfg(target_os = "macos")]
     {
         // textutil 是 macOS 自带的富文本转换器
-        if matches!(ext, "doc" | "docx" | "rtf" | "html" | "htm" | "odt" | "wordml") {
+        if matches!(
+            ext,
+            "doc" | "docx" | "rtf" | "html" | "htm" | "odt" | "wordml"
+        ) {
             return Some(ConvertCommand {
                 program: "textutil".to_string(),
                 args: vec![

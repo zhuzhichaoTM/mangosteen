@@ -161,13 +161,11 @@ impl CapacityMatrix {
     /// 排序偏好：先比卡型偏好（4090/5090 这类消费卡更适合本项目定位），
     /// 再比最小可用配置的规模（越小越便宜）。
     pub fn recommend(&self) -> Option<&ZoneGpuCapacity> {
-        self.in_stock()
-            .into_iter()
-            .min_by_key(|e| {
-                let pref = gpu_preference_rank(&e.gpu_type);
-                let spec = e.smallest_available().map(|s| (s.gpu, s.cpu, s.mem_gb));
-                (pref, spec)
-            })
+        self.in_stock().into_iter().min_by_key(|e| {
+            let pref = gpu_preference_rank(&e.gpu_type);
+            let spec = e.smallest_available().map(|s| (s.gpu, s.cpu, s.mem_gb));
+            (pref, spec)
+        })
     }
 
     /// 全部「有货」的 (可用区, 卡型, 规格) 三元组，用于批量查价。
@@ -287,7 +285,10 @@ impl PriceBoard {
     ///
     /// 大模型部署的瓶颈是显存，因此「每 GiB 显存每小时多少钱」
     /// 比裸价格更能反映真实性价比。
-    pub fn sorted_by_vram_efficiency(&self, vram_gb_of: impl Fn(&str) -> u64) -> Vec<&PricedOption> {
+    pub fn sorted_by_vram_efficiency(
+        &self,
+        vram_gb_of: impl Fn(&str) -> u64,
+    ) -> Vec<&PricedOption> {
         let mut v: Vec<&PricedOption> = self.options.iter().collect();
         v.sort_by(|a, b| {
             let ea = a.per_hour_cny / (vram_gb_of(&a.spec.gpu_type).max(1) as f64);
@@ -383,9 +384,11 @@ pub fn price_quotes<T: Transport>(
         a.per_hour_cny
             .partial_cmp(&b.per_hour_cny)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(
-                (a.spec.gpu, a.spec.cpu, a.spec.mem_gb).cmp(&(b.spec.gpu, b.spec.cpu, b.spec.mem_gb)),
-            )
+            .then((a.spec.gpu, a.spec.cpu, a.spec.mem_gb).cmp(&(
+                b.spec.gpu,
+                b.spec.cpu,
+                b.spec.mem_gb,
+            )))
             .then(a.spec.gpu_type.cmp(&b.spec.gpu_type))
             .then(a.spec.zone.cmp(&b.spec.zone))
     });
@@ -769,11 +772,8 @@ pub fn scan<T: Transport>(
                 .filter(|z| z.in_region(region))
                 .map(|z| format!("{}（{}）", z.zone, z.describe))
                 .collect();
-            let selected: Vec<ZoneInfo> = resp
-                .zones
-                .into_iter()
-                .filter(|z| z.zone == *zone)
-                .collect();
+            let selected: Vec<ZoneInfo> =
+                resp.zones.into_iter().filter(|z| z.zone == *zone).collect();
             if selected.is_empty() {
                 return Err(mangosteen_core::MnError::bad_request(format!(
                     "地域 {region} 下不存在可用区 `{zone}`。该地域可用：{}",
@@ -896,7 +896,12 @@ mod tests {
         }
     }
 
-    fn entry(gpu_type: &str, region: &str, zone: &str, specs: Vec<CapacitySpec>) -> ZoneGpuCapacity {
+    fn entry(
+        gpu_type: &str,
+        region: &str,
+        zone: &str,
+        specs: Vec<CapacitySpec>,
+    ) -> ZoneGpuCapacity {
         ZoneGpuCapacity {
             region: region.into(),
             zone: zone.into(),
@@ -933,9 +938,24 @@ mod tests {
     #[test]
     fn matrix_aggregates_by_type_and_region() {
         let mut m = CapacityMatrix::default();
-        m.entries.push(entry("4090", "cn-wlcb", "cn-wlcb-01", vec![spec(1, 16, 64, true)]));
-        m.entries.push(entry("4090", "cn-sh2", "cn-sh2-02", vec![spec(1, 16, 64, true)]));
-        m.entries.push(entry("5090", "cn-wlcb", "cn-wlcb-01", vec![spec(1, 16, 96, false)]));
+        m.entries.push(entry(
+            "4090",
+            "cn-wlcb",
+            "cn-wlcb-01",
+            vec![spec(1, 16, 64, true)],
+        ));
+        m.entries.push(entry(
+            "4090",
+            "cn-sh2",
+            "cn-sh2-02",
+            vec![spec(1, 16, 64, true)],
+        ));
+        m.entries.push(entry(
+            "5090",
+            "cn-wlcb",
+            "cn-wlcb-01",
+            vec![spec(1, 16, 96, false)],
+        ));
         m.entries.push(ZoneGpuCapacity {
             region: "cn-bj2".into(),
             zone: "cn-bj2-03".into(),
@@ -967,10 +987,25 @@ mod tests {
     fn out_of_stock_types_excludes_failures_and_stocked() {
         let mut m = CapacityMatrix::default();
         // 4090 查询成功但全平台无货 → 属于「缺货」
-        m.entries.push(entry("4090", "cn-wlcb", "cn-wlcb-01", vec![spec(1, 16, 64, false)]));
-        m.entries.push(entry("4090", "cn-sh2", "cn-sh2-02", vec![spec(1, 16, 64, false)]));
+        m.entries.push(entry(
+            "4090",
+            "cn-wlcb",
+            "cn-wlcb-01",
+            vec![spec(1, 16, 64, false)],
+        ));
+        m.entries.push(entry(
+            "4090",
+            "cn-sh2",
+            "cn-sh2-02",
+            vec![spec(1, 16, 64, false)],
+        ));
         // 5090 有货 → 不属于缺货
-        m.entries.push(entry("5090", "cn-wlcb", "cn-wlcb-01", vec![spec(1, 16, 96, true)]));
+        m.entries.push(entry(
+            "5090",
+            "cn-wlcb",
+            "cn-wlcb-01",
+            vec![spec(1, 16, 96, true)],
+        ));
         // A100 查询失败 → 不属于缺货（是「不知道」）
         m.entries.push(ZoneGpuCapacity {
             region: "cn-x".into(),
@@ -992,8 +1027,18 @@ mod tests {
     fn out_of_stock_drops_type_stocked_elsewhere() {
         // 同一卡型：一个区缺货、另一个区有货 → 不算全平台缺货
         let mut m = CapacityMatrix::default();
-        m.entries.push(entry("4090", "cn-a", "cn-a-01", vec![spec(1, 16, 64, false)]));
-        m.entries.push(entry("4090", "cn-b", "cn-b-01", vec![spec(1, 16, 64, true)]));
+        m.entries.push(entry(
+            "4090",
+            "cn-a",
+            "cn-a-01",
+            vec![spec(1, 16, 64, false)],
+        ));
+        m.entries.push(entry(
+            "4090",
+            "cn-b",
+            "cn-b-01",
+            vec![spec(1, 16, 64, true)],
+        ));
         assert!(m.out_of_stock_types().is_empty());
         assert!(m.is_anywhere_in_stock("4090"));
     }
@@ -1002,9 +1047,19 @@ mod tests {
     fn recommend_prefers_consumer_cards() {
         let mut m = CapacityMatrix::default();
         // A100 有货但偏好靠后
-        m.entries.push(entry("A100", "cn-wlcb", "cn-wlcb-01", vec![spec(1, 16, 64, true)]));
+        m.entries.push(entry(
+            "A100",
+            "cn-wlcb",
+            "cn-wlcb-01",
+            vec![spec(1, 16, 64, true)],
+        ));
         // 4090 有货且优先
-        m.entries.push(entry("4090", "cn-sh2", "cn-sh2-02", vec![spec(1, 16, 64, true)]));
+        m.entries.push(entry(
+            "4090",
+            "cn-sh2",
+            "cn-sh2-02",
+            vec![spec(1, 16, 64, true)],
+        ));
         let best = m.recommend().unwrap();
         assert_eq!(best.gpu_type, "4090");
         assert_eq!(best.region, "cn-sh2");
@@ -1013,7 +1068,8 @@ mod tests {
     #[test]
     fn recommend_none_when_nothing_in_stock() {
         let mut m = CapacityMatrix::default();
-        m.entries.push(entry("4090", "cn", "z", vec![spec(1, 16, 64, false)]));
+        m.entries
+            .push(entry("4090", "cn", "z", vec![spec(1, 16, 64, false)]));
         assert!(m.recommend().is_none());
     }
 
@@ -1131,14 +1187,7 @@ mod tests {
     }
 
     fn client(vendor: ZoneVendor) -> CompshareClient<ZoneVendor> {
-        CompshareClient::new(
-            crate::DEFAULT_ENDPOINT,
-            cred(),
-            vendor,
-            "",
-            "",
-        )
-        .unwrap()
+        CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap()
     }
 
     #[test]
@@ -1160,7 +1209,10 @@ mod tests {
         let m = scan_all(&c, "img-1", &ScanOptions::default()).unwrap();
 
         // 容器可用区被跳过并记录原因
-        assert!(m.skipped.iter().any(|s| s.contains("cn-bj2-03") && s.contains("容器")));
+        assert!(m
+            .skipped
+            .iter()
+            .any(|s| s.contains("cn-bj2-03") && s.contains("容器")));
         // 两个虚机可用区各一条
         assert_eq!(m.entries.len(), 2);
         assert_eq!(m.in_stock_count(), 1);
@@ -1197,7 +1249,11 @@ mod tests {
         let vendor = ZoneVendor::new(ZONES_TWO_VM)
             .with_type("cn-wlcb-01", two_types)
             .with_type("cn-sh2-02", two_types)
-            .with_capacity("cn-wlcb-01", "4090", r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#);
+            .with_capacity(
+                "cn-wlcb-01",
+                "4090",
+                r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#,
+            );
         let c = client(vendor);
         let opts = ScanOptions {
             gpu_allowlist: vec!["4090".into()],
@@ -1214,7 +1270,11 @@ mod tests {
         let vendor = ZoneVendor::new(ZONES_TWO_VM)
             .with_type("cn-wlcb-01", types_4090())
             .with_type("cn-sh2-02", types_4090())
-            .with_capacity("cn-wlcb-01", "4090", r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#)
+            .with_capacity(
+                "cn-wlcb-01",
+                "4090",
+                r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#,
+            )
             .with_capacity("cn-sh2-02", "4090", r#"[]"#);
         let c = client(vendor);
         let opts = ScanOptions {
@@ -1249,8 +1309,7 @@ mod tests {
         );
         // 每个可用区的请求应带自己的 Zone，不能张冠李戴
         for call in cap {
-            let zone_ok = (call.contains("Zone=cn-wlcb-01")
-                && call.contains("Region=cn-wlcb"))
+            let zone_ok = (call.contains("Zone=cn-wlcb-01") && call.contains("Region=cn-wlcb"))
                 || (call.contains("Zone=cn-sh2-02") && call.contains("Region=cn-sh2"));
             assert!(zone_ok, "Region 与 Zone 必须成对且匹配：{call}");
         }
@@ -1392,10 +1451,7 @@ mod tests {
         assert_eq!(order, vec!["MonthOnly", "4090", "A100"]);
         // 裸价格最便宜的是 MonthOnly，但若只看「可随时释放」则是 4090
         assert_eq!(board.cheapest().unwrap().spec.gpu_type, "MonthOnly");
-        assert_eq!(
-            board.cheapest_releasable().unwrap().spec.gpu_type,
-            "4090"
-        );
+        assert_eq!(board.cheapest_releasable().unwrap().spec.gpu_type, "4090");
     }
 
     // ---------------------------------------------------------- 真实查价
@@ -1520,10 +1576,8 @@ mod tests {
     #[test]
     fn price_quotes_tolerates_partial_failure() {
         // A100 未注册价格 → 失败，但不影响 5090
-        let vendor = PriceVendor::new("cn-wlcb-01").with_price(
-            "5090",
-            r#"[{"ChargeType":"Postpay","Instance":2.0}]"#,
-        );
+        let vendor = PriceVendor::new("cn-wlcb-01")
+            .with_price("5090", r#"[{"ChargeType":"Postpay","Instance":2.0}]"#);
         let c = CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap();
         let board = price_quotes(
             &c,
@@ -1561,13 +1615,7 @@ mod tests {
     fn price_quotes_all_failed_returns_empty_board() {
         let vendor = PriceVendor::new("cn-wlcb-01");
         let c = CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap();
-        let board = price_quotes(
-            &c,
-            &[priced_spec("4090", 64)],
-            "Postpay",
-            "CLOUD_SSD",
-            100,
-        );
+        let board = price_quotes(&c, &[priced_spec("4090", 64)], "Postpay", "CLOUD_SSD", 100);
         assert!(board.options.is_empty());
         assert_eq!(board.failed.len(), 1);
         assert!(board.cheapest().is_none());
@@ -1629,7 +1677,10 @@ mod tests {
 
     #[test]
     fn precheck_detects_available() {
-        let c = stock_client(r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#, false);
+        let c = stock_client(
+            r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#,
+            false,
+        );
         assert_eq!(
             precheck_stock(&c, &priced_spec("5090", 64), &ScanOptions::default(), "img"),
             PrecheckResult::Available
@@ -1639,7 +1690,10 @@ mod tests {
     #[test]
     fn precheck_detects_sold_out() {
         // 快照说有货，复核时已售罄 —— 这正是需要复核的原因
-        let c = stock_client(r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":false}]"#, false);
+        let c = stock_client(
+            r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":false}]"#,
+            false,
+        );
         assert_eq!(
             precheck_stock(&c, &priced_spec("5090", 64), &ScanOptions::default(), "img"),
             PrecheckResult::SoldOut
@@ -1649,7 +1703,10 @@ mod tests {
     #[test]
     fn precheck_sold_out_when_combo_missing() {
         // 未出现在结果里的组合视为售罄（保守）
-        let c = stock_client(r#"[{"Gpu":2,"Cpu":32,"Mem":128,"ResourceEnough":true}]"#, false);
+        let c = stock_client(
+            r#"[{"Gpu":2,"Cpu":32,"Mem":128,"ResourceEnough":true}]"#,
+            false,
+        );
         assert_eq!(
             precheck_stock(&c, &priced_spec("5090", 64), &ScanOptions::default(), "img"),
             PrecheckResult::SoldOut
@@ -1670,7 +1727,10 @@ mod tests {
     #[test]
     fn precheck_unknown_on_zone_mismatch() {
         // 客户端 zone 与 spec zone 不一致 → 厂商报参数错 → Unknown
-        let c = stock_client(r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#, false);
+        let c = stock_client(
+            r#"[{"Gpu":1,"Cpu":16,"Mem":64,"ResourceEnough":true}]"#,
+            false,
+        );
         let mut spec = priced_spec("5090", 64);
         spec.zone = "cn-sh2-02".into();
         assert_eq!(

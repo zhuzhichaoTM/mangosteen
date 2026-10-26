@@ -66,7 +66,10 @@ fn info(args: Args) -> MnResult<i32> {
             "search_dirs": diag.search_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
             "layout": layout.iter().map(|(k, v)| serde_json::json!({"kind": k, "path": v})).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         return Ok(if diag.is_ready() { 0 } else { 1 });
     }
 
@@ -97,10 +100,7 @@ fn info(args: Args) -> MnResult<i32> {
 
     println!();
     println!("{}", output::bold("动态库搜索路径"));
-    println!(
-        "  变量 {}",
-        diag.library_path_var
-    );
+    println!("  变量 {}", diag.library_path_var);
     match &diag.library_path {
         Some(v) => println!("  值   {}", output::dim(v)),
         None => println!(
@@ -140,11 +140,7 @@ fn locate(args: Args) -> MnResult<i32> {
             Ok(0)
         }
         None => {
-            output::print_warning(
-                diag.error
-                    .as_deref()
-                    .unwrap_or("未找到 llama-server"),
-            );
+            output::print_warning(diag.error.as_deref().unwrap_or("未找到 llama-server"));
             println!();
             println!("  已搜索目录：");
             for d in &diag.search_dirs {
@@ -194,8 +190,7 @@ fn env(args: Args) -> MnResult<i32> {
             let sep_str = mangosteen_platform::process::path_separator();
             println!(
                 "export {}=\"{v}{sep_str}${}\"",
-                diag.library_path_var,
-                diag.library_path_var
+                diag.library_path_var, diag.library_path_var
             );
         }
         return Ok(0);

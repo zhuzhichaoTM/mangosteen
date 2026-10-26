@@ -36,7 +36,10 @@ pub fn run(args: Args) -> MnResult<i32> {
                 "ready": a.ready,
             })).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         return Ok(0);
     }
 
@@ -162,7 +165,10 @@ fn print_active(active: &[mangosteen_gateway::ActiveDeployment]) {
             ]
         })
         .collect();
-    output::print_table(&["部署 ID", "模型", "算力来源", "状态", "端口", "健康"], &rows);
+    output::print_table(
+        &["部署 ID", "模型", "算力来源", "状态", "端口", "健康"],
+        &rows,
+    );
 }
 
 #[cfg(test)]

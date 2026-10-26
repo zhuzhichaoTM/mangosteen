@@ -25,7 +25,8 @@ use mangosteen_core::{MnError, MnResult};
 /// 在 `PATH` 中查找可执行文件。
 ///
 /// 返回 `Ok(None)` 表示未找到（不是错误——调用方可能要走云端链路）。
-pub fn find_executable(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {    let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
+pub fn find_executable(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
         vec![
             PathBuf::from(format!("{name}.exe")),
             PathBuf::from(format!("{name}.cmd")),
@@ -71,7 +72,11 @@ pub const fn path_separator() -> &'static str {
 ///
 /// 平台差异（`:` vs `;`）集中在这里，上层不必写 `cfg!(target_os)` 分支。
 pub fn join_paths(paths: &[PathBuf]) -> String {
-    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let sep = if cfg!(target_os = "windows") {
+        ";"
+    } else {
+        ":"
+    };
     paths
         .iter()
         .map(|p| p.display().to_string())
@@ -419,7 +424,8 @@ pub fn wait_http_ready(host: &str, port: u16, path: &str, timeout: Duration) -> 
         ) {
             Ok(mut stream) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
-                let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+                let req =
+                    format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
                 if stream.write_all(req.as_bytes()).is_ok() {
                     let mut buf = [0u8; 256];
                     match stream.read(&mut buf) {
@@ -453,10 +459,7 @@ pub fn wait_http_ready(host: &str, port: u16, path: &str, timeout: Duration) -> 
 
     Err(MnError::Network {
         stage: format!("等待 {addr}{path} 就绪"),
-        reason: format!(
-            "超时 {}s，最后一次错误：{last_err}",
-            timeout.as_secs()
-        ),
+        reason: format!("超时 {}s，最后一次错误：{last_err}", timeout.as_secs()),
     })
 }
 
@@ -667,9 +670,15 @@ mod tests {
     #[test]
     fn spawn_and_terminate_short_lived_process() {
         let (prog, args) = if cfg!(windows) {
-            (PathBuf::from("cmd"), vec!["/C".to_string(), "exit 0".to_string()])
+            (
+                PathBuf::from("cmd"),
+                vec!["/C".to_string(), "exit 0".to_string()],
+            )
         } else {
-            (PathBuf::from("sh"), vec!["-c".to_string(), "exit 0".to_string()])
+            (
+                PathBuf::from("sh"),
+                vec!["-c".to_string(), "exit 0".to_string()],
+            )
         };
         let opts = SpawnOptions::new(prog, args, "test-child");
         let mut child = opts.spawn().unwrap();
@@ -719,7 +728,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mn-log-{}", std::process::id()));
         let log = dir.join("engine.log");
         let (prog, args) = if cfg!(windows) {
-            (PathBuf::from("cmd"), vec!["/C".to_string(), "echo hello".to_string()])
+            (
+                PathBuf::from("cmd"),
+                vec!["/C".to_string(), "echo hello".to_string()],
+            )
         } else {
             (
                 PathBuf::from("sh"),

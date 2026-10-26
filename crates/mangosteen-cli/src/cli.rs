@@ -44,9 +44,10 @@ impl Args {
     pub fn get_num<T: std::str::FromStr>(&self, key: &str) -> MnResult<Option<T>> {
         match self.options.get(key) {
             None => Ok(None),
-            Some(v) => v.parse::<T>().map(Some).map_err(|_| {
-                MnError::bad_request(format!("选项 --{key} 的值 `{v}` 不是合法数字"))
-            }),
+            Some(v) => v
+                .parse::<T>()
+                .map(Some)
+                .map_err(|_| MnError::bad_request(format!("选项 --{key} 的值 `{v}` 不是合法数字"))),
         }
     }
 
@@ -62,9 +63,8 @@ impl Args {
 
     /// 要求第 n 个位置参数存在。
     pub fn require_pos(&self, n: usize, what: &str) -> MnResult<&str> {
-        self.pos(n).ok_or_else(|| {
-            MnError::bad_request(format!("缺少参数：{what}"))
-        })
+        self.pos(n)
+            .ok_or_else(|| MnError::bad_request(format!("缺少参数：{what}")))
     }
 }
 
@@ -166,9 +166,15 @@ fn commands() -> &'static [(&'static str, &'static str)] {
         ("stop", "停止部署并释放资源"),
         ("status", "查看网关与部署状态"),
         ("ps", "列出全部部署"),
-        ("models", "模型管理：pull / search / add / list / show / verify / remove / sources"),
+        (
+            "models",
+            "模型管理：pull / search / add / list / show / verify / remove / sources",
+        ),
         ("assess", "仅评估本地可行性，不部署"),
-        ("cloud", "云端算力：providers / specs / pick / instances / destroy"),
+        (
+            "cloud",
+            "云端算力：providers / specs / pick / instances / destroy",
+        ),
         ("config", "配置管理：show / init / path / validate"),
         ("serve", "仅启动 API 网关 HTTP 服务"),
         ("tui", "启动全屏交互界面"),
@@ -260,7 +266,12 @@ fn print_help() {
     println!("{}", output::bold("命令"));
     let width = commands().iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     for (name, desc) in commands() {
-        println!("  {:<w$}  {}", output::paint(name, output::Color::Cyan), desc, w = width);
+        println!(
+            "  {:<w$}  {}",
+            output::paint(name, output::Color::Cyan),
+            desc,
+            w = width
+        );
     }
     println!();
     println!("{}", output::bold("常用示例"));
@@ -366,10 +377,7 @@ mod tests {
         assert_eq!(run(vec!["mangosteen".into()]).unwrap(), 0);
         assert_eq!(run(vec!["mangosteen".into(), "--help".into()]).unwrap(), 0);
         assert_eq!(run(vec!["mangosteen".into(), "-V".into()]).unwrap(), 0);
-        assert_eq!(
-            run(vec!["mangosteen".into(), "version".into()]).unwrap(),
-            0
-        );
+        assert_eq!(run(vec!["mangosteen".into(), "version".into()]).unwrap(), 0);
     }
 
     #[test]
@@ -382,7 +390,9 @@ mod tests {
     #[test]
     fn command_table_covers_help_listing() {
         let names: Vec<&str> = commands().iter().map(|(n, _)| *n).collect();
-        for expected in ["deploy", "stop", "status", "models", "cloud", "config", "doctor", "tui"] {
+        for expected in [
+            "deploy", "stop", "status", "models", "cloud", "config", "doctor", "tui",
+        ] {
             assert!(names.contains(&expected), "缺少命令 {expected}");
         }
     }

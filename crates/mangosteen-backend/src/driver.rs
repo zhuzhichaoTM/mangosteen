@@ -25,9 +25,7 @@ use mangosteen_core::cloud::{
 };
 use mangosteen_core::{MnError, MnResult};
 
-use crate::client::{
-    CapacityRequest, CompshareClient, CreateRequest, PriceRequest, PROVIDER_NAME,
-};
+use crate::client::{CapacityRequest, CompshareClient, CreateRequest, PriceRequest, PROVIDER_NAME};
 use crate::config::CompshareConfig;
 use crate::mapping::{self, units};
 use crate::model::{
@@ -129,10 +127,7 @@ impl<T: Transport> CompshareDriver<T> {
     /// 真实校验兜底）；`Ok(Some(zone))` 表示找到了对应可用区。
     pub fn check_zone_image_compat(&self) -> MnResult<Option<crate::model::ZoneInfo>> {
         let r = self.client.zones_filtered(Some(&self.config.region))?;
-        let found = r
-            .zones
-            .into_iter()
-            .find(|z| z.zone == self.config.zone);
+        let found = r.zones.into_iter().find(|z| z.zone == self.config.zone);
         if let Some(z) = &found {
             // 配置里没有显式声明镜像类型，本项目的镜像均为平台系统镜像
             if !z.supports_image_type("System") {
@@ -413,12 +408,8 @@ impl<T: Transport> CompshareDriver<T> {
     /// 调整完成后实例仍是 `Stopped`，需要另行 start。
     pub fn resize_compute(&self, id: &str, cpu: u32, memory_gb: u64, gpu: u32) -> MnResult<()> {
         self.require_stopped(id, "升降配")?;
-        self.client.resize_instance_compute(
-            id,
-            cpu,
-            CompshareConfig::memory_mb(memory_gb),
-            gpu,
-        )?;
+        self.client
+            .resize_instance_compute(id, cpu, CompshareConfig::memory_mb(memory_gb), gpu)?;
         Ok(())
     }
 
@@ -446,12 +437,8 @@ impl<T: Transport> CompshareDriver<T> {
         memory_gb: Option<u64>,
         gpu: Option<u32>,
     ) -> MnResult<UpgradePriceResponse> {
-        self.client.upgrade_price(
-            id,
-            cpu,
-            memory_gb.map(CompshareConfig::memory_mb),
-            gpu,
-        )
+        self.client
+            .upgrade_price(id, cpu, memory_gb.map(CompshareConfig::memory_mb), gpu)
     }
 
     /// 查询某规格在**全部计费模式**下的价格（用于「按量 vs 包月」对比）。
@@ -569,7 +556,8 @@ impl<T: Transport> CompshareDriver<T> {
         }
         let project_id = self.default_project_id()?;
         let stop_at = mangosteen_core::time::now_unix() + after_secs;
-        self.client.update_stop_scheduler(id, &project_id, stop_at)?;
+        self.client
+            .update_stop_scheduler(id, &project_id, stop_at)?;
         Ok(stop_at)
     }
 
@@ -579,7 +567,6 @@ impl<T: Transport> CompshareDriver<T> {
         self.client.delete_stop_scheduler(id, &project_id)?;
         Ok(())
     }
-
 }
 
 impl<T: Transport> ProviderDriver for CompshareDriver<T> {
@@ -726,11 +713,15 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
             quantity: None,
         };
         let resp = self.client.create_instance(&req)?;
-        let id = resp.uhost_ids.first().cloned().ok_or_else(|| MnError::Provider {
-            provider: self.name.clone(),
-            code: "missing_instance_id".to_string(),
-            message: "创建接口返回成功但未给出实例 ID".to_string(),
-        })?;
+        let id = resp
+            .uhost_ids
+            .first()
+            .cloned()
+            .ok_or_else(|| MnError::Provider {
+                provider: self.name.clone(),
+                code: "missing_instance_id".to_string(),
+                message: "创建接口返回成功但未给出实例 ID".to_string(),
+            })?;
 
         // 4. 补齐详情。失败也要返回带 ID 的占位实例——
         //    否则编排器拿不到 ID，回滚就无从谈起，实例会持续计费。
@@ -1102,10 +1093,7 @@ mod tests {
 
         /// 收到的请求体（按顺序）。
         fn calls(&self) -> Vec<String> {
-            self.recorded
-                .lock()
-                .map(|v| v.clone())
-                .unwrap_or_default()
+            self.recorded.lock().map(|v| v.clone()).unwrap_or_default()
         }
 
         /// 某个 Action 被调用了多少次。
@@ -1170,15 +1158,15 @@ mod tests {
                 .lock()
                 .map_err(|_| MnError::io("vendor lock", &std::io::Error::other("poisoned")))?
                 .push(body);
-            let resp = self
-                .routes
-                .get(action.as_str())
-                .cloned()
-                .ok_or_else(|| MnError::Provider {
-                    provider: "fake".to_string(),
-                    code: "unrouted".to_string(),
-                    message: format!("测试未注册 Action `{action}` 的响应"),
-                })?;
+            let resp =
+                self.routes
+                    .get(action.as_str())
+                    .cloned()
+                    .ok_or_else(|| MnError::Provider {
+                        provider: "fake".to_string(),
+                        code: "unrouted".to_string(),
+                        message: format!("测试未注册 Action `{action}` 的响应"),
+                    })?;
             Ok(crate::transport::HttpResponse::new(200, resp))
         }
     }
@@ -1213,13 +1201,8 @@ mod tests {
         let mut c = cfg();
         c.max_gpu_count = 2;
         c.max_price_queries = 4;
-        let d = CompshareDriver::new(
-            "compshare",
-            c,
-            Credential::new("pk", "sk").unwrap(),
-            mock,
-        )
-        .unwrap();
+        let d = CompshareDriver::new("compshare", c, Credential::new("pk", "sk").unwrap(), mock)
+            .unwrap();
         let specs = d.list_available_specs().unwrap();
         assert_eq!(specs.len(), 2, "{specs:?}");
         assert!(specs.iter().any(|s| s.spec_id == "4090/1x16c/64g"));
@@ -1237,13 +1220,8 @@ mod tests {
         c.max_gpu_count = 2;
         // 只允许查 1 次价格：第二档必须是「价格未知」
         c.max_price_queries = 1;
-        let d = CompshareDriver::new(
-            "compshare",
-            c,
-            Credential::new("pk", "sk").unwrap(),
-            mock,
-        )
-        .unwrap();
+        let d = CompshareDriver::new("compshare", c, Credential::new("pk", "sk").unwrap(), mock)
+            .unwrap();
         let specs = d.list_available_specs().unwrap();
         assert_eq!(specs.len(), 2);
         let unpriced = specs
@@ -1262,13 +1240,8 @@ mod tests {
         ]);
         let mut c = cfg();
         c.gpu_types = vec!["4090".to_string()];
-        let d = CompshareDriver::new(
-            "compshare",
-            c,
-            Credential::new("pk", "sk").unwrap(),
-            mock,
-        )
-        .unwrap();
+        let d = CompshareDriver::new("compshare", c, Credential::new("pk", "sk").unwrap(), mock)
+            .unwrap();
         let specs = d.list_available_specs().unwrap();
         assert!(specs.iter().all(|s| s.spec.gpu.model.contains("4090")));
     }
@@ -1309,10 +1282,30 @@ mod tests {
         assert_eq!(inst.state, InstanceState::Creating);
 
         // 三个必要动作各调用一次
-        assert_eq!(d.client().transport().action_count("DescribeCompShareSupportZone"), 1);
-        assert_eq!(d.client().transport().action_count("CheckCompShareResourceCapacity"), 1);
-        assert_eq!(d.client().transport().action_count("CreateCompShareInstance"), 1);
-        assert_eq!(d.client().transport().action_count("DescribeCompShareInstance"), 1);
+        assert_eq!(
+            d.client()
+                .transport()
+                .action_count("DescribeCompShareSupportZone"),
+            1
+        );
+        assert_eq!(
+            d.client()
+                .transport()
+                .action_count("CheckCompShareResourceCapacity"),
+            1
+        );
+        assert_eq!(
+            d.client()
+                .transport()
+                .action_count("CreateCompShareInstance"),
+            1
+        );
+        assert_eq!(
+            d.client()
+                .transport()
+                .action_count("DescribeCompShareInstance"),
+            1
+        );
 
         // 顺序约束：库存检查必须早于创建（厂商要求，且避免无谓下单）
         let calls = d.client().transport().calls();
@@ -1362,7 +1355,10 @@ mod tests {
                 "CreateCompShareInstance",
                 r#"{"RetCode":0,"UHostIds":["uhost-x"]}"#.to_string(),
             ),
-            ("DescribeCompShareInstance", instance_json("uhost-x", "Install")),
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-x", "Install"),
+            ),
         ]);
         let d = driver(vendor);
         assert!(d.create("4090/1x16c/64g", None).is_ok());
@@ -1473,7 +1469,10 @@ mod tests {
         assert!(bodies[1].contains("StopCompShareInstance"), "{bodies:?}");
         assert!(bodies[2].contains("DescribeCompShareInstance"));
         // 只有确认 Stopped 之后才发 Terminate
-        assert!(bodies[3].contains("TerminateCompShareInstance"), "{bodies:?}");
+        assert!(
+            bodies[3].contains("TerminateCompShareInstance"),
+            "{bodies:?}"
+        );
         assert!(bodies[3].contains("ReleaseUDisk=true"), "{bodies:?}");
     }
 
@@ -1537,7 +1536,8 @@ mod tests {
     #[test]
     fn list_stops_when_first_page_is_partial() {
         // 未满页 → 不应再发第二页请求（减少接口调用）
-        let page = r#"{"RetCode":0,"TotalCount":1,"UHostSet":[{"UHostId":"only","State":"Running"}]}"#;
+        let page =
+            r#"{"RetCode":0,"TotalCount":1,"UHostSet":[{"UHostId":"only","State":"Running"}]}"#;
         let d = driver(MockTransport::always(200, page));
         let all = d.list().unwrap();
         assert_eq!(all.len(), 1);
@@ -1610,7 +1610,9 @@ mod tests {
         let mock = MockTransport::always(200, INSTANCE_RUNNING.replace("Running", "Unknown"));
         let d = driver(mock);
         // Unknown → Failed，不在目标集内，但也不是 Destroyed → 会超时
-        let e = d.wait_until("uhost-1", &[InstanceState::Running]).unwrap_err();
+        let e = d
+            .wait_until("uhost-1", &[InstanceState::Running])
+            .unwrap_err();
         assert!(e.to_string().contains("未进入"), "{e}");
     }
 
@@ -1657,7 +1659,10 @@ mod tests {
         let d = driver(v);
         d.rename("uhost-1", "my-gpu").unwrap();
         let body = d.client().transport().calls().remove(0);
-        assert!(body.contains("Action=ModifyCompShareInstanceName"), "{body}");
+        assert!(
+            body.contains("Action=ModifyCompShareInstanceName"),
+            "{body}"
+        );
         assert!(body.contains("UHostId=uhost-1"), "{body}");
         assert!(body.contains("Name=my-gpu"), "{body}");
     }
@@ -1666,7 +1671,10 @@ mod tests {
     #[test]
     fn reset_password_base64_encodes() {
         let v = FakeVendor::new(vec![
-            ("DescribeCompShareInstance", instance_json("uhost-1", "Stopped")),
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-1", "Stopped"),
+            ),
             ("ResetCompShareInstancePassword", OK_ACTION.into()),
         ]);
         let d = driver(v);
@@ -1677,8 +1685,10 @@ mod tests {
             .find(|c| c.contains("ResetCompShareInstancePassword"))
             .expect("应调用重置密码接口");
         // "Abc123!" 的 Base64 是 "QWJjMTIzIQ=="
-        assert!(body.contains("Password=QWJjMTIzIQ%3D%3D") || body.contains("Password=QWJjMTIzIQ=="),
-            "密码必须是 Base64：{body}");
+        assert!(
+            body.contains("Password=QWJjMTIzIQ%3D%3D") || body.contains("Password=QWJjMTIzIQ=="),
+            "密码必须是 Base64：{body}"
+        );
         // 明文绝不能出现在请求里
         assert!(!body.contains("Abc123"), "明文密码不得出现在请求体：{body}");
     }
@@ -1695,7 +1705,9 @@ mod tests {
         let e = d.reset_password("uhost-1", "Abc123!").unwrap_err();
         assert!(e.to_string().contains("必须先关机"), "{e}");
         assert!(
-            !d.client().transport().called("ResetCompShareInstancePassword"),
+            !d.client()
+                .transport()
+                .called("ResetCompShareInstancePassword"),
             "状态不符时绝不能发出重置请求"
         );
 
@@ -1718,7 +1730,10 @@ mod tests {
         ]);
         let d2 = driver(v2);
         d2.reset_password("uhost-1", "Abc123!").unwrap();
-        assert!(d2.client().transport().called("ResetCompShareInstancePassword"));
+        assert!(d2
+            .client()
+            .transport()
+            .called("ResetCompShareInstancePassword"));
     }
 
     #[test]
@@ -1746,7 +1761,10 @@ mod tests {
     #[test]
     fn resize_sends_memory_in_mb() {
         let v = FakeVendor::new(vec![
-            ("DescribeCompShareInstance", instance_json("uhost-1", "Stopped")),
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-1", "Stopped"),
+            ),
             ("ResizeCompShareInstance", OK_ACTION.into()),
         ]);
         let d = driver(v);
@@ -1768,7 +1786,10 @@ mod tests {
     #[test]
     fn disk_resize_does_not_send_compute_params() {
         let v = FakeVendor::new(vec![
-            ("DescribeCompShareInstance", instance_json("uhost-1", "Stopped")),
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-1", "Stopped"),
+            ),
             ("ResizeCompShareInstance", OK_ACTION.into()),
         ]);
         let d = driver(v);
@@ -1794,7 +1815,9 @@ mod tests {
             r#"{"RetCode":0,"Price":356.0,"OriginalPrice":400.0}"#.into(),
         )]);
         let d = driver(v);
-        let p = d.upgrade_price("uhost-1", Some(32), Some(128), None).unwrap();
+        let p = d
+            .upgrade_price("uhost-1", Some(32), Some(128), None)
+            .unwrap();
         assert!((p.price - 356.0).abs() < 1e-9);
         assert!(!p.is_refund(), "正数是补差价");
         let body = d.client().transport().calls().remove(0);
@@ -1888,7 +1911,10 @@ mod tests {
         let d = driver(v);
         let e = d.update_ports("uhost-1", &[8888], &[23]).unwrap_err();
         assert!(e.to_string().contains("仅适用于容器"), "{e}");
-        assert!(!d.client().transport().called("UpdateCompShareInstancePorts"));
+        assert!(!d
+            .client()
+            .transport()
+            .called("UpdateCompShareInstancePorts"));
     }
 
     /// 带宽切换：顶层 RetCode=0 但单个实例失败，必须能被识别。
@@ -1925,7 +1951,10 @@ mod tests {
                 ]}"#
                 .into(),
             ),
-            ("GetSoftwareURL", r#"{"RetCode":0,"URL":"http://1.2.3.4:8888"}"#.into()),
+            (
+                "GetSoftwareURL",
+                r#"{"RetCode":0,"URL":"http://1.2.3.4:8888"}"#.into(),
+            ),
         ]);
         let d = driver(v);
         let ports = d.software_ports().unwrap();

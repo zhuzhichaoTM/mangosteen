@@ -114,7 +114,6 @@ fn first_line(msg: &str) -> String {
         .to_string()
 }
 
-
 /// 「模型评估」阶段的结果文字。
 ///
 /// 必须包含**资源占用明细**：这是用户决定要不要继续部署的唯一依据。
@@ -277,7 +276,8 @@ impl Gateway {
         state: StateStore,
         models: ModelStore,
     ) -> MnResult<Self> {
-        let mut scheduler = Scheduler::new(assessor.clone_for_scheduler(), config.scheduler.clone());
+        let mut scheduler =
+            Scheduler::new(assessor.clone_for_scheduler(), config.scheduler.clone());
         scheduler.set_port_range(config.local.port_range_start, config.local.port_range_end)?;
         // 网关自身端口也要预留：默认 11516 落在引擎区间 11435-11999 内，
         // 分配器虽然有 `is_port_bindable` 兜底，但显式预留能避免依赖
@@ -393,16 +393,11 @@ impl Gateway {
     ///
     /// 超时后不杀线程：让它自然结束并回填缓存，这样下一次调用就命中缓存。
     /// 代价是一个后台线程短暂存活，比「反复探测」划算得多。
-    fn probe_with_budget(
-        &self,
-        path: &std::path::Path,
-    ) -> Option<Result<String, String>> {
+    fn probe_with_budget(&self, path: &std::path::Path) -> Option<Result<String, String>> {
         let engine = self.local_engine.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let r = engine
-                .probe_version()
-                .map_err(|e| e.to_string());
+            let r = engine.probe_version().map_err(|e| e.to_string());
             let _ = tx.send(r);
         });
 
@@ -514,10 +509,7 @@ impl Gateway {
     /// **不重建**引擎句柄与云端编排器（重建会中断正在服务的推理），
     /// 那些字段的变更需要重启，UI 会明确提示。
     pub fn replace_config(&mut self, cfg: Config) {
-        self.scheduler = Scheduler::new(
-            self.assessor.clone_for_scheduler(),
-            cfg.scheduler.clone(),
-        );
+        self.scheduler = Scheduler::new(self.assessor.clone_for_scheduler(), cfg.scheduler.clone());
         // 端口区间可能被改过，重新设置（失败则保留旧值，不因设置页写错而崩溃）
         let _ = self
             .scheduler
@@ -755,11 +747,7 @@ impl Gateway {
 
         match decision {
             Decision::Reject { reason } => {
-                sink(
-                    DeployStage::Selecting,
-                    StageOutcome::Failed,
-                    reason.clone(),
-                );
+                sink(DeployStage::Selecting, StageOutcome::Failed, reason.clone());
                 return Err(MnError::InsufficientLocalResource { detail: reason });
             }
             Decision::Local { plan } => {
@@ -790,7 +778,8 @@ impl Gateway {
                     l.engine = plan.engine;
                     l.use_mlock = plan.use_mlock;
                 }
-                self.state.upsert(DeploymentRecord::from_plan(full.clone()))?;
+                self.state
+                    .upsert(DeploymentRecord::from_plan(full.clone()))?;
                 self.state
                     .set_status(&id, DeploymentStatus::Provisioning, None)?;
                 sink(
@@ -806,7 +795,10 @@ impl Gateway {
                     req: req.clone(),
                 }))
             }
-            Decision::Cloud { plan: cloud_plan, reason } => {
+            Decision::Cloud {
+                plan: cloud_plan,
+                reason,
+            } => {
                 trail.push(format!("cloud:{}", short(&reason)));
                 let why = self.scheduler.explain_local_failure(&evaluated);
                 sink(
@@ -826,8 +818,7 @@ impl Gateway {
                     StageOutcome::Skipped,
                     "云端部署无需本地量化".to_string(),
                 );
-                let plan =
-                    self.deploy_cloud(&evaluated, *cloud_plan, trail, &why, sink)?;
+                let plan = self.deploy_cloud(&evaluated, *cloud_plan, trail, &why, sink)?;
                 Ok(PreparedDeployment::Done(plan))
             }
         }
@@ -845,7 +836,12 @@ impl Gateway {
     ) -> MnResult<DeploymentPlan> {
         use crate::progress::{DeployStage, StageOutcome};
 
-        let PreparedLocal { id, evaluated, plan, req } = prepared;
+        let PreparedLocal {
+            id,
+            evaluated,
+            plan,
+            req,
+        } = prepared;
 
         // 模型路径可能刚被 `with_model_path` 补上（下载场景：prepare 时
         // 文件还不存在）。台账在 prepare 阶段已按空路径落过盘，这里必须
@@ -906,11 +902,8 @@ impl Gateway {
             }
             Err(local_err) => {
                 let reason = format!("{local_err}");
-                self.state.set_status(
-                    &id,
-                    DeploymentStatus::Failed,
-                    Some(reason.clone()),
-                )?;
+                self.state
+                    .set_status(&id, DeploymentStatus::Failed, Some(reason.clone()))?;
 
                 // 用户选了「本地算力」→ 绝不降级上云。
                 // 静默降级会直接产生计费，是最不能接受的意外。
@@ -926,11 +919,14 @@ impl Gateway {
                 // 允许降级 → 重新决策。`prepare` 里已经算过一次本地方案，
                 // 这里要的是「本地失败后的降级结论」，因此走 degrade 分支。
                 let mut trail = vec![format!("local:{}", short(&reason))];
-                let fallback =
-                    self.scheduler
-                        .degrade_after_local_failure(&evaluated, &req, &reason, 0)?;
+                let fallback = self
+                    .scheduler
+                    .degrade_after_local_failure(&evaluated, &req, &reason, 0)?;
                 match fallback {
-                    Decision::Cloud { plan: cloud_plan, reason: why } => {
+                    Decision::Cloud {
+                        plan: cloud_plan,
+                        reason: why,
+                    } => {
                         trail.push(format!("cloud:{}", short(&why)));
                         sink(
                             DeployStage::Selecting,
@@ -945,13 +941,11 @@ impl Gateway {
                             sink,
                         )
                     }
-                    Decision::Reject { reason } => {
-                        Err(MnError::InsufficientLocalResource {
-                            detail: format!(
-                                "本地部署失败且无法降级：{reason}（原始错误：{local_err}）"
-                            ),
-                        })
-                    }
+                    Decision::Reject { reason } => Err(MnError::InsufficientLocalResource {
+                        detail: format!(
+                            "本地部署失败且无法降级：{reason}（原始错误：{local_err}）"
+                        ),
+                    }),
                     Decision::Local { .. } => {
                         // 理论上不会走到这里（degrade 只产出 Cloud/Reject）
                         Err(MnError::InsufficientLocalResource {
@@ -1044,7 +1038,11 @@ impl Gateway {
         let constraints = SelectionConstraints {
             min_vram_bytes: required,
             min_memory_bytes: evaluated.assessment.requirement.total_bytes().max(8 << 30),
-            min_disk_bytes: evaluated.spec.file_size_bytes.saturating_mul(2).max(50 << 30),
+            min_disk_bytes: evaluated
+                .spec
+                .file_size_bytes
+                .saturating_mul(2)
+                .max(50 << 30),
             max_price_per_hour: cloud_plan.max_price_per_hour,
             allowed_providers: Vec::new(),
             allowed_regions: Vec::new(),
@@ -1079,7 +1077,8 @@ impl Gateway {
             }
         }
 
-        self.state.upsert(DeploymentRecord::from_plan(plan.clone()))?;
+        self.state
+            .upsert(DeploymentRecord::from_plan(plan.clone()))?;
         self.state
             .set_status(&id, DeploymentStatus::Provisioning, None)?;
         sink(
@@ -1124,7 +1123,8 @@ impl Gateway {
                     provider: p.instance.provider.clone(),
                     instance_id: p.instance.id.clone(),
                 };
-                self.state.upsert(DeploymentRecord::from_plan(plan.clone()))?;
+                self.state
+                    .upsert(DeploymentRecord::from_plan(plan.clone()))?;
                 self.state.set_status(&id, DeploymentStatus::Ready, None)?;
                 sink(
                     DeployStage::Launching,
@@ -1182,7 +1182,8 @@ impl Gateway {
     }
 
     /// 评估：按模型 ID 查台账或按路径直接解析。
-    pub fn evaluate(&self, req: &DeploymentRequest) -> MnResult<Evaluated> {        // 1. 先按台账 ID / 名称查
+    pub fn evaluate(&self, req: &DeploymentRequest) -> MnResult<Evaluated> {
+        // 1. 先按台账 ID / 名称查
         if let Some(entry) = self.models.get(&req.model)? {
             if let mangosteen_core::model::ModelLocation::Local { path } = &entry.location {
                 if path.is_file() {
@@ -1208,7 +1209,10 @@ impl Gateway {
                 "模型名 `{}` 匹配到 {} 个模型：{}。请使用完整 ID",
                 req.model,
                 hits.len(),
-                hits.iter().map(|h| h.id.as_str()).collect::<Vec<_>>().join(", ")
+                hits.iter()
+                    .map(|h| h.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
 
@@ -1440,8 +1444,10 @@ impl Gateway {
                         let _ = h.shutdown();
                     } else if let Some(pid) = rec.pid {
                         // 忽略失败：进程可能已经退了
-                        let _ =
-                            mangosteen_platform::process::terminate_pid(pid, Duration::from_secs(3));
+                        let _ = mangosteen_platform::process::terminate_pid(
+                            pid,
+                            Duration::from_secs(3),
+                        );
                     }
                 }
                 ComputeOrigin::Cloud {
@@ -1496,7 +1502,8 @@ impl Gateway {
     }
 
     /// 停止全部部署。
-    pub fn stop_all(&mut self) -> Vec<(String, String)> {        let ids: Vec<String> = self
+    pub fn stop_all(&mut self) -> Vec<(String, String)> {
+        let ids: Vec<String> = self
             .state
             .list_active()
             .unwrap_or_default()
@@ -1666,7 +1673,10 @@ impl Gateway {
     /// 指定了具体模型却**没在运行**时必须明确报错，而不是悄悄退回自动：
     /// 静默换模型比报错更难排查（用户会以为「就是这个模型答的」）。
     pub fn active_backend_for(&mut self, want: Option<&str>) -> MnResult<BackendTarget> {
-        let Some(id) = want.map(str::trim).filter(|s| !s.is_empty() && *s != "auto") else {
+        let Some(id) = want
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "auto")
+        else {
             return self.active_backend();
         };
 
@@ -1677,11 +1687,9 @@ impl Gateway {
             .iter()
             .find(|a| a.ready && a.port.is_some() && a.model == id)
             .or_else(|| {
-                active.iter().find(|a| {
-                    a.ready
-                        && a.port.is_some()
-                        && a.model.split(':').next() == Some(id)
-                })
+                active
+                    .iter()
+                    .find(|a| a.ready && a.port.is_some() && a.model.split(':').next() == Some(id))
             });
 
         match hit {
@@ -1799,9 +1807,12 @@ impl Gateway {
         &self,
         constraints: &SelectionConstraints,
     ) -> MnResult<Vec<mangosteen_core::policy::ScoredCandidate>> {
-        let o = self.cloud.as_ref().ok_or_else(|| MnError::NoViableCandidate {
-            reason: "未配置任何可用的云服务商".to_string(),
-        })?;
+        let o = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
         let (candidates, latencies) = o.collect_candidates()?;
         Ok(o.rank(&candidates, &latencies, constraints))
     }
@@ -1812,9 +1823,12 @@ impl Gateway {
     pub fn list_cloud_specs(
         &self,
     ) -> MnResult<Vec<(String, mangosteen_core::cloud::AvailableSpec)>> {
-        let o = self.cloud.as_ref().ok_or_else(|| MnError::NoViableCandidate {
-            reason: "未配置任何可用的云服务商".to_string(),
-        })?;
+        let o = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
         o.collect_candidates().map(|(c, _)| c)
     }
 
@@ -1831,9 +1845,12 @@ impl Gateway {
         &self,
         constraints: &SelectionConstraints,
     ) -> MnResult<Vec<(String, mangosteen_core::cloud::AvailableSpec)>> {
-        let o = self.cloud.as_ref().ok_or_else(|| MnError::NoViableCandidate {
-            reason: "未配置任何可用的云服务商".to_string(),
-        })?;
+        let o = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
         o.cheapest(constraints)
     }
 
@@ -1855,9 +1872,12 @@ impl Gateway {
         constraints: &SelectionConstraints,
         name: Option<&str>,
     ) -> MnResult<(String, mangosteen_core::cloud::Instance)> {
-        let o = self.cloud.as_ref().ok_or_else(|| MnError::NoViableCandidate {
-            reason: "未配置任何可用的云服务商".to_string(),
-        })?;
+        let o = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
         o.create_cheapest(constraints, name)
     }
 
@@ -1873,9 +1893,12 @@ impl Gateway {
         provider: &str,
         instance_id: &str,
     ) -> MnResult<Vec<String>> {
-        let o = self.cloud.as_mut().ok_or_else(|| MnError::NoViableCandidate {
-            reason: "未配置任何可用的云服务商".to_string(),
-        })?;
+        let o = self
+            .cloud
+            .as_mut()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
         Ok(o.teardown(provider, instance_id))
     }
 
@@ -1924,9 +1947,8 @@ impl Gateway {
 
         // 用户选了「云端算力」→ 直接按云端出预估，不再宣称「本地可行」。
         // 否则弹窗会说「不花钱」，与用户的选择和实际部署行为都矛盾。
-        let local_viable = !req.target.forces_cloud()
-            && evaluated.is_local_viable()
-            && engine_problem.is_none();
+        let local_viable =
+            !req.target.forces_cloud() && evaluated.is_local_viable() && engine_problem.is_none();
 
         // 本地可行 → 不涉及任何云端费用，直接返回
         if local_viable {
@@ -1953,12 +1975,12 @@ impl Gateway {
             "按你的选择使用「云端算力」，全部资源在云端".to_string()
         } else {
             match (&engine_problem, evaluated.is_local_viable()) {
-            (Some(engine_msg), _) => format!(
-                "本地资源足够，但推理引擎无法启动：{engine_msg}。\
+                (Some(engine_msg), _) => format!(
+                    "本地资源足够，但推理引擎无法启动：{engine_msg}。\
                  修复后可避免云端费用（见 `mangosteen engine probe`）"
-            ),
-            (None, false) => self.scheduler.explain_local_failure(&evaluated),
-            (None, true) => "本地可用".to_string(),
+                ),
+                (None, false) => self.scheduler.explain_local_failure(&evaluated),
+                (None, true) => "本地可用".to_string(),
             }
         };
 
@@ -1972,7 +1994,11 @@ impl Gateway {
         let constraints = SelectionConstraints {
             min_vram_bytes: required_vram,
             min_memory_bytes: evaluated.assessment.requirement.total_bytes().max(8 << 30),
-            min_disk_bytes: evaluated.spec.file_size_bytes.saturating_mul(2).max(50 << 30),
+            min_disk_bytes: evaluated
+                .spec
+                .file_size_bytes
+                .saturating_mul(2)
+                .max(50 << 30),
             max_price_per_hour: req.max_price_per_hour,
             allowed_providers: Vec::new(),
             allowed_regions: Vec::new(),
@@ -2330,9 +2356,11 @@ impl GatewayBuilder {
                 for (k, v) in &self.config.scheduler.gpu_preference {
                     pref.insert(k.clone(), *v);
                 }
-                let selector =
-                    mangosteen_core::policy::NodeSelector::new(self.config.scheduler.weights, pref)?
-                        .with_strategy(self.config.scheduler.strategy);
+                let selector = mangosteen_core::policy::NodeSelector::new(
+                    self.config.scheduler.weights,
+                    pref,
+                )?
+                .with_strategy(self.config.scheduler.strategy);
                 let tunnels = mangosteen_cloud::TunnelManager::new(
                     self.config.local.port_range_start,
                     self.config.local.port_range_end,
@@ -2367,11 +2395,7 @@ impl GatewayBuilder {
         };
 
         let guard = mangosteen_base::AccessGuard::from_config(&self.config.storage);
-        let models = ModelStore::new(
-            model_index_path,
-            guard,
-            self.config.storage.verify_hash,
-        );
+        let models = ModelStore::new(model_index_path, guard, self.config.storage.verify_hash);
         let state = StateStore::new(state_path);
 
         Gateway::new(self.config, assessor, local_engine, cloud, state, models)

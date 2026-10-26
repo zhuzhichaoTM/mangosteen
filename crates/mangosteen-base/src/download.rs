@@ -322,8 +322,8 @@ fn fetch_header_bytes(url: &str, opts: &DownloadOptions, n: u64) -> MnResult<Hea
     // 我们主动不读完。只有真正失败（非 0 且非被杀）才算错。
     if !buf.is_empty() {
         // 已经有数据，即使 curl 被我们杀掉也能用
-        let total_bytes = parse_content_range_total(&head_text)
-            .or_else(|| parse_content_length(&head_text));
+        let total_bytes =
+            parse_content_range_total(&head_text).or_else(|| parse_content_length(&head_text));
         return Ok(HeaderFetch {
             bytes: buf,
             total_bytes,
@@ -375,18 +375,12 @@ pub fn download_model(
 ) -> MnResult<Downloaded> {
     let url = source.download_url(model)?;
 
-    std::fs::create_dir_all(&opts.dest_dir).map_err(|e| {
-        MnError::io(
-            format!("创建模型目录 {}", opts.dest_dir.display()),
-            &e,
-        )
-    })?;
+    std::fs::create_dir_all(&opts.dest_dir)
+        .map_err(|e| MnError::io(format!("创建模型目录 {}", opts.dest_dir.display()), &e))?;
 
     let file_name = model.local_file_name();
     let final_path = opts.dest_dir.join(&file_name);
-    let part_path = opts
-        .dest_dir
-        .join(format!("{file_name}.{PART_SUFFIX}"));
+    let part_path = opts.dest_dir.join(format!("{file_name}.{PART_SUFFIX}"));
 
     // 已存在且大小吻合 → 不重复下载（幂等：再跑一次 pull 不会重新下 4.5GB）
     if let Some(expected) = opts.expected_bytes {
@@ -445,9 +439,7 @@ pub fn download_model(
                 }
                 last_err = Some(e);
                 if attempt < opts.retries {
-                    std::thread::sleep(Duration::from_millis(
-                        500u64 * (attempt as u64 + 1),
-                    ));
+                    std::thread::sleep(Duration::from_millis(500u64 * (attempt as u64 + 1)));
                 }
             }
         }
@@ -504,11 +496,7 @@ pub fn download_model(
     // 要么什么都没有，不会出现「半个文件被当成模型」的状态。
     std::fs::rename(&part_path, &final_path).map_err(|e| {
         MnError::io(
-            format!(
-                "重命名 {} → {}",
-                part_path.display(),
-                final_path.display()
-            ),
+            format!("重命名 {} → {}", part_path.display(), final_path.display()),
             &e,
         )
     })?;
@@ -739,9 +727,7 @@ fn run_curl(
                      原始信息：{err_text}"
                 )
             } else if err_text.contains("403") {
-                format!(
-                    "HTTP 403 —— 无权访问。该模型可能需要登录或已下架。原始信息：{err_text}"
-                )
+                format!("HTTP 403 —— 无权访问。该模型可能需要登录或已下架。原始信息：{err_text}")
             } else {
                 format!("HTTP 错误（curl 退出码 22）：{err_text}")
             }
@@ -978,7 +964,10 @@ pub fn parse_repo_list_for_test(body: &str) -> MnResult<Vec<RemoteRepo>> {
 fn parse_repo_list(body: &str) -> MnResult<Vec<RemoteRepo>> {
     let v: serde_json::Value = serde_json::from_str(body).map_err(|e| MnError::Network {
         stage: "解析搜索结果".to_string(),
-        reason: format!("响应不是合法 JSON：{e}。响应前 200 字节：{}", truncate(body, 200)),
+        reason: format!(
+            "响应不是合法 JSON：{e}。响应前 200 字节：{}",
+            truncate(body, 200)
+        ),
     })?;
 
     let items = v.as_array().cloned().unwrap_or_default();
@@ -1096,7 +1085,10 @@ fn is_auxiliary_gguf(lower_name: &str) -> bool {
 fn parse_file_list(source: &ModelSource, body: &str) -> MnResult<Vec<RemoteFile>> {
     let v: serde_json::Value = serde_json::from_str(body).map_err(|e| MnError::Network {
         stage: "解析仓库元数据".to_string(),
-        reason: format!("响应不是合法 JSON：{e}。响应前 200 字节：{}", truncate(body, 200)),
+        reason: format!(
+            "响应不是合法 JSON：{e}。响应前 200 字节：{}",
+            truncate(body, 200)
+        ),
     })?;
 
     let mut out = Vec::new();
@@ -1208,10 +1200,7 @@ mod aux_filter_tests {
             "qwen2.5-7b-instruct-fp16.gguf",
             "llama-3.2-3b-q8_0.gguf",
         ] {
-            assert!(
-                !is_auxiliary_gguf(name),
-                "`{name}` 是正常模型，不应被过滤"
-            );
+            assert!(!is_auxiliary_gguf(name), "`{name}` 是正常模型，不应被过滤");
         }
     }
 }
@@ -1329,10 +1318,7 @@ mod tests {
             file: "nope.gguf".into(),
             revision: None,
         };
-        let mut opts = DownloadOptions::new(
-            std::env::temp_dir().join("mn-probe-nope"),
-            1 << 30,
-        );
+        let mut opts = DownloadOptions::new(std::env::temp_dir().join("mn-probe-nope"), 1 << 30);
         // 用不存在的 curl 立即失败，避免测试依赖网络
         opts.curl_bin = "/nonexistent/curl-binary".to_string();
         let r = probe_remote_metadata(&src, &model, &opts, 4096);
@@ -1359,8 +1345,7 @@ mod tests {
                 ]
             }
         }"#;
-        let files =
-            parse_file_list(&ModelSource::modelscope(), body).unwrap();
+        let files = parse_file_list(&ModelSource::modelscope(), body).unwrap();
 
         // 语义已变更：不再按扩展名过滤。
         //

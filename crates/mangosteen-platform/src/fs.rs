@@ -114,8 +114,7 @@ pub fn is_within_any(path: &Path, allowed_roots: &[&Path]) -> bool {
 
 /// 确保目录存在。
 pub fn ensure_dir(path: &Path) -> MnResult<()> {
-    fs::create_dir_all(path)
-        .map_err(|e| MnError::io(format!("创建目录 {}", path.display()), &e))
+    fs::create_dir_all(path).map_err(|e| MnError::io(format!("创建目录 {}", path.display()), &e))
 }
 
 /// 查询目录所在分区可用空间（字节）。

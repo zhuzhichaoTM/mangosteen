@@ -166,10 +166,7 @@ fn builtin_vram_table() -> BTreeMap<String, u32> {
         ("6000D", 48),
         ("T4", 16),
     ];
-    pairs
-        .iter()
-        .map(|(k, v)| (normalize_gpu(k), *v))
-        .collect()
+    pairs.iter().map(|(k, v)| (normalize_gpu(k), *v)).collect()
 }
 
 /// 归一化 GPU 名称，抹平「库存接口名」与「文档显示名」的写法差异。
@@ -459,17 +456,18 @@ impl<T: Transport> std::fmt::Debug for AutodlClient<T> {
 
 impl<T: Transport> AutodlClient<T> {
     /// 构造。
-    pub fn new(endpoint: impl Into<String>, token: impl Into<String>, transport: T) -> MnResult<Self> {
+    pub fn new(
+        endpoint: impl Into<String>,
+        token: impl Into<String>,
+        transport: T,
+    ) -> MnResult<Self> {
         let endpoint = endpoint.into();
         let endpoint = endpoint.trim().trim_end_matches('/').to_string();
         if endpoint.is_empty() {
             return Err(MnError::config("autodl.endpoint", "API 入口不能为空"));
         }
         if !endpoint.starts_with("https://") {
-            return Err(MnError::config(
-                "autodl.endpoint",
-                "必须使用 https:// 入口",
-            ));
+            return Err(MnError::config("autodl.endpoint", "必须使用 https:// 入口"));
         }
         let token = token.into();
         if token.trim().is_empty() {
@@ -520,7 +518,10 @@ fn parse_reply(resp: &HttpResponse) -> MnResult<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(&resp.body).map_err(|e| MnError::Provider {
         provider: "autodl".to_string(),
         code: format!("http_{}", resp.status),
-        message: format!("响应不是合法 JSON：{e}；原文：{}", truncate(&resp.body, 300)),
+        message: format!(
+            "响应不是合法 JSON：{e}；原文：{}",
+            truncate(&resp.body, 300)
+        ),
     })?;
 
     let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("");
@@ -528,11 +529,11 @@ fn parse_reply(resp: &HttpResponse) -> MnResult<serde_json::Value> {
         return Ok(v.get("data").cloned().unwrap_or(serde_json::Value::Null));
     }
 
-    let msg = v.get("msg").and_then(|m| m.as_str()).unwrap_or("（无消息）");
-    let rid = v
-        .get("request_id")
-        .and_then(|r| r.as_str())
-        .unwrap_or("—");
+    let msg = v
+        .get("msg")
+        .and_then(|m| m.as_str())
+        .unwrap_or("（无消息）");
+    let rid = v.get("request_id").and_then(|r| r.as_str()).unwrap_or("—");
     Err(MnError::Provider {
         provider: "autodl".to_string(),
         code: if code.is_empty() {
@@ -578,7 +579,12 @@ pub struct AutodlDriver<T: Transport> {
 
 impl<T: Transport> AutodlDriver<T> {
     /// 构造。
-    pub fn new(name: impl Into<String>, config: AutodlConfig, token: &str, transport: T) -> MnResult<Self> {
+    pub fn new(
+        name: impl Into<String>,
+        config: AutodlConfig,
+        token: &str,
+        transport: T,
+    ) -> MnResult<Self> {
         config.validate()?;
         let client = AutodlClient::new(config.endpoint.clone(), token, transport)?;
         Ok(Self {
@@ -593,18 +599,20 @@ impl<T: Transport> AutodlDriver<T> {
     /// 规格 ID 必须自带地区：同一张卡在不同地区是不同库存，
     /// 丢掉地区就只能在创建时赌一把。
     fn parse_spec_id(spec_id: &str) -> MnResult<(String, String)> {
-        spec_id.split_once('|').map(|(d, g)| (d.to_string(), g.to_string())).ok_or_else(|| {
-            MnError::bad_request(format!(
-                "规格 ID `{spec_id}` 格式非法，应为 `地区|GPU型号`"
-            ))
-        })
+        spec_id
+            .split_once('|')
+            .map(|(d, g)| (d.to_string(), g.to_string()))
+            .ok_or_else(|| {
+                MnError::bad_request(format!("规格 ID `{spec_id}` 格式非法，应为 `地区|GPU型号`"))
+            })
     }
 
     /// 查询某个地区的 GPU 库存。
     fn gpu_stock(&self, dc: &str) -> MnResult<Vec<(String, u32)>> {
-        let data = self
-            .client
-            .post("/api/v1/dev/machine/region/gpu_stock", &serde_json::json!({ "region_sign": dc }))?;
+        let data = self.client.post(
+            "/api/v1/dev/machine/region/gpu_stock",
+            &serde_json::json!({ "region_sign": dc }),
+        )?;
         let mut out = Vec::new();
         if let Some(arr) = data.as_array() {
             for item in arr {
@@ -712,7 +720,9 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
                         note: if self.config.price_for(&gpu).is_some() {
                             Some("按量计费".to_string())
                         } else {
-                            Some("价格未知（Pro API 无报价接口，可在 price_table 配置）".to_string())
+                            Some(
+                                "价格未知（Pro API 无报价接口，可在 price_table 配置）".to_string(),
+                            )
                         },
                     },
                     region: dc.clone(),
@@ -724,10 +734,7 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
 
         if out.is_empty() && !failures.is_empty() {
             return Err(MnError::NoViableCandidate {
-                reason: format!(
-                    "AutoDL 各地区的库存查询都失败了：{}",
-                    failures.join("；")
-                ),
+                reason: format!("AutoDL 各地区的库存查询都失败了：{}", failures.join("；")),
             });
         }
         Ok(out)
@@ -735,9 +742,10 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
 
     fn create(&self, spec_id: &str, name: Option<&str>) -> MnResult<Instance> {
         let (dc, gpu) = Self::parse_spec_id(spec_id)?;
-        let uuid = self.config.spec_uuid_for(&gpu).ok_or_else(|| {
-            MnError::bad_request(format!("GPU `{gpu}` 没有可用的算力规格 ID"))
-        })?;
+        let uuid = self
+            .config
+            .spec_uuid_for(&gpu)
+            .ok_or_else(|| MnError::bad_request(format!("GPU `{gpu}` 没有可用的算力规格 ID")))?;
         let guessed = self.config.spec_uuid_is_guess(&gpu);
 
         let inst_name = format!(
@@ -760,21 +768,24 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
             body["start_command"] = serde_json::json!(self.config.start_command);
         }
 
-        let data = self.client.post("/api/v1/dev/instance/pro/create", &body).map_err(|e| {
-            if guessed {
-                MnError::Provider {
-                    provider: self.name.clone(),
-                    code: "create_failed".to_string(),
-                    message: format!(
-                        "{e}\n提示：`{gpu}` 的算力规格 ID 是程序推导出来的（`{uuid}`），\
+        let data = self
+            .client
+            .post("/api/v1/dev/instance/pro/create", &body)
+            .map_err(|e| {
+                if guessed {
+                    MnError::Provider {
+                        provider: self.name.clone(),
+                        code: "create_failed".to_string(),
+                        message: format!(
+                            "{e}\n提示：`{gpu}` 的算力规格 ID 是程序推导出来的（`{uuid}`），\
                          可能不正确。请在 providers.<name>.options.gpu_spec_map 里显式指定，\
                          格式 `\"{gpu}\" = \"规格ID\"`（规格 ID 见 AutoDL 文档附录）。"
-                    ),
+                        ),
+                    }
+                } else {
+                    e
                 }
-            } else {
-                e
-            }
-        })?;
+            })?;
         let id = data.as_str().ok_or_else(|| MnError::Provider {
             provider: self.name.clone(),
             code: "missing_instance_id".to_string(),
@@ -822,7 +833,8 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
         if !self.config.start_command.is_empty() {
             body["start_command"] = serde_json::json!(self.config.start_command);
         }
-        self.client.post("/api/v1/dev/instance/pro/power_on", &body)?;
+        self.client
+            .post("/api/v1/dev/instance/pro/power_on", &body)?;
         self.describe(instance_id)
     }
 
@@ -926,10 +938,7 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
                     .get("proxy_host")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
-                ssh_port: d
-                    .get("ssh_port")
-                    .and_then(|v| v.as_u64())
-                    .map(|p| p as u16),
+                ssh_port: d.get("ssh_port").and_then(|v| v.as_u64()).map(|p| p as u16),
                 inference_host: None,
                 inference_port: None,
                 public_url: None,
@@ -952,7 +961,11 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
                 "/api/v1/dev/instance/pro/list",
                 &serde_json::json!({ "page_index": page, "page_size": 50 }),
             )?;
-            let list = d.get("list").and_then(|l| l.as_array()).cloned().unwrap_or_default();
+            let list = d
+                .get("list")
+                .and_then(|l| l.as_array())
+                .cloned()
+                .unwrap_or_default();
             if list.is_empty() {
                 break;
             }
@@ -1109,10 +1122,8 @@ mod tests {
             200,
             r#"{"code":"Success","data":"pro-abc","msg":"","request_id":"r"}"#,
         );
-        let cfg = AutodlConfig::from_options(&opts(&[
-            ("image_uuid", "base-image-l2t43iu6uk"),
-        ]))
-        .unwrap();
+        let cfg =
+            AutodlConfig::from_options(&opts(&[("image_uuid", "base-image-l2t43iu6uk")])).unwrap();
         let d = AutodlDriver::new("autodl", cfg, "tok", t).unwrap();
         // describe 也会打同一个 mock，返回的不是快照结构 → create 走占位分支
         let inst = d.create("westDC3|RTX 4090D", Some("t")).unwrap();
@@ -1128,16 +1139,22 @@ mod tests {
             r#"{"code":"BadRequest","data":null,"msg":"规格不存在","request_id":"r"}"#,
         ));
         let t: std::sync::Arc<dyn Transport + Send + Sync> = mock.clone();
-        let cfg = AutodlConfig::from_options(&opts(&[("image_uuid", "base-image-l2t43iu6uk")]))
-            .unwrap();
+        let cfg =
+            AutodlConfig::from_options(&opts(&[("image_uuid", "base-image-l2t43iu6uk")])).unwrap();
         let d = AutodlDriver::new("autodl", cfg, "tok", t).unwrap();
-        let e = d.create("westDC3|RTX 3080 Ti", None).unwrap_err().to_string();
+        let e = d
+            .create("westDC3|RTX 3080 Ti", None)
+            .unwrap_err()
+            .to_string();
         // 错误里必须给出「去配 gpu_spec_map」的指引
         assert!(e.contains("gpu_spec_map"), "{e}");
         // 实际发出的请求里，推导出的规格 ID 是 3080-ti
         let reqs = mock.recorded.lock().unwrap();
         let body = reqs[0].body.clone().unwrap_or_default();
-        assert!(body.contains("3080-ti"), "推导的规格 ID 应进入请求体：{body}");
+        assert!(
+            body.contains("3080-ti"),
+            "推导的规格 ID 应进入请求体：{body}"
+        );
     }
 
     #[test]
@@ -1153,11 +1170,14 @@ mod tests {
             "usage_info":{"mem_limit":21474836480,"valid":true}
         }}"#;
         let t = MockTransport::always(200, body);
-        let cfg = AutodlConfig::from_options(&opts(&[("image_uuid", "base-image-l2t43iu6uk")]))
-            .unwrap();
+        let cfg =
+            AutodlConfig::from_options(&opts(&[("image_uuid", "base-image-l2t43iu6uk")])).unwrap();
         let d = AutodlDriver::new("autodl", cfg, "tok", t).unwrap();
         let i = d.describe("pro-1").unwrap();
-        assert_eq!(i.network.ssh_host.as_deref(), Some("connect.westb.seetacloud.com"));
+        assert_eq!(
+            i.network.ssh_host.as_deref(),
+            Some("connect.westb.seetacloud.com")
+        );
         assert_eq!(i.network.ssh_port, Some(34222));
         // AutoDL 直接给密码，不需要我们设
         assert_eq!(i.network.ssh_password.as_deref(), Some("pw123"));
@@ -1174,12 +1194,16 @@ mod tests {
             r#"{"code":"Success","data":null}"#,
         ));
         let t: std::sync::Arc<dyn Transport + Send + Sync> = mock.clone();
-        let cfg = AutodlConfig::from_options(&opts(&[("image_uuid", "base-image-l2t43iu6uk")]))
-            .unwrap();
+        let cfg =
+            AutodlConfig::from_options(&opts(&[("image_uuid", "base-image-l2t43iu6uk")])).unwrap();
         let d = AutodlDriver::new("autodl", cfg, "tok", t).unwrap();
         d.destroy("pro-1").unwrap();
         let reqs = mock.recorded.lock().unwrap();
-        assert!(reqs.len() >= 2, "应先关机再释放，实际 {} 次调用", reqs.len());
+        assert!(
+            reqs.len() >= 2,
+            "应先关机再释放，实际 {} 次调用",
+            reqs.len()
+        );
         assert!(reqs[0].url.contains("power_off"), "{}", reqs[0].url);
         assert!(reqs[1].url.contains("release"), "{}", reqs[1].url);
     }

@@ -96,7 +96,10 @@ fn pull(args: Args) -> MnResult<i32> {
     if !args.has("quiet") {
         output::print_info(&format!(
             "源：{}　仓库：{}　文件：{}",
-            source.display_name.clone().unwrap_or_else(|| source.name.clone()),
+            source
+                .display_name
+                .clone()
+                .unwrap_or_else(|| source.name.clone()),
             model.repo,
             model.file
         ));
@@ -115,7 +118,10 @@ fn pull(args: Args) -> MnResult<i32> {
     match mangosteen_base::download::fetch_remote_files(&source, &model.repo, &opts) {
         Ok(files) => {
             let target = model.local_file_name();
-            match files.iter().find(|f| f.name == target || f.name.ends_with(&format!("/{target}"))) {
+            match files
+                .iter()
+                .find(|f| f.name == target || f.name.ends_with(&format!("/{target}")))
+            {
                 Some(f) => {
                     opts.expected_bytes = Some(f.size);
                     if want_verify {
@@ -278,7 +284,9 @@ fn search(args: Args) -> MnResult<i32> {
     };
 
     // 允许 `--source hf` 与 `hf:owner/repo` 两种写法
-    let repo = repo.strip_prefix(&format!("{}:", source.name)).unwrap_or(repo);
+    let repo = repo
+        .strip_prefix(&format!("{}:", source.name))
+        .unwrap_or(repo);
 
     let opts = mangosteen_base::DownloadOptions::new(
         config.storage.models_dir.clone(),
@@ -310,7 +318,10 @@ fn search(args: Args) -> MnResult<i32> {
 
     output::print_info(&format!(
         "{} · {} 个 GGUF 文件",
-        source.display_name.clone().unwrap_or_else(|| source.name.clone()),
+        source
+            .display_name
+            .clone()
+            .unwrap_or_else(|| source.name.clone()),
         files.len()
     ));
     println!();
@@ -422,7 +433,10 @@ fn add(args: Args) -> MnResult<i32> {
             "sha256": reg.entry.sha256,
             "replaced": reg.replaced,
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         return Ok(0);
     }
 
@@ -442,10 +456,7 @@ fn add(args: Args) -> MnResult<i32> {
                 reg.entry.spec.effective_bits_per_weight()
             ),
         ),
-        (
-            "参数量".into(),
-            format!("{:.1}B", reg.entry.spec.params_b),
-        ),
+        ("参数量".into(), format!("{:.1}B", reg.entry.spec.params_b)),
         (
             "层数 / 注意力".into(),
             format!(
@@ -453,7 +464,11 @@ fn add(args: Args) -> MnResult<i32> {
                 reg.entry.spec.n_layers,
                 reg.entry.spec.n_heads,
                 reg.entry.spec.n_kv_heads,
-                if reg.entry.spec.is_gqa() { "（GQA）" } else { "" }
+                if reg.entry.spec.is_gqa() {
+                    "（GQA）"
+                } else {
+                    ""
+                }
             ),
         ),
         (
@@ -464,7 +479,13 @@ fn add(args: Args) -> MnResult<i32> {
             "文件大小".into(),
             mangosteen_platform::fs::human_bytes(reg.entry.spec.file_size_bytes),
         ),
-        ("SHA-256".into(), reg.entry.sha256.clone().unwrap_or_else(|| output::dim("未计算"))),
+        (
+            "SHA-256".into(),
+            reg.entry
+                .sha256
+                .clone()
+                .unwrap_or_else(|| output::dim("未计算")),
+        ),
     ]);
     println!();
     println!(
@@ -605,15 +626,16 @@ fn show(args: Args) -> MnResult<i32> {
         (
             "位置".into(),
             match &entry.location {
-                mangosteen_core::model::ModelLocation::Local { path } => {
-                    path.display().to_string()
-                }
+                mangosteen_core::model::ModelLocation::Local { path } => path.display().to_string(),
                 mangosteen_core::model::ModelLocation::Cloud { instance_id, path } => {
                     format!("云端 {instance_id}:{path}")
                 }
             },
         ),
-        ("SHA-256".into(), entry.sha256.clone().unwrap_or_else(|| "-".into())),
+        (
+            "SHA-256".into(),
+            entry.sha256.clone().unwrap_or_else(|| "-".into()),
+        ),
         (
             "最后校验".into(),
             entry
@@ -623,10 +645,7 @@ fn show(args: Args) -> MnResult<i32> {
         ),
         (
             "KV/token".into(),
-            format!(
-                "{} B",
-                entry.spec.kv_bytes_per_token()
-            ),
+            format!("{} B", entry.spec.kv_bytes_per_token()),
         ),
     ]);
     Ok(0)
@@ -693,7 +712,9 @@ fn remove(args: Args) -> MnResult<i32> {
             println!(
                 "  确认执行请加 {}：{}",
                 output::paint("--yes", output::Color::Cyan),
-                output::bold(&format!("mangosteen models remove {id} --delete-file --yes"))
+                output::bold(&format!(
+                    "mangosteen models remove {id} --delete-file --yes"
+                ))
             );
             return Ok(2);
         }

@@ -315,7 +315,11 @@ pub struct MachineCollection {
     #[serde(rename = "Memory", default)]
     pub memory_gb: Vec<u64>,
     /// 该组合支持的 CPU 平台
-    #[serde(rename = "MinimalCpuPlatform", default, deserialize_with = "de_vec_or_null")]
+    #[serde(
+        rename = "MinimalCpuPlatform",
+        default,
+        deserialize_with = "de_vec_or_null"
+    )]
     pub cpu_platforms: Vec<String>,
 }
 
@@ -381,7 +385,11 @@ pub struct AvailableTypesResponse {
     #[serde(rename = "Message", default)]
     pub message: String,
     /// 机型列表
-    #[serde(rename = "AvailableInstanceTypes", default, deserialize_with = "de_vec_or_null")]
+    #[serde(
+        rename = "AvailableInstanceTypes",
+        default,
+        deserialize_with = "de_vec_or_null"
+    )]
     pub types: Vec<AvailableInstanceType>,
 }
 
@@ -554,7 +562,11 @@ pub struct ZoneInfo {
     ///
     /// 这条信息能**在选点阶段就排除**不兼容的组合，避免走到创建才失败——
     /// 失败创建虽不收费，但要多花一次下单往返。
-    #[serde(rename = "UnsupportedImageTypes", default, deserialize_with = "de_vec_or_null")]
+    #[serde(
+        rename = "UnsupportedImageTypes",
+        default,
+        deserialize_with = "de_vec_or_null"
+    )]
     pub unsupported_image_types: Vec<String>,
     /// 是否禁用镜像同步（实测字段，文档未列出）。
     ///
@@ -645,10 +657,7 @@ pub struct ZonesResponse {
 impl ZonesResponse {
     /// 按地域筛选（不区分大小写）。
     pub fn zones_in_region(&self, region: &str) -> Vec<&ZoneInfo> {
-        self.zones
-            .iter()
-            .filter(|z| z.in_region(region))
-            .collect()
+        self.zones.iter().filter(|z| z.in_region(region)).collect()
     }
 
     /// 去重后的地域列表，保持厂商返回顺序（便于稳定展示）。
@@ -746,7 +755,9 @@ pub struct MonitorInstance {
 impl MonitorInstance {
     /// 按指标名查找。
     pub fn find(&self, key: &str) -> Option<&MonitorMetric> {
-        self.metrics.iter().find(|m| m.key.eq_ignore_ascii_case(key))
+        self.metrics
+            .iter()
+            .find(|m| m.key.eq_ignore_ascii_case(key))
     }
 
     /// 指标最新值（原始百分数）。
@@ -817,7 +828,6 @@ pub mod metric {
     pub const GPU_MEMORY_USAGE: &str = "cloudwatch_gpu_memory_usage";
 }
 
-
 // ============================================================
 // 实例管理扩展接口（升降配 / 计费 / 端口 / 定时关机 / 带宽）
 // ============================================================
@@ -884,7 +894,11 @@ pub struct RefundPriceResponse {
     #[serde(rename = "Message", default)]
     pub message: String,
     /// 退费信息列表
-    #[serde(rename = "RefundPriceSet", default, deserialize_with = "de_vec_or_null")]
+    #[serde(
+        rename = "RefundPriceSet",
+        default,
+        deserialize_with = "de_vec_or_null"
+    )]
     pub items: Vec<RefundPriceItem>,
 }
 
@@ -1248,8 +1262,7 @@ mod tests {
             serde_json::from_str(r#"{"RetCode":0,"AvailableInstanceTypes":null}"#).unwrap();
         assert!(types.types.is_empty());
 
-        let cap: CapacityResponse =
-            serde_json::from_str(r#"{"RetCode":0,"Specs":null}"#).unwrap();
+        let cap: CapacityResponse = serde_json::from_str(r#"{"RetCode":0,"Specs":null}"#).unwrap();
         assert!(cap.specs.is_empty());
 
         let price: PriceResponse =
@@ -1265,10 +1278,9 @@ mod tests {
     #[test]
     fn nested_nulls_do_not_break_instance_parsing() {
         // 实例内部的列表字段同样可能为 null
-        let r: DescribeInstancesResponse = serde_json::from_str(
-            r#"{"RetCode":0,"UHostSet":[{"UHostId":"u-1","IPSet":null}]}"#,
-        )
-        .unwrap();
+        let r: DescribeInstancesResponse =
+            serde_json::from_str(r#"{"RetCode":0,"UHostSet":[{"UHostId":"u-1","IPSet":null}]}"#)
+                .unwrap();
         assert_eq!(r.uhost_set[0].id, "u-1");
         assert!(r.uhost_set[0].primary_ip().is_none());
 
@@ -1540,8 +1552,16 @@ mod tests {
     fn primary_ip_prefers_bgp() {
         let h = UHost {
             ip_set: vec![
-                IpInfo { ip: "10.0.0.1".into(), kind: "Internal".into(), mode: "IPv4".into() },
-                IpInfo { ip: "1.2.3.4".into(), kind: "Bgp".into(), mode: "IPv4".into() },
+                IpInfo {
+                    ip: "10.0.0.1".into(),
+                    kind: "Internal".into(),
+                    mode: "IPv4".into(),
+                },
+                IpInfo {
+                    ip: "1.2.3.4".into(),
+                    kind: "Bgp".into(),
+                    mode: "IPv4".into(),
+                },
             ],
             ..Default::default()
         };
@@ -1550,8 +1570,16 @@ mod tests {
         // 无 BGP 时退回第一个非空
         let h2 = UHost {
             ip_set: vec![
-                IpInfo { ip: String::new(), kind: "Bgp".into(), mode: "IPv4".into() },
-                IpInfo { ip: "5.6.7.8".into(), kind: "Other".into(), mode: "IPv4".into() },
+                IpInfo {
+                    ip: String::new(),
+                    kind: "Bgp".into(),
+                    mode: "IPv4".into(),
+                },
+                IpInfo {
+                    ip: "5.6.7.8".into(),
+                    kind: "Other".into(),
+                    mode: "IPv4".into(),
+                },
             ],
             ..Default::default()
         };

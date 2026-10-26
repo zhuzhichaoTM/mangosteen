@@ -15,8 +15,8 @@
 //! `pick --explain` 是本命令最有价值的部分：让用户在花钱前看清
 //! 「为什么选了这个节点」——价格/延迟/可用性/硬件四维分数都摊开。
 
-use mangosteen_core::MnResult;
 use mangosteen_core::policy::SelectionConstraints;
+use mangosteen_core::MnResult;
 
 use crate::cli::Args;
 use crate::commands::{load_config, reject_unknown_options};
@@ -162,10 +162,7 @@ fn specs(args: Args) -> MnResult<i32> {
 
     // 过滤：仅保留符合约束的
     let cons = constraints(&args, cfg.scheduler.require_stock)?;
-    let filtered: Vec<_> = specs
-        .iter()
-        .filter(|(p, sp)| cons.admits(p, sp))
-        .collect();
+    let filtered: Vec<_> = specs.iter().filter(|(p, sp)| cons.admits(p, sp)).collect();
 
     if args.has("json") {
         let arr: Vec<serde_json::Value> = filtered
@@ -206,8 +203,14 @@ fn specs(args: Args) -> MnResult<i32> {
                 (*p).clone(),
                 sp.spec_id.clone(),
                 sp.spec.gpu.model.clone(),
-                format!("{:.0} GiB", sp.spec.gpu.total_vram_bytes() as f64 / (1u64 << 30) as f64),
-                format!("{:.0} GiB", sp.spec.memory_bytes as f64 / (1u64 << 30) as f64),
+                format!(
+                    "{:.0} GiB",
+                    sp.spec.gpu.total_vram_bytes() as f64 / (1u64 << 30) as f64
+                ),
+                format!(
+                    "{:.0} GiB",
+                    sp.spec.memory_bytes as f64 / (1u64 << 30) as f64
+                ),
                 format!("¥{:.3}", sp.price.per_hour_cny),
                 sp.region.clone(),
                 sp.stock
@@ -217,7 +220,16 @@ fn specs(args: Args) -> MnResult<i32> {
         })
         .collect();
     output::print_table(
-        &["服务商", "规格 ID", "GPU", "显存", "内存", "时价", "地域", "库存"],
+        &[
+            "服务商",
+            "规格 ID",
+            "GPU",
+            "显存",
+            "内存",
+            "时价",
+            "地域",
+            "库存",
+        ],
         &rows,
     );
     Ok(0)
@@ -248,7 +260,10 @@ fn pick(args: Args) -> MnResult<i32> {
     if cons.min_vram_bytes > 0 {
         lines.push((
             "最低显存".into(),
-            format!("{:.1} GiB", cons.min_vram_bytes as f64 / (1u64 << 30) as f64),
+            format!(
+                "{:.1} GiB",
+                cons.min_vram_bytes as f64 / (1u64 << 30) as f64
+            ),
         ));
     }
     if let Some(p) = cons.max_price_per_hour {
@@ -290,7 +305,11 @@ fn pick(args: Args) -> MnResult<i32> {
     if args.has("explain") {
         for (i, c) in ranked.iter().enumerate() {
             if i == 0 {
-                println!("  {} {}", output::paint("★", output::Color::Green), c.explain());
+                println!(
+                    "  {} {}",
+                    output::paint("★", output::Color::Green),
+                    c.explain()
+                );
             } else {
                 println!("    {}", c.explain());
             }
@@ -311,10 +330,7 @@ fn pick(args: Args) -> MnResult<i32> {
                 ]
             })
             .collect();
-        output::print_table(
-            &["服务商", "GPU", "时价", "延迟", "显存", "总分"],
-            &rows,
-        );
+        output::print_table(&["服务商", "GPU", "时价", "延迟", "显存", "总分"], &rows);
         println!();
         println!("  {}", output::dim("加 --explain 查看各维度得分明细"));
     }
@@ -364,10 +380,8 @@ fn cheapest(args: Args) -> MnResult<i32> {
     // ---- 只查不建 ----
     if !create {
         if args.has("json") {
-            let arr: Vec<serde_json::Value> = ordered
-                .iter()
-                .map(|(p, sp)| spec_json(p, sp))
-                .collect();
+            let arr: Vec<serde_json::Value> =
+                ordered.iter().map(|(p, sp)| spec_json(p, sp)).collect();
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -386,14 +400,23 @@ fn cheapest(args: Args) -> MnResult<i32> {
             ("服务商".into(), best.0.clone()),
             ("规格 ID".into(), best.1.spec_id.clone()),
             ("GPU".into(), gpu_label(&best.1)),
-            ("时价".into(), format!("¥{:.3}/h", best.1.price.per_hour_cny)),
-            ("日费用".into(), format!("¥{:.2}", best.1.price.per_hour_cny * 24.0)),
+            (
+                "时价".into(),
+                format!("¥{:.3}/h", best.1.price.per_hour_cny),
+            ),
+            (
+                "日费用".into(),
+                format!("¥{:.2}", best.1.price.per_hour_cny * 24.0),
+            ),
             ("地域".into(), best.1.region.clone()),
         ]);
         println!();
 
         if ordered.len() > 1 {
-            println!("{}", output::bold(&format!("价格顺序（共 {} 个候选）", ordered.len())));
+            println!(
+                "{}",
+                output::bold(&format!("价格顺序（共 {} 个候选）", ordered.len()))
+            );
             println!();
             let rows: Vec<Vec<String>> = ordered
                 .iter()
@@ -405,7 +428,9 @@ fn cheapest(args: Args) -> MnResult<i32> {
                         gpu_label(sp),
                         format!("¥{:.3}", sp.price.per_hour_cny),
                         sp.region.clone(),
-                        sp.stock.map(|s| s.to_string()).unwrap_or_else(|| "-".into()),
+                        sp.stock
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "-".into()),
                     ]
                 })
                 .collect();
@@ -438,7 +463,10 @@ fn cheapest(args: Args) -> MnResult<i32> {
                 "实例名".into(),
                 name.clone().unwrap_or_else(|| "(厂商默认)".into()),
             ),
-            ("候选数".into(), format!("{}（最便宜的开不出来会自动换下一个）", ordered.len())),
+            (
+                "候选数".into(),
+                format!("{}（最便宜的开不出来会自动换下一个）", ordered.len()),
+            ),
         ]);
         println!();
         println!(
@@ -472,18 +500,24 @@ fn cheapest(args: Args) -> MnResult<i32> {
     output::print_kv(&[
         ("服务商".into(), provider.clone()),
         ("实例 ID".into(), inst.id.clone()),
-        ("SSH".into(), match (&inst.network.ssh_host, inst.network.ssh_port) {
-            (Some(h), Some(p)) => format!("{h}:{p}"),
-            (Some(h), None) => h.clone(),
-            _ => "-".into(),
-        }),
+        (
+            "SSH".into(),
+            match (&inst.network.ssh_host, inst.network.ssh_port) {
+                (Some(h), Some(p)) => format!("{h}:{p}"),
+                (Some(h), None) => h.clone(),
+                _ => "-".into(),
+            },
+        ),
     ]);
     println!();
     // 裸实例不在部署台账里 → 必须给出**能直接复制执行**的销毁命令，
     // 否则就是「开了台机器没人记得」，持续计费到用户发现为止。
     println!(
         "  {}",
-        output::paint("⚠ 这台实例不在部署台账里，不会被 stop/abort 自动回收", output::Color::Yellow)
+        output::paint(
+            "⚠ 这台实例不在部署台账里，不会被 stop/abort 自动回收",
+            output::Color::Yellow
+        )
     );
     println!(
         "  用完请销毁：{}",
@@ -711,7 +745,9 @@ fn destroy_bare_instance(args: &Args, target: &str) -> MnResult<i32> {
     let mut gw = crate::commands::build_gateway(args)?;
     let errors = gw.destroy_cloud_instance(provider, instance_id)?;
     if errors.is_empty() {
-        output::print_success(&format!("实例已销毁（{provider}/{instance_id}），计费已停止"));
+        output::print_success(&format!(
+            "实例已销毁（{provider}/{instance_id}），计费已停止"
+        ));
         return Ok(0);
     }
 

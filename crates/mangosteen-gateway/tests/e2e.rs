@@ -50,7 +50,10 @@ impl TestEnv {
         std::fs::create_dir_all(root.join("cfg")).unwrap();
         std::fs::create_dir_all(root.join("logs")).unwrap();
         // 按标签哈希出稳定但互不相同的端口段（22100 起，每段 50 个）
-        let idx = tag.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32)) % 80;
+        let idx = tag
+            .bytes()
+            .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32))
+            % 80;
         let port_base = 22_100 + (idx as u16) * 50;
         Self { root, port_base }
     }
@@ -287,7 +290,11 @@ fn build_gguf(
 
     push_u32(&mut out, &format!("{arch}.block_count"), layers);
     push_u32(&mut out, &format!("{arch}.attention.head_count"), heads);
-    push_u32(&mut out, &format!("{arch}.attention.head_count_kv"), kv_heads);
+    push_u32(
+        &mut out,
+        &format!("{arch}.attention.head_count_kv"),
+        kv_heads,
+    );
     push_u32(&mut out, &format!("{arch}.embedding_length"), embed);
     push_u32(&mut out, &format!("{arch}.context_length"), ctx);
     out
@@ -347,10 +354,7 @@ fn wait_port(host: &str, port: u16, timeout: Duration) -> bool {
 fn bind_ephemeral() -> (std::net::TcpListener, u16) {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .expect("绑定临时端口失败：本机应允许绑定回环高端口");
-    let port = listener
-        .local_addr()
-        .expect("读取已绑定端口失败")
-        .port();
+    let port = listener.local_addr().expect("读取已绑定端口失败").port();
     (listener, port)
 }
 
@@ -586,8 +590,11 @@ fn e2e_local_failure_degrades_and_reports_accurately() {
     let env = TestEnv::new("degrade");
     // 指向一个「存在但无法运行」的引擎
     let broken = env.root.join("broken-engine");
-    std::fs::write(&broken, "#!/bin/sh\necho 'libfoo.so: cannot open shared object' >&2\nexit 127\n")
-        .unwrap();
+    std::fs::write(
+        &broken,
+        "#!/bin/sh\necho 'libfoo.so: cannot open shared object' >&2\nexit 127\n",
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -858,9 +865,15 @@ fn e2e_web_ui_is_served_and_self_contained() {
     }
 
     // 关键交互必须在页面里（这些是需求明确要求的能力）
-    assert!(body.contains("/api/preview"), "页面必须调用预估接口做费用确认");
+    assert!(
+        body.contains("/api/preview"),
+        "页面必须调用预估接口做费用确认"
+    );
     assert!(body.contains("/v1/chat/completions"), "页面必须能对话");
-    assert!(body.contains("确认并开始计费"), "云端部署必须有显式确认动作");
+    assert!(
+        body.contains("确认并开始计费"),
+        "云端部署必须有显式确认动作"
+    );
 }
 
 /// 预估接口：本地可承载时**绝不**给出云端费用。
@@ -1288,8 +1301,14 @@ fn e2e_web_ui_has_no_download_controls() {
     assert_eq!(status, 200);
 
     // 不再有下载按钮 / 下载任务面板
-    assert!(!body.contains(r#"id="dp-download""#), "UI 不应再有「下载」按钮");
-    assert!(!body.contains(r#"id="dp-jobs-card""#), "UI 不应再有下载任务面板");
+    assert!(
+        !body.contains(r#"id="dp-download""#),
+        "UI 不应再有「下载」按钮"
+    );
+    assert!(
+        !body.contains(r#"id="dp-jobs-card""#),
+        "UI 不应再有下载任务面板"
+    );
     assert!(
         !body.contains("<h3>下载任务</h3>"),
         "UI 不应有「下载任务」面板标题"
@@ -1300,10 +1319,7 @@ fn e2e_web_ui_has_no_download_controls() {
         "搜索区应有「部署」按钮"
     );
     // CLI 能力仍在（文档/提示里保留 models pull）
-    assert!(
-        body.contains("models pull"),
-        "应提示 CLI 仍可下载"
-    );
+    assert!(body.contains("models pull"), "应提示 CLI 仍可下载");
 }
 
 #[test]
@@ -1502,10 +1518,7 @@ fn e2e_deploy_page_source_options_are_clean() {
         body.contains(r#"SEARCHABLE = ["hf-mirror", "hf"]"#),
         "部署页的可搜索源应只有 hf-mirror 与 hf"
     );
-    assert!(
-        !body.contains("（可搜索）"),
-        "源名不应带「（可搜索）」后缀"
-    );
+    assert!(!body.contains("（可搜索）"), "源名不应带「（可搜索）」后缀");
     // 新增控件必须存在。
     // 「取消选择」已改为文件列表内的子按钮（「全选 / 取消」），
     // 不再与搜索框同级——这里只断言分页容器。
@@ -1563,14 +1576,14 @@ fn e2e_deploy_page_interaction_contracts() {
     );
     assert!(body.contains("selectAllFiles"), "缺少全选/取消的实现");
     assert!(body.contains(r#""全选""#), "缺少「全选」按钮");
-    assert!(body.contains("files-head"), "缺少文件列表标题行（放全选/取消）");
+    assert!(
+        body.contains("files-head"),
+        "缺少文件列表标题行（放全选/取消）"
+    );
 
     // 【6】安装路径已完全不显示（用户后续要求取消）。
     // 需要路径时用命令行 `mangosteen models list`。
-    assert!(
-        !body.contains("tdPath"),
-        "已安装模型不应再渲染路径单元格"
-    );
+    assert!(!body.contains("tdPath"), "已安装模型不应再渲染路径单元格");
 
     // 【7】删除模型默认连文件一起删
     assert!(
@@ -1687,7 +1700,9 @@ fn e2e_deploy_view_switch_and_slim_columns() {
         body.contains("function hidePager("),
         "缺少 hidePager 统一入口"
     );
-    let files_start = body.find("function renderFiles(").expect("renderFiles 必须存在");
+    let files_start = body
+        .find("function renderFiles(")
+        .expect("renderFiles 必须存在");
     let files_end = body[files_start..]
         .find("function openRepo(")
         .map(|k| files_start + k)
@@ -1705,10 +1720,7 @@ fn e2e_deploy_view_switch_and_slim_columns() {
     );
 
     // 【3】已安装模型不再有路径列 / 路径按钮
-    assert!(
-        !body.contains("tdPath"),
-        "已安装模型不应再渲染路径单元格"
-    );
+    assert!(!body.contains("tdPath"), "已安装模型不应再渲染路径单元格");
     assert!(
         !body.contains(r#"el("button", "sm", "路径")"#),
         "已安装模型不应再有「路径」切换按钮"
@@ -1807,7 +1819,10 @@ fn e2e_download_page_contracts() {
     // 卡片名随产品迭代改过两次：已安装模型 → 已下载模型 → 模型列表
     assert!(body.contains("<h3>模型列表</h3>"), "标题应为「模型列表」");
     assert!(!body.contains("已安装模型"), "旧标题「已安装模型」应消失");
-    assert!(!body.contains("<h3>已下载模型</h3>"), "旧标题「已下载模型」应消失");
+    assert!(
+        !body.contains("<h3>已下载模型</h3>"),
+        "旧标题「已下载模型」应消失"
+    );
     // 生命周期三按钮（替代原先的二态切换）
     assert!(body.contains(r#""启动""#), "应有「启动」");
     assert!(body.contains(r#""停止""#), "应有「停止」");
@@ -1836,19 +1851,13 @@ fn e2e_download_page_contracts() {
         !body.contains("startDownload("),
         "不应再有批量下载逻辑（下载已移到 CLI）"
     );
-    assert!(
-        body.contains("function deployPicked("),
-        "必须保留部署入口"
-    );
+    assert!(body.contains("function deployPicked("), "必须保留部署入口");
     // 多选校验：同一模型不同量化 / 不同模型都必须拦住
     assert!(
         body.contains("function baseModelName("),
         "需要主模型名推导，用于识别「同一模型的不同量化」"
     );
-    assert!(
-        body.contains("请只选一个"),
-        "多选时必须提示只能选一个"
-    );
+    assert!(body.contains("请只选一个"), "多选时必须提示只能选一个");
 }
 
 /// 同一模型只允许一个活跃实例。
@@ -1980,7 +1989,7 @@ fn e2e_deployments_report_pid() {
 /// 避免以后有人「优化」掉这一步。
 #[test]
 fn e2e_prepared_local_gets_model_path_before_launch() {
-    use mangosteen_gateway::gateway::{PreparedLocal, PreparedDeployment};
+    use mangosteen_gateway::gateway::{PreparedDeployment, PreparedLocal};
 
     let env = TestEnv::new("prep_path");
     let engine = env.write_fake_engine();
@@ -1998,7 +2007,12 @@ fn e2e_prepared_local_gets_model_path_before_launch() {
     // 产出的 model_path 是空的，正是要复现的条件。
     let evaluated = {
         let entry = gw.models().list().unwrap().remove(0);
-        gw.evaluate_estimated(&entry.spec.name, entry.spec.quant, entry.spec.file_size_bytes, &req)
+        gw.evaluate_estimated(
+            &entry.spec.name,
+            entry.spec.quant,
+            entry.spec.file_size_bytes,
+            &req,
+        )
     };
     assert!(
         evaluated.model_path.as_os_str().is_empty(),
@@ -2024,8 +2038,10 @@ fn e2e_prepared_local_gets_model_path_before_launch() {
     let plan = gw
         .commit_local(prepared, &mangosteen_gateway::progress::noop_sink)
         .expect("补上路径后应能启动");
-    assert_eq!(plan.local.as_ref().map(|l| l.model_path.clone()),
-               Some(gguf.to_string_lossy().to_string()));
+    assert_eq!(
+        plan.local.as_ref().map(|l| l.model_path.clone()),
+        Some(gguf.to_string_lossy().to_string())
+    );
 }
 
 /// 部署进度：编排层必须逐步上报阶段，量化步骤如实标「跳过」。
@@ -2297,8 +2313,14 @@ fn e2e_deploy_page_active_model_contracts() {
     assert!(body.contains("<h3>模型列表</h3>"), "标题应为「模型列表」");
     assert!(body.contains("<h3>模型实例</h3>"), "标题应为「模型实例」");
     assert!(!body.contains("活跃部署</h3>"), "旧标题应消失");
-    assert!(!body.contains("<h3>已下载模型</h3>"), "旧标题「已下载模型」应消失");
-    assert!(!body.contains("<h3>活跃模型</h3>"), "旧标题「活跃模型」应消失");
+    assert!(
+        !body.contains("<h3>已下载模型</h3>"),
+        "旧标题「已下载模型」应消失"
+    );
+    assert!(
+        !body.contains("<h3>活跃模型</h3>"),
+        "旧标题「活跃模型」应消失"
+    );
     // 「模型列表」提供启动/停止/卸载三个独立按钮（生命周期管理）
     assert!(
         body.contains(r#"td.appendChild(mk("#),
@@ -2360,10 +2382,7 @@ fn e2e_deploy_page_copy_and_progress_contracts() {
         body.contains("搜索并下载大模型文件，然后启动本地或云端部署"),
         "副标题应为「大模型文件」"
     );
-    assert!(
-        !body.contains("搜索并下载 GGUF 模型"),
-        "旧副标题应消失"
-    );
+    assert!(!body.contains("搜索并下载 GGUF 模型"), "旧副标题应消失");
 
     // 【2】卡片改名「部署模型」+ 清空按钮（与搜索/部署同款 primary sm）
     assert!(body.contains("<h3>部署模型</h3>"), "标题应为「部署模型」");
@@ -2453,7 +2472,12 @@ fn e2e_abort_deployment_rolls_back_everything() {
     // 模拟远端评估（路径为空），再补上路径 → 走完整的 prepare 流程
     let evaluated = {
         let entry = gw.models().list().unwrap().remove(0);
-        gw.evaluate_estimated(&entry.spec.name, entry.spec.quant, entry.spec.file_size_bytes, &req)
+        gw.evaluate_estimated(
+            &entry.spec.name,
+            entry.spec.quant,
+            entry.spec.file_size_bytes,
+            &req,
+        )
     };
     let prepared = match gw
         .prepare_with_progress(evaluated, &req, &mangosteen_gateway::progress::noop_sink)
@@ -2499,11 +2523,7 @@ fn e2e_abort_deployment_rolls_back_everything() {
         8192,
         &req2,
     );
-    let again = gw.prepare_with_progress(
-        ev2,
-        &req2,
-        &mangosteen_gateway::progress::noop_sink,
-    );
+    let again = gw.prepare_with_progress(ev2, &req2, &mangosteen_gateway::progress::noop_sink);
     assert!(
         again.is_ok(),
         "回滚后同一模型必须能再次部署，实际被挡住：{}",
@@ -2634,12 +2654,12 @@ fn e2e_device_page_renders_cloud_metrics() {
 
     // 【2】四个云端指标环 + 磁盘两行
     for id in [
-        "dv-cg-ring",  // GPU
-        "dv-cv-ring",  // 显存
-        "dv-cc-ring",  // CPU
-        "dv-cm-ring",  // 内存
-        "dv-cd-sys",   // 系统盘
-        "dv-cd-data",  // 数据盘
+        "dv-cg-ring", // GPU
+        "dv-cv-ring", // 显存
+        "dv-cc-ring", // CPU
+        "dv-cm-ring", // 内存
+        "dv-cd-sys",  // 系统盘
+        "dv-cd-data", // 数据盘
     ] {
         assert!(body.contains(id), "设备页缺少云端指标 `{id}`");
     }
@@ -2705,7 +2725,9 @@ fn e2e_forced_local_never_falls_back_to_cloud() {
     // 资源不足 → 必须报错（而不是悄悄部署到云端）
     // 若本机居然装得下，这条会部署成功，此时跳过断言
     match gw.deploy(&req) {
-        Ok(_) => { let _ = gw.stop_all(); }
+        Ok(_) => {
+            let _ = gw.stop_all();
+        }
         Err(e) => {
             let msg = e.to_string();
             assert!(
@@ -2782,14 +2804,17 @@ fn e2e_deploy_page_device_picker_contracts() {
     );
 
     // 【需求1】对话页不再显示算力来源与就绪状态
-    assert!(!body.contains(r#"id="chat-state""#), "对话页不应显示状态 pill");
-    assert!(!body.contains(r#"id="chat-hint""#), "对话页不应显示就绪提示");
+    assert!(
+        !body.contains(r#"id="chat-state""#),
+        "对话页不应显示状态 pill"
+    );
+    assert!(
+        !body.contains(r#"id="chat-hint""#),
+        "对话页不应显示就绪提示"
+    );
 
     // 【需求3】已下载模型有启动/停止/卸载三按钮
-    assert!(
-        body.contains(r#""卸载""#),
-        "「已下载模型」应有「卸载」按钮"
-    );
+    assert!(body.contains(r#""卸载""#), "「已下载模型」应有「卸载」按钮");
 }
 
 // ============================================================ 算力来源选择
@@ -2878,7 +2903,10 @@ fn e2e_forced_cloud_preview_skips_local() {
     assert!(pv.local.is_none());
     assert!(!pv.blocked, "选云端不是「阻止」，而是走云端");
     assert!(
-        pv.local_reason.as_deref().unwrap_or("").contains("云端算力"),
+        pv.local_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("云端算力"),
         "原因要反映用户的选择：{:?}",
         pv.local_reason
     );
@@ -2958,14 +2986,8 @@ fn e2e_chat_and_deploy_ux_contracts() {
         body.contains(r#"$("btn-send").textContent = "停止""#),
         "生成中应把发送按钮改成「停止」"
     );
-    assert!(
-        body.contains("function stopGeneration("),
-        "缺少中断实现"
-    );
-    assert!(
-        body.contains("chatAbort.abort()"),
-        "中断必须真的断开请求"
-    );
+    assert!(body.contains("function stopGeneration("), "缺少中断实现");
+    assert!(body.contains("chatAbort.abort()"), "中断必须真的断开请求");
     assert!(
         body.contains("AbortError"),
         "中断不应被当成失败（需区分 AbortError）"
@@ -3101,9 +3123,15 @@ fn e2e_engine_selection_defaults_to_llama_cpp_and_rejects_unsupported() {
     }
 
     // 解析容错
-    assert_eq!(InferenceEngine::parse("llama.cpp"), Some(InferenceEngine::LlamaCpp));
+    assert_eq!(
+        InferenceEngine::parse("llama.cpp"),
+        Some(InferenceEngine::LlamaCpp)
+    );
     assert_eq!(InferenceEngine::parse("vllm"), Some(InferenceEngine::Vllm));
-    assert_eq!(InferenceEngine::parse("tensorrt"), Some(InferenceEngine::TensorrtLlm));
+    assert_eq!(
+        InferenceEngine::parse("tensorrt"),
+        Some(InferenceEngine::TensorrtLlm)
+    );
     assert_eq!(InferenceEngine::parse("不存在"), None);
 
     // 格式要求
@@ -3212,7 +3240,10 @@ fn e2e_deploy_page_engine_picker_contracts() {
     assert_eq!(v["local"]["engine"], "llama_cpp", "默认引擎应为 llama.cpp");
     let engines = v["local"]["engines"].as_array().expect("缺少 engines 列表");
     assert!(engines.len() >= 5);
-    let vllm = engines.iter().find(|e| e["id"] == "vllm").expect("缺少 vllm");
+    let vllm = engines
+        .iter()
+        .find(|e| e["id"] == "vllm")
+        .expect("缺少 vllm");
     assert_eq!(vllm["supported"], false, "vLLM 未适配，必须标 false");
 }
 
@@ -3253,7 +3284,10 @@ fn e2e_pull_with_deploy_flag_marks_auto_deploy() {
 
     let (status, resp) = http("POST", "127.0.0.1", port, "/api/models/pull", Some(&body));
     // 网络不可用时该接口可能失败；只要不是 500 就算接口契约正常
-    assert!(status == 200 || status == 400, "unexpected status {status}: {resp}");
+    assert!(
+        status == 200 || status == 400,
+        "unexpected status {status}: {resp}"
+    );
     if status != 200 {
         return; // 无网络环境，跳过后续断言
     }
@@ -3334,10 +3368,7 @@ fn e2e_model_lifecycle_and_single_select_contracts() {
         body.contains("个量化版本，请只选一个"),
         "同一模型不同量化必须提示精准选择"
     );
-    assert!(
-        body.contains("不能同时部署 "),
-        "多个不同模型必须报错"
-    );
+    assert!(body.contains("不能同时部署 "), "多个不同模型必须报错");
     // 只允许单选时才启用部署按钮
     assert!(
         body.contains("if (items.length !== 1) return;"),
@@ -3527,8 +3558,15 @@ fn e2e_chat_with_stopped_model_reports_clearly() {
     assert!(wait_port("127.0.0.1", port, Duration::from_secs(5)));
 
     // 没有任何实例在跑，却指定了一个具体模型
-    let body = r#"{"model":"qwen2.5-7b-instruct:q4_k_m","messages":[{"role":"user","content":"hi"}]}"#;
-    let (status, resp) = http("POST", "127.0.0.1", port, "/v1/chat/completions", Some(body));
+    let body =
+        r#"{"model":"qwen2.5-7b-instruct:q4_k_m","messages":[{"role":"user","content":"hi"}]}"#;
+    let (status, resp) = http(
+        "POST",
+        "127.0.0.1",
+        port,
+        "/v1/chat/completions",
+        Some(body),
+    );
     assert_eq!(status, 400, "指定未运行模型必须报错，实际 body={resp}");
     let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
     let msg = v["error"]["message"].as_str().unwrap_or("");
@@ -3568,8 +3606,14 @@ fn e2e_deploy_config_moved_to_settings() {
     assert!(body.contains(r#"id="se-target""#), "设置页应有设备选择");
     assert!(body.contains(r#"id="se-engine""#), "设置页应有推理引擎");
     // 部署页不再有
-    assert!(!body.contains(r#"id="dp-target""#), "部署页不应再有设备选择");
-    assert!(!body.contains(r#"id="dp-engine""#), "部署页不应再有推理引擎");
+    assert!(
+        !body.contains(r#"id="dp-target""#),
+        "部署页不应再有设备选择"
+    );
+    assert!(
+        !body.contains(r#"id="dp-engine""#),
+        "部署页不应再有推理引擎"
+    );
     // 默认算力来源为「云端」（见上方说明），推理引擎仍默认 llama.cpp
     assert!(
         body.contains(r#"<button data-t="cloud" class="on">"#),
@@ -3635,10 +3679,7 @@ fn e2e_model_start_stop_is_toggle() {
     );
     // 卸载仍独立，且运行中禁止
     assert!(body.contains(r#""卸载""#), "应有「卸载」按钮");
-    assert!(
-        body.contains("请先停止该模型，再卸载"),
-        "运行中应禁止卸载"
-    );
+    assert!(body.contains("请先停止该模型，再卸载"), "运行中应禁止卸载");
 }
 
 // ======================================================== 架构重构：会话层
@@ -3680,7 +3721,10 @@ fn e2e_session_lifecycle_over_http() {
     );
     assert_eq!(st, 201, "新建会话应返回 201，实际 {st}：{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let sid = v["session"]["id"].as_str().expect("缺少会话 id").to_string();
+    let sid = v["session"]["id"]
+        .as_str()
+        .expect("缺少会话 id")
+        .to_string();
     assert!(sid.starts_with("chat-"), "会话 ID 应带种类前缀：{sid}");
 
     // 2) 追加消息（首条用户消息应自动成为标题）
@@ -3713,15 +3757,33 @@ fn e2e_session_lifecycle_over_http() {
     );
 
     // 4) 读取详情
-    let (st, body) = http("GET", "127.0.0.1", port, &format!("/api/sessions/{sid}"), None);
+    let (st, body) = http(
+        "GET",
+        "127.0.0.1",
+        port,
+        &format!("/api/sessions/{sid}"),
+        None,
+    );
     assert_eq!(st, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["session"]["messages"][0]["role"], "user");
 
     // 5) 删除（幂等）
-    let (st, _) = http("DELETE", "127.0.0.1", port, &format!("/api/sessions/{sid}"), None);
+    let (st, _) = http(
+        "DELETE",
+        "127.0.0.1",
+        port,
+        &format!("/api/sessions/{sid}"),
+        None,
+    );
     assert_eq!(st, 200);
-    let (st, _) = http("GET", "127.0.0.1", port, &format!("/api/sessions/{sid}"), None);
+    let (st, _) = http(
+        "GET",
+        "127.0.0.1",
+        port,
+        &format!("/api/sessions/{sid}"),
+        None,
+    );
     assert_eq!(st, 404, "删除后应查不到");
 }
 
@@ -3778,7 +3840,13 @@ fn e2e_deploy_session_records_failed_operations() {
         assert_eq!(st, 200);
     }
 
-    let (_, body) = http("GET", "127.0.0.1", port, &format!("/api/sessions/{sid}"), None);
+    let (_, body) = http(
+        "GET",
+        "127.0.0.1",
+        port,
+        &format!("/api/sessions/{sid}"),
+        None,
+    );
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let ops = v["session"]["operations"].as_array().unwrap();
     assert_eq!(ops.len(), 2);
@@ -3818,7 +3886,13 @@ fn e2e_session_api_rejects_invalid_input() {
     assert_eq!(st, 400, "未知 kind 必须 400：{body}");
 
     // 不存在的会话
-    let (st, _) = http("GET", "127.0.0.1", port, "/api/sessions/chat-9999999999999", None);
+    let (st, _) = http(
+        "GET",
+        "127.0.0.1",
+        port,
+        "/api/sessions/chat-9999999999999",
+        None,
+    );
     assert_eq!(st, 404);
 
     // 缺 content
@@ -3863,18 +3937,9 @@ fn e2e_chat_history_is_persisted_to_session() {
         body.contains(r#""/api/sessions""#),
         "对话页应调用会话接口（历史落服务端）"
     );
-    assert!(
-        body.contains("function ensureSession("),
-        "缺少会话建立逻辑"
-    );
-    assert!(
-        body.contains("function saveMessage("),
-        "缺少消息落库逻辑"
-    );
-    assert!(
-        body.contains(r#"/messages"#),
-        "缺少追加消息的调用"
-    );
+    assert!(body.contains("function ensureSession("), "缺少会话建立逻辑");
+    assert!(body.contains("function saveMessage("), "缺少消息落库逻辑");
+    assert!(body.contains(r#"/messages"#), "缺少追加消息的调用");
 
     // 会话是「记录」不是「前置条件」：失败不能阻断对话
     assert!(

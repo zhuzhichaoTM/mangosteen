@@ -161,7 +161,12 @@ impl CloudOrchestrator {
     ///
     /// 单个服务商失败不影响其它服务商的结果（容错要求）。
     /// 全部失败时返回错误消息汇总，便于排障。
-    pub fn collect_candidates(&self) -> MnResult<(Vec<(String, AvailableSpec)>, std::collections::HashMap<String, u32>)> {
+    pub fn collect_candidates(
+        &self,
+    ) -> MnResult<(
+        Vec<(String, AvailableSpec)>,
+        std::collections::HashMap<String, u32>,
+    )> {
         let mut candidates = Vec::new();
         let mut latencies = std::collections::HashMap::new();
         let mut failures = Vec::new();
@@ -189,10 +194,7 @@ impl CloudOrchestrator {
                 }
             } else {
                 MnError::NoViableCandidate {
-                    reason: format!(
-                        "所有服务商查询均失败：{}",
-                        failures.join("；")
-                    ),
+                    reason: format!("所有服务商查询均失败：{}", failures.join("；")),
                 }
             });
         }
@@ -215,16 +217,23 @@ impl CloudOrchestrator {
     pub fn pick(
         &self,
         constraints: &SelectionConstraints,
-    ) -> MnResult<(ScoredCandidate, Vec<ScoredCandidate>, Vec<(String, AvailableSpec)>)> {
+    ) -> MnResult<(
+        ScoredCandidate,
+        Vec<ScoredCandidate>,
+        Vec<(String, AvailableSpec)>,
+    )> {
         let (candidates, latencies) = self.collect_candidates()?;
         let ranked = self.selector.rank(&candidates, &latencies, constraints);
-        let best = ranked.first().cloned().ok_or_else(|| MnError::NoViableCandidate {
-            reason: format!(
-                "{} 个候选规格均不满足约束（最低显存 {:.1} GiB）",
-                candidates.len(),
-                constraints.min_vram_bytes as f64 / (1u64 << 30) as f64
-            ),
-        })?;
+        let best = ranked
+            .first()
+            .cloned()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: format!(
+                    "{} 个候选规格均不满足约束（最低显存 {:.1} GiB）",
+                    candidates.len(),
+                    constraints.min_vram_bytes as f64 / (1u64 << 30) as f64
+                ),
+            })?;
         Ok((best, ranked, candidates))
     }
 
@@ -505,13 +514,21 @@ impl CloudOrchestrator {
     /// 构造某个实例的 SSH 目标（供「启动/停止服务」用）。
     ///
     /// 密码优先级与供给流程一致：厂商下发的密码 > 配置里的统一密码。
-    pub fn service_target(&self, provider: &str, instance_id: &str) -> MnResult<crate::remote::SshTarget> {
+    pub fn service_target(
+        &self,
+        provider: &str,
+        instance_id: &str,
+    ) -> MnResult<crate::remote::SshTarget> {
         let driver = self.registry.get(provider)?;
         let inst = driver.describe(instance_id)?;
-        let host = inst.network.ssh_host.clone().ok_or_else(|| MnError::Network {
-            stage: "读取 SSH 信息".to_string(),
-            reason: format!("实例 {instance_id} 未返回 SSH 地址"),
-        })?;
+        let host = inst
+            .network
+            .ssh_host
+            .clone()
+            .ok_or_else(|| MnError::Network {
+                stage: "读取 SSH 信息".to_string(),
+                reason: format!("实例 {instance_id} 未返回 SSH 地址"),
+            })?;
         Ok(crate::remote::SshTarget {
             host,
             port: inst.network.ssh_port.unwrap_or(22),
@@ -599,11 +616,7 @@ impl CloudOrchestrator {
     }
 
     /// 由实例信息与方案构造隧道参数（供给与「启动服务」共用）。
-    fn tunnel_spec_for(
-        &self,
-        instance: &Instance,
-        plan: &CloudPlan,
-    ) -> MnResult<TunnelSpec> {
+    fn tunnel_spec_for(&self, instance: &Instance, plan: &CloudPlan) -> MnResult<TunnelSpec> {
         let ssh_host = instance
             .network
             .ssh_host
@@ -713,146 +726,144 @@ fn finish_provision(
     tunnels: &mut TunnelManager,
     config: &OrchestratorConfig,
 ) -> MnResult<Provisioned> {
-        // ---- 3. 建立隧道 ----
-        // 缺 SSH 信息时必须先销毁实例再返回错误，否则会产生无谓计费
-        let ssh_host = match instance.network.ssh_host.clone() {
-            Some(h) => h,
-            None => {
-                let cleanup = driver.destroy(&instance.id);
-                let base = MnError::Network {
-                    stage: "读取 SSH 信息".to_string(),
-                    reason: format!(
-                        "服务商 {} 未返回实例 {} 的 SSH 地址，无法建立隧道",
-                        instance.provider, instance.id
-                    ),
-                };
-                return Err(augment_with_cleanup(base, &instance, cleanup));
-            }
-        };
-        let tunnel_spec = TunnelSpec {
-            ssh_host,
-            ssh_port: instance.network.ssh_port.unwrap_or(22),
-            ssh_user: "root".to_string(),
-            identity_file: None,
-            forwards: vec![mangosteen_core::net::PortForward::loopback(
-                0, // 由 TunnelManager 分配
-                plan.engine_port,
-            )],
-            control_master: true,
-            // 优先用厂商下发的密码（AutoDL 直接给 root_password），
-            // 其次才是我们主动设的统一密码（优云需要）
-            password: instance
-                .network
-                .ssh_password
-                .clone()
-                .or_else(|| config.ssh_password.clone()),
-        };
-
-        // ---- 3.5 把密码设到实例上，并等 sshd 接受它 ----
-        //
-        // 顺序很重要：先设密码再建隧道。反过来会用一个实例还不知道的密码
-        // 去认证，ssh 直接 Permission denied，而错误信息看起来像「网络不通」。
-        // 厂商已经给了密码就不用再设：优云的接口没有 key 注入，必须由我们设；
-        // AutoDL 直接下发 root_password，再调一次「重置密码」反而会让
-        // 厂商把密码改成一个我们并不知道的值。
-        let need_set = instance.network.ssh_password.is_none();
-        if let (true, Some(pw)) = (need_set, config.ssh_password.as_deref()) {
-            if let Err(e) = driver.reset_root_password(&instance.id, pw) {
-                let cleanup = driver.destroy(&instance.id);
-                return Err(augment_with_cleanup(e, &instance, cleanup));
-            }
-            // 厂商改密码是异步下发到实例内的，sshd 生效有延迟。
-            // 等端口能连上再建隧道，比让 ssh 反复重试要稳。
-            if let Err(e) = wait_tcp(
-                &tunnel_spec.ssh_host,
-                tunnel_spec.ssh_port,
-                config.start_timeout,
-                config.poll_interval,
-            ) {
-                let cleanup = driver.destroy(&instance.id);
-                return Err(augment_with_cleanup(e, &instance, cleanup));
-            }
+    // ---- 3. 建立隧道 ----
+    // 缺 SSH 信息时必须先销毁实例再返回错误，否则会产生无谓计费
+    let ssh_host = match instance.network.ssh_host.clone() {
+        Some(h) => h,
+        None => {
+            let cleanup = driver.destroy(&instance.id);
+            let base = MnError::Network {
+                stage: "读取 SSH 信息".to_string(),
+                reason: format!(
+                    "服务商 {} 未返回实例 {} 的 SSH 地址，无法建立隧道",
+                    instance.provider, instance.id
+                ),
+            };
+            return Err(augment_with_cleanup(base, &instance, cleanup));
         }
+    };
+    let tunnel_spec = TunnelSpec {
+        ssh_host,
+        ssh_port: instance.network.ssh_port.unwrap_or(22),
+        ssh_user: "root".to_string(),
+        identity_file: None,
+        forwards: vec![mangosteen_core::net::PortForward::loopback(
+            0, // 由 TunnelManager 分配
+            plan.engine_port,
+        )],
+        control_master: true,
+        // 优先用厂商下发的密码（AutoDL 直接给 root_password），
+        // 其次才是我们主动设的统一密码（优云需要）
+        password: instance
+            .network
+            .ssh_password
+            .clone()
+            .or_else(|| config.ssh_password.clone()),
+    };
 
-        // ---- 4. 先把推理服务拉起来（**必须早于建隧道**）----
-        //
-        // ## 顺序为什么不能反
-        //
-        // 隧道带 `ExitOnForwardFailure=yes`：只要远端目标端口还没人监听，
-        // ssh 就立即退出。而 llama.cpp 是**我们自己拉起的子进程**——在服务
-        // 起来之前，`plan.engine_port` 上什么都没有，隧道必然失败。
-        //
-        // 实测踩到：先建隧道时 ssh 连上就被关，报 "Connection closed by
-        // remote host"，看起来像密码/安全组问题，实际是转发目标没人听。
-        // （早期用 Ollama 镜像时 11434 是常驻服务，所以没暴露这个顺序问题。）
-        //
-        // 顺带好处：下载几 GB 权重期间不需要隧道，少一条会断的链路。
-        let target = crate::remote::SshTarget {
-            host: tunnel_spec.ssh_host.clone(),
-            port: tunnel_spec.ssh_port,
-            user: tunnel_spec.ssh_user.clone(),
-            password: tunnel_spec.password.clone(),
-        };
-
-        if plan.remote_model.is_none() {
-            // 权重准备 + 起 llama-server，全部走 ssh（不依赖隧道）
-            if let Err(e) = bootstrap_llama(&target, plan, config) {
-                let cleanup = driver.destroy(&instance.id);
-                return Err(augment_with_cleanup(e, &instance, cleanup));
-            }
+    // ---- 3.5 把密码设到实例上，并等 sshd 接受它 ----
+    //
+    // 顺序很重要：先设密码再建隧道。反过来会用一个实例还不知道的密码
+    // 去认证，ssh 直接 Permission denied，而错误信息看起来像「网络不通」。
+    // 厂商已经给了密码就不用再设：优云的接口没有 key 注入，必须由我们设；
+    // AutoDL 直接下发 root_password，再调一次「重置密码」反而会让
+    // 厂商把密码改成一个我们并不知道的值。
+    let need_set = instance.network.ssh_password.is_none();
+    if let (true, Some(pw)) = (need_set, config.ssh_password.as_deref()) {
+        if let Err(e) = driver.reset_root_password(&instance.id, pw) {
+            let cleanup = driver.destroy(&instance.id);
+            return Err(augment_with_cleanup(e, &instance, cleanup));
         }
-
-        // ---- 5. 服务已在监听，现在建隧道 ----
-        let local_port = match tunnels.establish(&tunnel_spec, config.tunnel_timeout) {
-            Ok(t) => t.local_port,
-            Err(e) => {
-                let cleanup = driver.destroy(&instance.id);
-                return Err(augment_with_cleanup(e, &instance, cleanup));
-            }
-        };
-        let base = format!("http://127.0.0.1:{local_port}");
-
-        // ---- 6. 端到端确认：经隧道探活 ----
-        //
-        // 少了这一步，台账会标 Ready 而对话直接 502——「部署成功但用不了」
-        // 是最难排查的症状。所以宁可在这里多等几十秒，也不返回假就绪的实例。
-        if plan.remote_model.is_none() {
-            // llama.cpp：等模型加载完（大模型可能要几分钟）
-            if let Err(e) = crate::remote::wait_http_ready(
-                &format!("{base}/health"),
-                config.start_timeout,
-                config.poll_interval,
-            ) {
-                let _ = tunnels.close(&tunnel_spec);
-                let cleanup = driver.destroy(&instance.id);
-                return Err(augment_with_cleanup(e, &instance, cleanup));
-            }
-        } else if let Some(model) = plan.remote_model.as_deref() {
-            // Ollama：服务常驻，探 /api/version 确认隧道通，再确保模型在
-            if let Err(e) = crate::remote::wait_http_ready(
-                &format!("{base}/api/version"),
-                config.start_timeout,
-                config.poll_interval,
-            ) {
-                let _ = tunnels.close(&tunnel_spec);
-                let cleanup = driver.destroy(&instance.id);
-                return Err(augment_with_cleanup(e, &instance, cleanup));
-            }
-            if let Err(e) =
-                crate::remote::ensure_ollama_model(&base, model, config.start_timeout)
-            {
-                let _ = tunnels.close(&tunnel_spec);
-                let cleanup = driver.destroy(&instance.id);
-                return Err(augment_with_cleanup(e, &instance, cleanup));
-            }
+        // 厂商改密码是异步下发到实例内的，sshd 生效有延迟。
+        // 等端口能连上再建隧道，比让 ssh 反复重试要稳。
+        if let Err(e) = wait_tcp(
+            &tunnel_spec.ssh_host,
+            tunnel_spec.ssh_port,
+            config.start_timeout,
+            config.poll_interval,
+        ) {
+            let cleanup = driver.destroy(&instance.id);
+            return Err(augment_with_cleanup(e, &instance, cleanup));
         }
+    }
 
-        Ok(Provisioned {
-            instance,
-            tunnel_established: true,
-            base_url: format!("{base}/v1"),
-            local_port: Some(local_port),
-        })
+    // ---- 4. 先把推理服务拉起来（**必须早于建隧道**）----
+    //
+    // ## 顺序为什么不能反
+    //
+    // 隧道带 `ExitOnForwardFailure=yes`：只要远端目标端口还没人监听，
+    // ssh 就立即退出。而 llama.cpp 是**我们自己拉起的子进程**——在服务
+    // 起来之前，`plan.engine_port` 上什么都没有，隧道必然失败。
+    //
+    // 实测踩到：先建隧道时 ssh 连上就被关，报 "Connection closed by
+    // remote host"，看起来像密码/安全组问题，实际是转发目标没人听。
+    // （早期用 Ollama 镜像时 11434 是常驻服务，所以没暴露这个顺序问题。）
+    //
+    // 顺带好处：下载几 GB 权重期间不需要隧道，少一条会断的链路。
+    let target = crate::remote::SshTarget {
+        host: tunnel_spec.ssh_host.clone(),
+        port: tunnel_spec.ssh_port,
+        user: tunnel_spec.ssh_user.clone(),
+        password: tunnel_spec.password.clone(),
+    };
+
+    if plan.remote_model.is_none() {
+        // 权重准备 + 起 llama-server，全部走 ssh（不依赖隧道）
+        if let Err(e) = bootstrap_llama(&target, plan, config) {
+            let cleanup = driver.destroy(&instance.id);
+            return Err(augment_with_cleanup(e, &instance, cleanup));
+        }
+    }
+
+    // ---- 5. 服务已在监听，现在建隧道 ----
+    let local_port = match tunnels.establish(&tunnel_spec, config.tunnel_timeout) {
+        Ok(t) => t.local_port,
+        Err(e) => {
+            let cleanup = driver.destroy(&instance.id);
+            return Err(augment_with_cleanup(e, &instance, cleanup));
+        }
+    };
+    let base = format!("http://127.0.0.1:{local_port}");
+
+    // ---- 6. 端到端确认：经隧道探活 ----
+    //
+    // 少了这一步，台账会标 Ready 而对话直接 502——「部署成功但用不了」
+    // 是最难排查的症状。所以宁可在这里多等几十秒，也不返回假就绪的实例。
+    if plan.remote_model.is_none() {
+        // llama.cpp：等模型加载完（大模型可能要几分钟）
+        if let Err(e) = crate::remote::wait_http_ready(
+            &format!("{base}/health"),
+            config.start_timeout,
+            config.poll_interval,
+        ) {
+            let _ = tunnels.close(&tunnel_spec);
+            let cleanup = driver.destroy(&instance.id);
+            return Err(augment_with_cleanup(e, &instance, cleanup));
+        }
+    } else if let Some(model) = plan.remote_model.as_deref() {
+        // Ollama：服务常驻，探 /api/version 确认隧道通，再确保模型在
+        if let Err(e) = crate::remote::wait_http_ready(
+            &format!("{base}/api/version"),
+            config.start_timeout,
+            config.poll_interval,
+        ) {
+            let _ = tunnels.close(&tunnel_spec);
+            let cleanup = driver.destroy(&instance.id);
+            return Err(augment_with_cleanup(e, &instance, cleanup));
+        }
+        if let Err(e) = crate::remote::ensure_ollama_model(&base, model, config.start_timeout) {
+            let _ = tunnels.close(&tunnel_spec);
+            let cleanup = driver.destroy(&instance.id);
+            return Err(augment_with_cleanup(e, &instance, cleanup));
+        }
+    }
+
+    Ok(Provisioned {
+        instance,
+        tunnel_established: true,
+        base_url: format!("{base}/v1"),
+        local_port: Some(local_port),
+    })
 }
 
 /// 云端 llama.cpp 引导：确保权重在远端、备好二进制、后台起服务。
@@ -892,15 +903,18 @@ fn bootstrap_llama(
     };
     if !ready {
         // ---- 2. 远端直连下载（唯一获取方式）----
-        let url = plan.download_url.as_deref().ok_or_else(|| MnError::Network {
-            stage: "准备云端模型".to_string(),
-            reason: format!(
-                "没有可用的下载地址，无法在云端获取模型 {}。\n\
+        let url = plan
+            .download_url
+            .as_deref()
+            .ok_or_else(|| MnError::Network {
+                stage: "准备云端模型".to_string(),
+                reason: format!(
+                    "没有可用的下载地址，无法在云端获取模型 {}。\n\
                  云端部署要求模型来自可下载的源（ModelScope / HuggingFace）。\
                  若是本地自有文件，请把它放到镜像里或改用本地部署。",
-                plan.model_path
-            ),
-        })?;
+                    plan.model_path
+                ),
+            })?;
         eprintln!("[cloud] 远端开始下载模型：{url}");
         let n = crate::remote::download_model_remote(target, url, remote_model, want)?;
         eprintln!("[cloud] ✓ 远端已下载模型（{n} 字节）");
@@ -1006,9 +1020,10 @@ fn wait_tcp(host: &str, port: u16, budget: Duration, interval: Duration) -> MnRe
         })?
         .collect();
     while started.elapsed() < budget {
-        if addrs.iter().any(|a| {
-            std::net::TcpStream::connect_timeout(a, Duration::from_millis(800)).is_ok()
-        }) {
+        if addrs
+            .iter()
+            .any(|a| std::net::TcpStream::connect_timeout(a, Duration::from_millis(800)).is_ok())
+        {
             return Ok(());
         }
         std::thread::sleep(interval);
@@ -1029,10 +1044,7 @@ fn wait_tcp(host: &str, port: u16, budget: Duration, interval: Duration) -> MnRe
 /// 否则会静默产生费用。
 fn augment_with_cleanup(base: MnError, instance: &Instance, cleanup: MnResult<()>) -> MnError {
     let suffix = match cleanup {
-        Ok(()) => format!(
-            "\n已自动销毁临时实例 {}，未产生持续费用。",
-            instance.id
-        ),
+        Ok(()) => format!("\n已自动销毁临时实例 {}，未产生持续费用。", instance.id),
         Err(e) => format!(
             "\n⚠ 自动销毁实例 {} 失败：{e}\n\
              请立即手工处理，避免持续计费：\n  \
@@ -1254,7 +1266,9 @@ mod tests {
 
     fn plan() -> CloudPlan {
         use mangosteen_core::estimate::{AssessRequest, KvCacheType};
-        use mangosteen_core::hardware::{Accelerator, AcceleratorVendor, HardwareProfile, HostProfile};
+        use mangosteen_core::hardware::{
+            Accelerator, AcceleratorVendor, HardwareProfile, HostProfile,
+        };
         use mangosteen_core::model::{ModelSpec, Quantization};
         let spec = ModelSpec {
             name: "qwen2.5-7b-instruct".into(),
@@ -1291,9 +1305,12 @@ mod tests {
         let a = mangosteen_core::estimate::assess(
             &spec,
             &hw,
-            &AssessRequest::default().with_context(4096).with_kv_cache(KvCacheType::F16),
+            &AssessRequest::default()
+                .with_context(4096)
+                .with_kv_cache(KvCacheType::F16),
         );
-        let engine = mangosteen_core::plan::LocalPlan::from_assessment(&spec, "/root/q.gguf", &a, 8080);
+        let engine =
+            mangosteen_core::plan::LocalPlan::from_assessment(&spec, "/root/q.gguf", &a, 8080);
         CloudPlan {
             download_url: None,
             download_bytes: None,
@@ -1314,7 +1331,9 @@ mod tests {
         }
     }
 
-    fn orchestrator(drivers: Vec<Box<dyn mangosteen_core::cloud::ProviderDriver>>) -> CloudOrchestrator {
+    fn orchestrator(
+        drivers: Vec<Box<dyn mangosteen_core::cloud::ProviderDriver>>,
+    ) -> CloudOrchestrator {
         let mut reg = DriverRegistry::new();
         for d in drivers {
             reg.register(d);
@@ -1375,7 +1394,10 @@ mod tests {
                 Ok(vec![])
             }
         }
-        let o = orchestrator(vec![Box::new(FakeDriver::new("alpha", vec![])), Box::new(Broken)]);
+        let o = orchestrator(vec![
+            Box::new(FakeDriver::new("alpha", vec![])),
+            Box::new(Broken),
+        ]);
         let (cands, _) = o.collect_candidates().unwrap();
         assert_eq!(cands.len(), 1, "坏服务商不应影响好的");
         assert_eq!(cands[0].0, "alpha");
@@ -1420,7 +1442,10 @@ mod tests {
                 Ok(vec![])
             }
         }
-        let o = orchestrator(vec![Box::new(AlwaysBroken("a")), Box::new(AlwaysBroken("b"))]);
+        let o = orchestrator(vec![
+            Box::new(AlwaysBroken("a")),
+            Box::new(AlwaysBroken("b")),
+        ]);
         let e = o.collect_candidates().unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("a:"), "got {msg}");
@@ -1473,10 +1498,15 @@ mod tests {
         let calls = d.calls.clone();
         let mut o = orchestrator(vec![Box::new(d)]);
 
-        let e = o.provision(&SelectionConstraints::default(), &plan()).unwrap_err();
+        let e = o
+            .provision(&SelectionConstraints::default(), &plan())
+            .unwrap_err();
         let msg = e.to_string();
         // 失败信息里必须包含回滚结果
-        assert!(msg.contains("自动销毁") || msg.contains("手工处理"), "got {msg}");
+        assert!(
+            msg.contains("自动销毁") || msg.contains("手工处理"),
+            "got {msg}"
+        );
 
         let c = calls.lock().unwrap().clone();
         assert!(c.iter().any(|s| s.starts_with("create")), "{c:?}");
@@ -1494,10 +1524,15 @@ mod tests {
         d.fail_destroy = true;
         let mut o = orchestrator(vec![Box::new(d)]);
 
-        let e = o.provision(&SelectionConstraints::default(), &plan()).unwrap_err();
+        let e = o
+            .provision(&SelectionConstraints::default(), &plan())
+            .unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("手工处理"), "必须提示人工介入：{msg}");
-        assert!(msg.contains("mangosteen cloud destroy"), "必须给出清理命令：{msg}");
+        assert!(
+            msg.contains("mangosteen cloud destroy"),
+            "必须给出清理命令：{msg}"
+        );
         assert!(msg.contains("i-1"), "必须给出残留实例 ID：{msg}");
     }
 
@@ -1508,7 +1543,9 @@ mod tests {
         let calls = d.calls.clone();
         let mut o = orchestrator(vec![Box::new(d)]);
 
-        let e = o.provision(&SelectionConstraints::default(), &plan()).unwrap_err();
+        let e = o
+            .provision(&SelectionConstraints::default(), &plan())
+            .unwrap_err();
         assert!(e.to_string().contains("容量不足"), "got {e}");
         let c = calls.lock().unwrap().clone();
         // 创建就失败了，没有实例可销毁
@@ -1522,7 +1559,9 @@ mod tests {
         let calls = d.calls.clone();
         let mut o = orchestrator(vec![Box::new(d)]);
 
-        let e = o.provision(&SelectionConstraints::default(), &plan()).unwrap_err();
+        let e = o
+            .provision(&SelectionConstraints::default(), &plan())
+            .unwrap_err();
         assert!(e.to_string().contains("SSH"), "got {e}");
         // 拿不到 SSH 也必须销毁实例，避免白花钱
         let c = calls.lock().unwrap().clone();
@@ -1535,14 +1574,16 @@ mod tests {
     #[test]
     fn provision_times_out_when_never_running() {
         // describe 一直返回 Starting
-        let d = FakeDriver::new(
-            "alpha",
-            vec![InstanceState::Starting; 200],
-        );
+        let d = FakeDriver::new("alpha", vec![InstanceState::Starting; 200]);
         let calls = d.calls.clone();
         let mut o = orchestrator(vec![Box::new(d)]);
-        let e = o.provision(&SelectionConstraints::default(), &plan()).unwrap_err();
-        assert!(e.to_string().contains("未进入 Running") || e.to_string().contains("回滚"), "got {e}");
+        let e = o
+            .provision(&SelectionConstraints::default(), &plan())
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("未进入 Running") || e.to_string().contains("回滚"),
+            "got {e}"
+        );
         let c = calls.lock().unwrap().clone();
         assert!(c.iter().any(|s| s.starts_with("destroy")), "{c:?}");
     }
@@ -1561,7 +1602,10 @@ mod tests {
     fn teardown_unknown_provider_is_reported() {
         let mut o = orchestrator(vec![]);
         let errs = o.teardown("ghost", "i-1");
-        assert!(errs.iter().any(|e| e.contains("找不到服务商驱动")), "{errs:?}");
+        assert!(
+            errs.iter().any(|e| e.contains("找不到服务商驱动")),
+            "{errs:?}"
+        );
     }
 
     #[test]

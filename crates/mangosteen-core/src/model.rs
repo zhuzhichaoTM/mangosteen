@@ -309,8 +309,7 @@ impl ModelSpec {
 
     /// 给定上下文长度的 KV Cache 总字节数。
     pub fn kv_bytes(&self, context_len: u32) -> u64 {
-        self.kv_bytes_per_token()
-            .saturating_mul(context_len as u64)
+        self.kv_bytes_per_token().saturating_mul(context_len as u64)
     }
 
     /// 校验字段自洽性。返回第一条不合法原因。

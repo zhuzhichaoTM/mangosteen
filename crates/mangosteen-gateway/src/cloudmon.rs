@@ -83,10 +83,7 @@ impl CloudMonitor {
         let age = if c.refreshed_at_ms == 0 {
             None
         } else {
-            Some(
-                mangosteen_core::time::now_unix_millis()
-                    .saturating_sub(c.refreshed_at_ms),
-            )
+            Some(mangosteen_core::time::now_unix_millis().saturating_sub(c.refreshed_at_ms))
         };
         (c.snapshot.clone(), c.error.clone(), age)
     }

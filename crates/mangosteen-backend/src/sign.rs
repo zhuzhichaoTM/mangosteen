@@ -130,7 +130,10 @@ pub fn signature_of(private_key: &str, params: &BTreeMap<String, String>) -> Str
 ///
 /// 三条结论全部来自真实调用对照实验（见 `docs` 注释与
 /// `sign::tests::json_array_signs_by_concatenating_elements`）。
-pub fn signature_of_json(private_key: &str, params: &serde_json::Map<String, serde_json::Value>) -> String {
+pub fn signature_of_json(
+    private_key: &str,
+    params: &serde_json::Map<String, serde_json::Value>,
+) -> String {
     // 键按字典序：BTreeMap 保证顺序与文档一致
     let mut entries: Vec<(&String, &serde_json::Value)> = params.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
@@ -291,6 +294,8 @@ mod tests {
         let cred = Credential::new("pk", "sk").unwrap();
         let sig = cred.sign(&BTreeMap::new());
         assert_eq!(sig.len(), 40);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(sig
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 }

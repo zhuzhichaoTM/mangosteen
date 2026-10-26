@@ -108,8 +108,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_option() {
-        let a =
-            crate::cli::parse_args(&["stop".to_string(), "--force".to_string()]).unwrap();
+        let a = crate::cli::parse_args(&["stop".to_string(), "--force".to_string()]).unwrap();
         // force 是 json 之外的开关；reject 应通过（force 在 BOOLEAN_FLAGS 中，
         // 但不在 ALLOWED 里）
         let e = run(a).unwrap_err();

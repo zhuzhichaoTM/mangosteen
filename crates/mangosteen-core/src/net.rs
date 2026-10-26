@@ -140,10 +140,7 @@ impl TunnelSpec {
             return Err(MnError::config("tunnel.ssh_user", "不能为空"));
         }
         if self.forwards.is_empty() {
-            return Err(MnError::config(
-                "tunnel.forwards",
-                "至少需要一条转发规则",
-            ));
+            return Err(MnError::config("tunnel.forwards", "至少需要一条转发规则"));
         }
         for f in &self.forwards {
             f.validate()?;
@@ -183,10 +180,7 @@ impl TunnelSpec {
             return Err(MnError::config("tunnel.ssh_user", "不能为空"));
         }
         if self.forwards.is_empty() {
-            return Err(MnError::config(
-                "tunnel.forwards",
-                "至少需要一条转发规则",
-            ));
+            return Err(MnError::config("tunnel.forwards", "至少需要一条转发规则"));
         }
         for f in &self.forwards {
             if f.remote_port == 0 {

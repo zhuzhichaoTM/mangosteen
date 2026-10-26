@@ -209,7 +209,12 @@ fn c1_cli_does_not_talk_to_vendors_directly() {
 fn c2_core_has_no_platform_branches() {
     for (path, src) in crate_sources("mangosteen-core") {
         let code = strip_comments_and_strings(&src);
-        for pat in ["cfg(target_os", "cfg!(target_os", "cfg(unix)", "cfg(windows)"] {
+        for pat in [
+            "cfg(target_os",
+            "cfg!(target_os",
+            "cfg(unix)",
+            "cfg(windows)",
+        ] {
             assert!(
                 !code.contains(pat),
                 "C2 违反：{} 出现平台分支 `{pat}`。\
@@ -224,7 +229,12 @@ fn c2_core_has_no_platform_branches() {
 fn c2_gateway_has_no_platform_branches() {
     for (path, src) in crate_sources("mangosteen-gateway") {
         let code = strip_comments_and_strings(&src);
-        for pat in ["cfg(target_os", "cfg!(target_os", "cfg(unix)", "cfg(windows)"] {
+        for pat in [
+            "cfg(target_os",
+            "cfg!(target_os",
+            "cfg(unix)",
+            "cfg(windows)",
+        ] {
             assert!(
                 !code.contains(pat),
                 "C2 违反：{} 出现平台分支 `{pat}`",
@@ -457,11 +467,17 @@ fn c5_dependency_direction_is_top_down() {
         // platform 需要 core 的类型
         ("mangosteen-platform", &["mangosteen-core"]),
         // base 需要 core + platform
-        ("mangosteen-base", &["mangosteen-core", "mangosteen-platform"]),
+        (
+            "mangosteen-base",
+            &["mangosteen-core", "mangosteen-platform"],
+        ),
         // session（第一层·用户会话管理）只需要领域类型与平台文件能力。
         // 它**不得**依赖 gateway/local/cloud——会话层不感知算力来源，
         // 只记录「谁在什么时候做了什么」。
-        ("mangosteen-session", &["mangosteen-core", "mangosteen-platform"]),
+        (
+            "mangosteen-session",
+            &["mangosteen-core", "mangosteen-platform"],
+        ),
         (
             "mangosteen-local",
             &["mangosteen-core", "mangosteen-platform"],
@@ -561,7 +577,12 @@ fn c5_backend_is_only_reachable_through_cloud_layer() {
 fn c5_backend_has_no_platform_branches() {
     for (path, src) in crate_sources("mangosteen-backend") {
         let code = strip_comments_and_strings(&src);
-        for pat in ["cfg(target_os", "cfg!(target_os", "cfg(unix)", "cfg(windows)"] {
+        for pat in [
+            "cfg(target_os",
+            "cfg!(target_os",
+            "cfg(unix)",
+            "cfg(windows)",
+        ] {
             assert!(
                 !code.contains(pat),
                 "C5 违反：{} 出现平台分支 `{pat}`。backend 只做协议适配。",
@@ -624,7 +645,10 @@ fn c6_five_layer_architecture_is_complete() {
         "第一层应区分推理会话与部署任务会话（SessionKind）"
     );
     // 交互入口：CLI + 内嵌 Web UI
-    assert!(file_exists("crates/mangosteen-cli/src/main.rs"), "缺少 CLI 入口");
+    assert!(
+        file_exists("crates/mangosteen-cli/src/main.rs"),
+        "缺少 CLI 入口"
+    );
     assert!(
         crate_has("mangosteen-gateway", "INDEX_HTML"),
         "缺少 Web 控制台入口（内嵌单文件 HTML）"

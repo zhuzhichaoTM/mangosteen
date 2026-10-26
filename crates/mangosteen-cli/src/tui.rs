@@ -352,7 +352,11 @@ impl App {
             Action::Refresh => self.refresh(),
             Action::Deploy(model) => {
                 // TUI 里展示的模型串带附注，取第一个空格前的 ID
-                let id = model.split_whitespace().next().unwrap_or(&model).to_string();
+                let id = model
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(&model)
+                    .to_string();
                 self.state.message = format!("正在部署 {id}…");
                 let req = DeploymentRequest::for_model(id.clone());
                 match self.gw.deploy(&req) {
@@ -497,7 +501,9 @@ impl App {
                 if self.state.models.is_empty() {
                     lines.push(String::new());
                     lines.push("  （模型库为空）".to_string());
-                    lines.push("  退出后执行：mangosteen models add <path/to/model.gguf>".to_string());
+                    lines.push(
+                        "  退出后执行：mangosteen models add <path/to/model.gguf>".to_string(),
+                    );
                 } else {
                     lines.push(String::new());
                     lines.push("  按 Enter 部署选中模型".to_string());
@@ -518,7 +524,8 @@ impl App {
                         "  {:<24} {:<28} {:<18} {}",
                         "部署 ID", "模型", "算力来源", "状态"
                     ));
-                    for (i, (id, model, origin, status)) in self.state.deployments.iter().enumerate()
+                    for (i, (id, model, origin, status)) in
+                        self.state.deployments.iter().enumerate()
                     {
                         let marker = if i == self.state.cursor { "▸" } else { " " };
                         lines.push(format!(
@@ -681,7 +688,9 @@ impl RawModeGuard {
                     &std::io::Error::last_os_error(),
                 ));
             }
-            Ok(Self { original_mode: mode })
+            Ok(Self {
+                original_mode: mode,
+            })
         }
     }
 
@@ -824,12 +833,7 @@ mod tests {
     fn stop_on_deployment_returns_action() {
         let mut s = TuiState {
             panel: Panel::Deployments,
-            deployments: vec![(
-                "dep-1".into(),
-                "m".into(),
-                "本地".into(),
-                "ready".into(),
-            )],
+            deployments: vec![("dep-1".into(), "m".into(), "本地".into(), "ready".into())],
             ..Default::default()
         };
         assert_eq!(

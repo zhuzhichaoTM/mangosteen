@@ -45,10 +45,7 @@ impl HttpRequest {
         Self {
             method: "POST".to_string(),
             url: url.into(),
-            headers: vec![(
-                "Content-Type".to_string(),
-                "application/json".to_string(),
-            )],
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
             body: Some(body.into()),
         }
     }
@@ -154,7 +151,10 @@ impl MockTransport {
         let body = body.into();
         Self {
             responses: Mutex::new(VecDeque::from(vec![
-                Ok(HttpResponse::new(status, body.clone()));
+                Ok(HttpResponse::new(
+                    status,
+                    body.clone()
+                ));
                 16
             ])),
             recorded: Mutex::new(Vec::new()),
@@ -186,10 +186,7 @@ impl MockTransport {
 
     /// 复制收到的请求列表。
     pub fn requests(&self) -> Vec<HttpRequest> {
-        self.recorded
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
+        self.recorded.lock().map(|v| v.clone()).unwrap_or_default()
     }
 }
 

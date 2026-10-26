@@ -58,7 +58,9 @@ pub fn config_dir(env: EnvLookup<'_>) -> PathBuf {
     }
     let home = home_dir(env);
     if cfg!(target_os = "macos") {
-        home.join("Library").join("Application Support").join(CONFIG_DIR)
+        home.join("Library")
+            .join("Application Support")
+            .join(CONFIG_DIR)
     } else if cfg!(target_os = "windows") {
         env("APPDATA")
             .map(PathBuf::from)
@@ -247,18 +249,12 @@ mod tests {
     fn linux_respects_xdg_and_falls_back() {
         let e = env_of(&[("HOME", "/home/u")]);
         let env: EnvLookup = &e;
-        assert_eq!(
-            config_dir(env),
-            PathBuf::from("/home/u/.config/mangosteen")
-        );
+        assert_eq!(config_dir(env), PathBuf::from("/home/u/.config/mangosteen"));
         assert_eq!(
             models_dir(env),
             PathBuf::from("/home/u/.local/share/mangosteen/models")
         );
-        assert_eq!(
-            cache_dir(env),
-            PathBuf::from("/home/u/.cache/mangosteen")
-        );
+        assert_eq!(cache_dir(env), PathBuf::from("/home/u/.cache/mangosteen"));
 
         let e = env_of(&[
             ("HOME", "/home/u"),

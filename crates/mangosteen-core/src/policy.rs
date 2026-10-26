@@ -64,10 +64,7 @@ impl ScoreWeights {
     pub fn validate(&self) -> MnResult<()> {
         let all = [self.price, self.latency, self.availability, self.hardware];
         if all.iter().any(|w| !w.is_finite() || *w < 0.0) {
-            return Err(MnError::config(
-                "scheduler.weights",
-                "权重必须为非负有限数",
-            ));
+            return Err(MnError::config("scheduler.weights", "权重必须为非负有限数"));
         }
         if all.iter().all(|w| *w == 0.0) {
             return Err(MnError::config(
@@ -203,8 +200,7 @@ impl SelectionConstraints {
         {
             return false;
         }
-        if !self.allowed_regions.is_empty()
-            && !self.allowed_regions.iter().any(|r| r == &c.region)
+        if !self.allowed_regions.is_empty() && !self.allowed_regions.iter().any(|r| r == &c.region)
         {
             return false;
         }
@@ -242,7 +238,10 @@ impl SelectionConstraints {
     /// 排序口径与 [`SelectionStrategy::Cheapest`] 完全一致（共用
     /// [`cheapest_cmp`]），否则会出现「`pick` 说最便宜是 A、`cheapest`
     /// 说最便宜是 B」这种自相矛盾的结论。
-    pub fn cheapest_first(&self, candidates: &[(String, AvailableSpec)]) -> Vec<(String, AvailableSpec)> {
+    pub fn cheapest_first(
+        &self,
+        candidates: &[(String, AvailableSpec)],
+    ) -> Vec<(String, AvailableSpec)> {
         let mut admitted: Vec<&(String, AvailableSpec)> = candidates
             .iter()
             .filter(|(p, c)| self.admits(p, c))
@@ -289,10 +288,7 @@ fn price_order_key(price: f64) -> f64 {
 ///
 /// 抽成独立函数是刻意的：策略排序与 [`SelectionConstraints::cheapest_first`]
 /// 两处各写一遍，改一处忘另一处就会得出互相矛盾的「最便宜」。
-fn cheapest_cmp(
-    a: &(f64, u32, &str, &str),
-    b: &(f64, u32, &str, &str),
-) -> std::cmp::Ordering {
+fn cheapest_cmp(a: &(f64, u32, &str, &str), b: &(f64, u32, &str, &str)) -> std::cmp::Ordering {
     a.0.partial_cmp(&b.0)
         .unwrap_or(std::cmp::Ordering::Equal)
         .then(b.1.cmp(&a.1))
@@ -432,7 +428,11 @@ impl NodeSelector {
                     Some(s) => ((s as f64) / 5.0).clamp(0.0, 1.0),
                     None => 0.8, // 厂商不提供库存 → 略保守的中性分
                 };
-                let release = if c.price.spot_release_allowed { 1.0 } else { 0.4 };
+                let release = if c.price.spot_release_allowed {
+                    1.0
+                } else {
+                    0.4
+                };
                 let s_avail = 0.6 * stock_factor + 0.2 * release + 0.2;
 
                 // 硬件：型号偏好 × 显存富余（相对候选集内最大显存）
@@ -449,8 +449,7 @@ impl NodeSelector {
                 // 偏好系数可 >1，压到 [0,1.2] 后再与显存富余混合，最后裁剪
                 let s_hw = (0.5 * pref.min(1.2) + 0.5 * vram_ratio).clamp(0.0, 1.0);
 
-                let total =
-                    w_price * s_price + w_lat * s_lat + w_avail * s_avail + w_hw * s_hw;
+                let total = w_price * s_price + w_lat * s_lat + w_avail * s_avail + w_hw * s_hw;
 
                 ScoredCandidate {
                     provider: provider.clone(),
@@ -586,7 +585,13 @@ mod tests {
     use crate::cloud::{GpuSpec, InstanceSpec, PriceQuote};
     use std::collections::BTreeMap;
 
-    fn cand(provider: &str, gpu: &str, vram_gib: u64, price: f64, stock: Option<u32>) -> (String, AvailableSpec) {
+    fn cand(
+        provider: &str,
+        gpu: &str,
+        vram_gib: u64,
+        price: f64,
+        stock: Option<u32>,
+    ) -> (String, AvailableSpec) {
         (
             provider.to_string(),
             AvailableSpec {
@@ -935,7 +940,10 @@ mod tests {
             cand("ucloud", "V100S", 32, 1.34, Some(1)),
         ];
         let ordered = SelectionConstraints::default().cheapest_first(&cands);
-        assert_eq!(ordered[0].1.spec.gpu.model, "V100S", "0 元（未知）不能排第一");
+        assert_eq!(
+            ordered[0].1.spec.gpu.model, "V100S",
+            "0 元（未知）不能排第一"
+        );
         assert_eq!(ordered[1].1.spec.gpu.model, "A100");
     }
 
@@ -961,7 +969,9 @@ mod tests {
     /// 空候选集返回空，不 panic。
     #[test]
     fn cheapest_first_empty_is_empty() {
-        assert!(SelectionConstraints::default().cheapest_first(&[]).is_empty());
+        assert!(SelectionConstraints::default()
+            .cheapest_first(&[])
+            .is_empty());
     }
 
     /// 价格序与 `Cheapest` 策略必须给出一致的首选项。

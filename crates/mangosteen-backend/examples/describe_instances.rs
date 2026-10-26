@@ -29,9 +29,7 @@
 use std::collections::BTreeMap;
 
 use mangosteen_backend::client::Scope;
-use mangosteen_backend::{
-    mapping, CompshareClient, CompshareConfig, Credential, CurlTransport,
-};
+use mangosteen_backend::{mapping, CompshareClient, CompshareConfig, Credential, CurlTransport};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -65,7 +63,14 @@ fn probe_reference_data<T: mangosteen_backend::Transport>(
                 );
             }
             let ok = !r.zones.is_empty() && r.zones.iter().all(|z| !z.zone.is_empty());
-            println!("    解析校验：{}", if ok { "✓ 字段完整" } else { "✗ 字段缺失" });
+            println!(
+                "    解析校验：{}",
+                if ok {
+                    "✓ 字段完整"
+                } else {
+                    "✗ 字段缺失"
+                }
+            );
             // 优先选非容器可用区（虚机镜像，可 SSH）
             picked = r
                 .zones
@@ -167,7 +172,14 @@ fn probe_reference_data<T: mangosteen_backend::Transport>(
                 );
             }
             let img_ok = r.image_set.iter().all(|i| !i.id.is_empty());
-            println!("    解析校验：{}", if img_ok { "✓ 镜像 ID 可解析" } else { "✗ ID 缺失" });
+            println!(
+                "    解析校验：{}",
+                if img_ok {
+                    "✓ 镜像 ID 可解析"
+                } else {
+                    "✗ ID 缺失"
+                }
+            );
         }
         Err(e) => println!("    失败：{e}"),
     }
@@ -185,8 +197,8 @@ fn truncate_chars(s: &str, max: usize) -> String {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---------- 1. 凭证 ----------
-    let public_key = env("COMPSHARE_PUBLIC_KEY")
-        .ok_or("缺少环境变量 COMPSHARE_PUBLIC_KEY（AccessKey ID）")?;
+    let public_key =
+        env("COMPSHARE_PUBLIC_KEY").ok_or("缺少环境变量 COMPSHARE_PUBLIC_KEY（AccessKey ID）")?;
     let private_key = env("COMPSHARE_PRIVATE_KEY")
         .ok_or("缺少环境变量 COMPSHARE_PRIVATE_KEY（AccessKey Secret）")?;
 
@@ -263,10 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ---------- 4. 原始响应摘要 ----------
-    let total = raw
-        .get("TotalCount")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let total = raw.get("TotalCount").and_then(|v| v.as_i64()).unwrap_or(0);
     let uhost_set = raw
         .get("UHostSet")
         .and_then(|v| v.as_array())
@@ -430,13 +439,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vram_ok,
         instances
             .first()
-            .map(|(i, _)| {
-                format!(
-                    "{} = {} GiB",
-                    i.spec.gpu.model,
-                    i.spec.gpu.vram_bytes >> 30
-                )
-            })
+            .map(|(i, _)| format!("{} = {} GiB", i.spec.gpu.model, i.spec.gpu.vram_bytes >> 30))
             .unwrap_or_default(),
     ));
 
@@ -481,12 +484,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut all_ok = true;
     for (name, ok, detail) in &checks {
-        println!(
-            "  {} {:<24} {}",
-            if *ok { "✓" } else { "✗" },
-            name,
-            detail
-        );
+        println!("  {} {:<24} {}", if *ok { "✓" } else { "✗" }, name, detail);
         all_ok &= *ok;
     }
     println!();

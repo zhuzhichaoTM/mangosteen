@@ -15,8 +15,8 @@
 //!    只给 `ssh root@x.x.x.x -p 60022` 这种命令串。
 
 use mangosteen_core::cloud::{
-    AvailableSpec, GpuSpec, Instance, InstanceMetrics, InstanceSpec, InstanceState, NetworkEndpoint,
-    PriceQuote,
+    AvailableSpec, GpuSpec, Instance, InstanceMetrics, InstanceSpec, InstanceState,
+    NetworkEndpoint, PriceQuote,
 };
 
 use crate::model::{state, AvailableInstanceType, GraphicsMemory, PriceDetail, UHost};
@@ -69,8 +69,8 @@ pub fn normalize_state(raw: &str) -> InstanceState {
         // 优云新建实例的头几十秒是 `Initializing`，落到 `_` 会被判成
         // `Failed`，编排器随即销毁一台正在正常开机的机器、换下一个候选，
         // 表现为「每个节点都创建成功但全都失败」，并且反复计费。
-        "install" | "installing" | "initializing" | "initialising" | "creating"
-        | "pending" | "deploying" => InstanceState::Creating,
+        "install" | "installing" | "initializing" | "initialising" | "creating" | "pending"
+        | "deploying" => InstanceState::Creating,
         _ => InstanceState::Failed,
     }
 }
@@ -134,8 +134,15 @@ pub fn normalize_gpu_model(code: &str) -> String {
         return format!("RTX {display}");
     }
     if upper.starts_with("RTX") || upper.starts_with("GTX") {
-        let rest = upper.trim_start_matches("RTX").trim_start_matches("GTX").trim();
-        let prefix = if upper.starts_with("RTX") { "RTX" } else { "GTX" };
+        let rest = upper
+            .trim_start_matches("RTX")
+            .trim_start_matches("GTX")
+            .trim();
+        let prefix = if upper.starts_with("RTX") {
+            "RTX"
+        } else {
+            "GTX"
+        };
         return format!("{prefix} {rest}");
     }
     upper
@@ -234,7 +241,14 @@ pub fn is_linux_image(name: &str, os_hint: &str) -> bool {
     }
     // 明确的 Linux 标识
     let linux_markers = [
-        "ubuntu", "centos", "debian", "rocky", "almalinux", "fedora", "alpine", "linux",
+        "ubuntu",
+        "centos",
+        "debian",
+        "rocky",
+        "almalinux",
+        "fedora",
+        "alpine",
+        "linux",
     ];
     if linux_markers.iter().any(|m| n.contains(m)) || o.contains("linux") {
         return true;
@@ -266,9 +280,7 @@ pub fn pick_linux_image(images: &[crate::model::ImageInfo]) -> Option<&crate::mo
     {
         return Some(i);
     }
-    available
-        .into_iter()
-        .find(|i| is_linux_image(&i.name, ""))
+    available.into_iter().find(|i| is_linux_image(&i.name, ""))
 }
 
 /// 网络端点：从 IP 与登录命令推导。
@@ -582,7 +594,10 @@ pub fn parse_spec_id(spec_id: &str) -> mangosteen_core::MnResult<(String, u32, u
     };
 
     let mut parts = spec_id.split('/');
-    let gpu_type = parts.next().filter(|s| !s.trim().is_empty()).ok_or_else(bad)?;
+    let gpu_type = parts
+        .next()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(bad)?;
     let mid = parts.next().ok_or_else(bad)?;
     let mem = parts.next().ok_or_else(bad)?;
     if parts.next().is_some() {
@@ -591,7 +606,11 @@ pub fn parse_spec_id(spec_id: &str) -> mangosteen_core::MnResult<(String, u32, u
 
     let (gpu, cpu) = mid.split_once('x').ok_or_else(bad)?;
     let gpu: u32 = gpu.trim().parse().map_err(|_| bad())?;
-    let cpu: u32 = cpu.trim_end_matches('c').trim().parse().map_err(|_| bad())?;
+    let cpu: u32 = cpu
+        .trim_end_matches('c')
+        .trim()
+        .parse()
+        .map_err(|_| bad())?;
     let memory_gb: u64 = mem
         .trim_end_matches('g')
         .trim()
@@ -841,7 +860,10 @@ mod tests {
 
     #[test]
     fn ssh_user_parsing() {
-        assert_eq!(parse_ssh_user("ssh root@1.2.3.4 -p 22").as_deref(), Some("root"));
+        assert_eq!(
+            parse_ssh_user("ssh root@1.2.3.4 -p 22").as_deref(),
+            Some("root")
+        );
         assert_eq!(parse_ssh_user("ssh ubuntu@host").as_deref(), Some("ubuntu"));
         assert_eq!(parse_ssh_user("ssh host"), None);
     }
@@ -866,7 +888,10 @@ mod tests {
 
     #[test]
     fn vram_prefers_api_value_over_table() {
-        let g = GraphicsMemory { value_gb: 48, rate: 4 };
+        let g = GraphicsMemory {
+            value_gb: 48,
+            rate: 4,
+        };
         assert_eq!(vram_bytes("4090", Some(&g)), 48 << 30);
         // 无 API 值时用内置表
         assert_eq!(vram_bytes("4090", None), 24 << 30);
@@ -1062,7 +1087,10 @@ mod tests {
 
         // 4 卡 A100
         let id2 = spec_id("A100", 4, 64, 512);
-        assert_eq!(parse_spec_id(&id2).unwrap(), ("A100".to_string(), 4, 64, 512));
+        assert_eq!(
+            parse_spec_id(&id2).unwrap(),
+            ("A100".to_string(), 4, 64, 512)
+        );
     }
 
     #[test]
@@ -1089,7 +1117,10 @@ mod tests {
             name: "4090".into(),
             zone: "cn-wlcb-01".into(),
             status: "Normal".into(),
-            graphics_memory: Some(GraphicsMemory { value_gb: 24, rate: 3 }),
+            graphics_memory: Some(GraphicsMemory {
+                value_gb: 24,
+                rate: 3,
+            }),
             ..Default::default()
         };
         let price = PriceDetail {
@@ -1097,8 +1128,8 @@ mod tests {
             instance: Some(2.5),
             ..Default::default()
         };
-        let s = to_available_spec(&item, 1, 16, 64, Some(&price), "img", Some(3))
-            .expect("应生成候选");
+        let s =
+            to_available_spec(&item, 1, 16, 64, Some(&price), "img", Some(3)).expect("应生成候选");
         assert_eq!(s.spec_id, "4090/1x16c/64g");
         assert_eq!(s.spec.gpu.vram_bytes, 24 << 30);
         assert_eq!(s.spec.memory_bytes, 64 << 30);
@@ -1124,7 +1155,10 @@ mod tests {
         let item = AvailableInstanceType {
             name: "4090".into(),
             status: "Normal".into(),
-            graphics_memory: Some(GraphicsMemory { value_gb: 24, rate: 3 }),
+            graphics_memory: Some(GraphicsMemory {
+                value_gb: 24,
+                rate: 3,
+            }),
             ..Default::default()
         };
         let s = to_available_spec(&item, 1, 16, 64, None, "img", None).unwrap();

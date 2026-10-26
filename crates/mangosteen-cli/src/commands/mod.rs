@@ -15,8 +15,8 @@ pub mod assess;
 pub mod cloud;
 pub mod config;
 pub mod deploy;
-pub mod engine;
 pub mod doctor;
+pub mod engine;
 pub mod models;
 pub mod serve;
 pub mod status;
@@ -31,9 +31,7 @@ use crate::cli::Args;
 
 /// 装载配置：解析 `--config` 并加载。
 pub fn load_config(args: &Args) -> MnResult<(Config, String)> {
-    let explicit = args
-        .get("config")
-        .map(std::path::PathBuf::from);
+    let explicit = args.get("config").map(std::path::PathBuf::from);
     let store = mangosteen_base::ConfigStore::platform_default(explicit);
     let loaded = store.load()?;
     let source = loaded.source.describe();
@@ -70,7 +68,9 @@ pub fn state_store(args: &Args) -> MnResult<mangosteen_base::StateStore> {
 
 /// 把 `Option<T>` 转成展示字符串。
 pub fn opt_str<T: std::fmt::Display>(v: &Option<T>) -> String {
-    v.as_ref().map(|x| x.to_string()).unwrap_or_else(|| "-".into())
+    v.as_ref()
+        .map(|x| x.to_string())
+        .unwrap_or_else(|| "-".into())
 }
 
 /// 校验参数是否只包含已知选项，未知则拒绝（防止用户拼错选项被静默忽略）。

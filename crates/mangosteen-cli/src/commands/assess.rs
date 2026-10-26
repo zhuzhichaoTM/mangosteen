@@ -93,7 +93,10 @@ pub fn run(args: Args) -> MnResult<i32> {
             "host_budget_bytes": a.host_budget_bytes,
             "warnings": a.warnings.iter().map(|w| w.message()).collect::<Vec<_>>(),
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
         return Ok(0);
     }
 
@@ -138,9 +141,9 @@ pub fn run(args: Args) -> MnResult<i32> {
     if !viable || args.has("suggest-quant") {
         println!();
         let budget = a.requirement.total_bytes();
-        if let Some((q, suggest)) = gw
-            .assessor()
-            .suggest_quantization(&evaluated.spec, &req, budget.max(1))
+        if let Some((q, suggest)) =
+            gw.assessor()
+                .suggest_quantization(&evaluated.spec, &req, budget.max(1))
         {
             output::print_info(&format!(
                 "在同等预算下可尝试量化档 {}（预计需求 {}）",
@@ -196,14 +199,12 @@ mod tests {
 
     #[test]
     fn bad_kv_cache_rejected() {
-        let a = crate::cli::parse_args(
-            &[
-                "assess".to_string(),
-                "m".to_string(),
-                "--kv-cache".to_string(),
-                "q2".to_string(),
-            ],
-        )
+        let a = crate::cli::parse_args(&[
+            "assess".to_string(),
+            "m".to_string(),
+            "--kv-cache".to_string(),
+            "q2".to_string(),
+        ])
         .unwrap();
         // 会在 build_gateway 之前因模型不存在或 kv 非法报错；
         // 这里验证 kv 校验分支

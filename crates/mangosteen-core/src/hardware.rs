@@ -128,7 +128,9 @@ impl HardwareProfile {
 
     /// 主加速卡（显存最大者）。本地部署默认单卡策略。
     pub fn primary_accelerator(&self) -> Option<&Accelerator> {
-        self.accelerators.iter().max_by_key(|a| a.usable_accelerator_memory())
+        self.accelerators
+            .iter()
+            .max_by_key(|a| a.usable_accelerator_memory())
     }
 
     /// 是否存在可用加速卡。

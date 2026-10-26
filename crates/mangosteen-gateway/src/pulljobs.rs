@@ -53,7 +53,10 @@ impl JobState {
 
     /// 是否已终结（不再变化）。
     pub fn is_terminal(&self) -> bool {
-        matches!(self, JobState::Done | JobState::Failed | JobState::Cancelled)
+        matches!(
+            self,
+            JobState::Done | JobState::Failed | JobState::Cancelled
+        )
     }
 }
 
@@ -510,8 +513,7 @@ pub struct DeployHooks {
     ///
     /// 「是否删文件」由调用方判断——只有**本次下载的**文件才该删。
     /// 模型原本就在本地时（用户点的是「启动」），删掉它等于卸载已有资产。
-    pub abort:
-        Arc<dyn Fn(Option<&str>, Option<&std::path::Path>) -> MnResult<()> + Send + Sync>,
+    pub abort: Arc<dyn Fn(Option<&str>, Option<&std::path::Path>) -> MnResult<()> + Send + Sync>,
 }
 
 /// 启动一个下载任务（在独立线程执行）。
@@ -630,7 +632,9 @@ pub fn spawn(
                     DeployStage::Downloading,
                     StageOutcome::Running,
                     match opts.expected_bytes {
-                        Some(n) => format!("开始下载 {}", mangosteen_base::download::human_bytes(n)),
+                        Some(n) => {
+                            format!("开始下载 {}", mangosteen_base::download::human_bytes(n))
+                        }
                         None => "开始下载（源未提供总大小）".to_string(),
                     },
                 );
@@ -901,7 +905,7 @@ mod tests {
 
         j.mark_done_with(
             &id,
-            None,   // 没能登记成模型
+            None, // 没能登记成模型
             1000,
             false,
             Some("文件已下载完成，但无法登记为模型：这不是可推理的模型文件".into()),
@@ -960,10 +964,25 @@ mod tests {
         let id = j.create_with("s:o/r/f.gguf", "f.gguf", true);
 
         // 按新顺序：评估 → 选择 → 配置 → 下载 → 量化 → 启动
-        j.set_stage(&id, DeployStage::Configuring, StageOutcome::Done, "配置完成");
-        j.set_stage(&id, DeployStage::Downloading, StageOutcome::Running, "开始下载");
+        j.set_stage(
+            &id,
+            DeployStage::Configuring,
+            StageOutcome::Done,
+            "配置完成",
+        );
+        j.set_stage(
+            &id,
+            DeployStage::Downloading,
+            StageOutcome::Running,
+            "开始下载",
+        );
         // 迟到事件：不得把指针拉回「配置」
-        j.set_stage(&id, DeployStage::Configuring, StageOutcome::Running, "迟到事件");
+        j.set_stage(
+            &id,
+            DeployStage::Configuring,
+            StageOutcome::Running,
+            "迟到事件",
+        );
 
         let job = j.get(&id).unwrap();
         assert_eq!(job.deploy_stage, Some(DeployStage::Downloading));

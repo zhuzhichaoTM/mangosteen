@@ -18,8 +18,12 @@ use mangosteen_backend::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let action = std::env::args().nth(1).unwrap_or_else(|| "start".to_string());
-    let id = std::env::args().nth(2).ok_or("用法：instance_power <start|stop> <uhost-id>")?;
+    let action = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "start".to_string());
+    let id = std::env::args()
+        .nth(2)
+        .ok_or("用法：instance_power <start|stop> <uhost-id>")?;
 
     let pk = std::env::var("COMPSHARE_PUBLIC_KEY").map_err(|_| "请设置 COMPSHARE_PUBLIC_KEY")?;
     let sk = std::env::var("COMPSHARE_PRIVATE_KEY").map_err(|_| "请设置 COMPSHARE_PRIVATE_KEY")?;
@@ -61,7 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 轮询到目标状态（厂商是异步的）
-    let target = if action == "start" { "Running" } else { "Stopped" };
+    let target = if action == "start" {
+        "Running"
+    } else {
+        "Stopped"
+    };
     println!();
     println!("→ 等待状态变为 {target}（最多 180 秒）");
     for i in 1..=60 {

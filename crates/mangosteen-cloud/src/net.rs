@@ -68,10 +68,9 @@ impl TunnelStatus {
             TunnelStatus::Up { local_port } => {
                 format!("隧道已建立 → 127.0.0.1:{local_port}")
             }
-            TunnelStatus::Degraded {
-                local_port,
-                reason,
-            } => format!("隧道异常（127.0.0.1:{local_port}）：{reason}"),
+            TunnelStatus::Degraded { local_port, reason } => {
+                format!("隧道异常（127.0.0.1:{local_port}）：{reason}")
+            }
         }
     }
 }
@@ -168,11 +167,7 @@ impl TunnelManager {
     /// 3. 拉起 `ssh -N -L ...`；
     /// 4. 等待本地端口连通（最多 `connect_timeout`）；
     /// 5. 失败则清理进程与端口分配。
-    pub fn establish(
-        &mut self,
-        spec: &TunnelSpec,
-        connect_timeout: Duration,
-    ) -> MnResult<&Tunnel> {
+    pub fn establish(&mut self, spec: &TunnelSpec, connect_timeout: Duration) -> MnResult<&Tunnel> {
         // 注意：调用方给的 local_port 可能只是占位（如 0），
         // 真实端口由本管理器分配。因此这里只校验「除本地端口外」的部分。
         spec.validate_for_establish()?;
@@ -228,10 +223,8 @@ impl TunnelManager {
         //     密钥，每次失败都多几秒，隧道建立时间从 1 秒变成十几秒。
         let mut askpass: Option<PathBuf> = None;
         if let Some(pw) = effective.password.as_deref() {
-            let script = std::env::temp_dir().join(format!(
-                "mn-askpass-{}-{local_port}.sh",
-                std::process::id()
-            ));
+            let script = std::env::temp_dir()
+                .join(format!("mn-askpass-{}-{local_port}.sh", std::process::id()));
             // 单引号转义：密码里可能有 $ 或反引号，直接塞进 shell 会被解释
             let escaped = pw.replace('\'', r#"'\''"#);
             std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{escaped}'\n")).map_err(
@@ -307,7 +300,11 @@ impl TunnelManager {
                     reason: format!(
                         "ssh 在隧道建立前退出（退出码 {code:?}）。常见原因：密钥未授权、\
                          实例未就绪、安全组拦截。stderr：{}",
-                        if tail.trim().is_empty() { "（空）" } else { &tail }
+                        if tail.trim().is_empty() {
+                            "（空）"
+                        } else {
+                            &tail
+                        }
                     ),
                 });
             }
@@ -332,7 +329,11 @@ impl TunnelManager {
                         "{}s 内本地端口 {local_port} 未连通。可能是远端 127.0.0.1:{remote_port} \
                          没有服务在监听。stderr：{}",
                         connect_timeout.as_secs(),
-                        if tail.trim().is_empty() { "（空）" } else { &tail }
+                        if tail.trim().is_empty() {
+                            "（空）"
+                        } else {
+                            &tail
+                        }
                     ),
                 });
             }
@@ -563,7 +564,13 @@ mod tests {
         let d = tmpdir("ssh-fail");
         // 假 ssh 立即报错退出，模拟密钥未授权
         let bin = fake_ssh(&d, "echo 'Permission denied (publickey)' >&2; exit 255");
-        let mut m = TunnelManager::new(port_base(10).0, port_base(10).1, bin.to_string_lossy(), Some(d.clone())).unwrap();
+        let mut m = TunnelManager::new(
+            port_base(10).0,
+            port_base(10).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
         let s = spec(8080);
         let e = m.establish(&s, Duration::from_millis(500)).unwrap_err();
         assert!(matches!(e, MnError::Network { .. }));
@@ -581,11 +588,20 @@ mod tests {
         let d = tmpdir("ssh-stall");
         // 假 ssh 活着但不转发任何端口
         let bin = fake_ssh(&d, "sleep 30");
-        let mut m = TunnelManager::new(port_base(20).0, port_base(20).1, bin.to_string_lossy(), Some(d.clone())).unwrap();
+        let mut m = TunnelManager::new(
+            port_base(20).0,
+            port_base(20).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
         let s = spec(8080);
         let started = Instant::now();
         let e = m.establish(&s, Duration::from_millis(600)).unwrap_err();
-        assert!(started.elapsed() >= Duration::from_millis(500), "应真的等待超时");
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "应真的等待超时"
+        );
         assert!(e.to_string().contains("未连通"), "got {e}");
         assert!(m.occupied_ports().is_empty());
         std::fs::remove_dir_all(&d).ok();
@@ -615,11 +631,22 @@ fi
 sleep 30
 "#;
         let bin = fake_ssh(&d, script);
-        let mut m = TunnelManager::new(port_base(0).0, port_base(0).1, bin.to_string_lossy(), Some(d.clone())).unwrap();
+        let mut m = TunnelManager::new(
+            port_base(0).0,
+            port_base(0).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
         let s = spec(8080);
-        let t = m.establish(&s, Duration::from_secs(8)).expect("隧道应建立成功");
+        let t = m
+            .establish(&s, Duration::from_secs(8))
+            .expect("隧道应建立成功");
         let port = t.local_port;
-        assert!(port >= port_base(0).0 && port <= port_base(0).1, "端口 {port} 应在本进程区间内");
+        assert!(
+            port >= port_base(0).0 && port <= port_base(0).1,
+            "端口 {port} 应在本进程区间内"
+        );
         assert_eq!(m.len(), 1);
         assert_eq!(m.snapshot().len(), 1);
         assert!(m.occupied_ports().contains(&port));
@@ -652,7 +679,13 @@ s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
 s.bind(('127.0.0.1',$port)); s.listen(5); time.sleep(30)"
 "#;
         let bin = fake_ssh(&d, script);
-        let mut m = TunnelManager::new(port_base(30).0, port_base(30).1, bin.to_string_lossy(), Some(d.clone())).unwrap();
+        let mut m = TunnelManager::new(
+            port_base(30).0,
+            port_base(30).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
         let s = spec(8080);
         let status = m.ensure_alive(&s, Duration::from_secs(8)).unwrap();
         assert!(status.is_up(), "{status:?}");
@@ -683,8 +716,16 @@ s.bind(('127.0.0.1',$port)); s.listen(5); time.sleep(30)"
 
     #[test]
     fn missing_ssh_binary_reports_clearly() {
-        let mut m = TunnelManager::new(port_base(50).0, port_base(50).1, "/nonexistent/ssh-xyz", None).unwrap();
-        let e = m.establish(&spec(8080), Duration::from_millis(300)).unwrap_err();
+        let mut m = TunnelManager::new(
+            port_base(50).0,
+            port_base(50).1,
+            "/nonexistent/ssh-xyz",
+            None,
+        )
+        .unwrap();
+        let e = m
+            .establish(&spec(8080), Duration::from_millis(300))
+            .unwrap_err();
         assert!(matches!(e, MnError::Network { .. }));
         assert!(m.occupied_ports().is_empty());
     }

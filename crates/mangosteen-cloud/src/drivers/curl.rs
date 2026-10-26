@@ -293,15 +293,21 @@ mod tests {
 
         // argv 里恰好一次（最后一项），这是唯一的 URL 来源
         assert_eq!(
-            args.iter().filter(|a| a.as_str() == "https://api.compshare.cn/v1/x").count(),
+            args.iter()
+                .filter(|a| a.as_str() == "https://api.compshare.cn/v1/x")
+                .count(),
             1,
             "URL 在 argv 里必须恰好出现一次：{args:?}"
         );
-        assert_eq!(args.last().map(|s| s.as_str()), Some("https://api.compshare.cn/v1/x"));
+        assert_eq!(
+            args.last().map(|s| s.as_str()),
+            Some("https://api.compshare.cn/v1/x")
+        );
     }
 
     #[test]
-    fn curl_config_escaping() {        assert_eq!(escape_curl_config(r#"a"b"#), r#"a\"b"#);
+    fn curl_config_escaping() {
+        assert_eq!(escape_curl_config(r#"a"b"#), r#"a\"b"#);
         assert_eq!(escape_curl_config(r"a\b"), r"a\\b");
     }
 

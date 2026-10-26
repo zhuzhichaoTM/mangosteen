@@ -109,7 +109,12 @@ impl InstanceState {
     }
 
     /// 执行迁移校验，非法则返回错误。
-    pub fn transition(self, next: InstanceState, instance_id: &str, action: &str) -> MnResult<Self> {
+    pub fn transition(
+        self,
+        next: InstanceState,
+        instance_id: &str,
+        action: &str,
+    ) -> MnResult<Self> {
         if self.can_transition_to(next) {
             Ok(next)
         } else {
@@ -265,7 +270,9 @@ impl PriceQuote {
         if self.billing_granularity_secs == 0 {
             return self.per_hour_cny * hours.ceil();
         }
-        let units = (secs as f64 / self.billing_granularity_secs as f64).ceil().max(1.0);
+        let units = (secs as f64 / self.billing_granularity_secs as f64)
+            .ceil()
+            .max(1.0);
         let unit_hours = self.billing_granularity_secs as f64 / 3600.0;
         units * unit_hours * self.per_hour_cny
     }
@@ -511,8 +518,7 @@ impl DriverRegistry {
 
     /// 注册驱动。重名会覆盖（配置热更新场景下即为预期行为）。
     pub fn register(&mut self, driver: Box<dyn ProviderDriver>) {
-        self.drivers
-            .insert(driver.name().to_string(), driver);
+        self.drivers.insert(driver.name().to_string(), driver);
     }
 
     /// 按名取驱动。
@@ -566,7 +572,9 @@ mod tests {
     #[test]
     fn happy_path_state_machine() {
         use InstanceState::*;
-        let path = [Pending, Creating, Created, Starting, Running, Stopped, Destroyed];
+        let path = [
+            Pending, Creating, Created, Starting, Running, Stopped, Destroyed,
+        ];
         for w in path.windows(2) {
             assert!(
                 w[0].can_transition_to(w[1]),
@@ -658,7 +666,7 @@ mod tests {
             spot_release_allowed: true,
             note: None,
         };
-        assert_eq!(p.cost_for(1), 2.0);       // 不足 1 小时按 1 小时
+        assert_eq!(p.cost_for(1), 2.0); // 不足 1 小时按 1 小时
         assert_eq!(p.cost_for(3600), 2.0);
         assert_eq!(p.cost_for(3601), 4.0);
     }

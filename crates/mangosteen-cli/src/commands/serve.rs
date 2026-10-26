@@ -32,9 +32,7 @@ pub fn run(args: Args) -> MnResult<i32> {
     let cfg = gw.config().clone();
 
     let host = args.get("host").unwrap_or(&cfg.gateway.host).to_string();
-    let port = args
-        .get_num::<u16>("port")?
-        .unwrap_or(cfg.gateway.port);
+    let port = args.get_num::<u16>("port")?.unwrap_or(cfg.gateway.port);
 
     if port < 1024 {
         return Err(mangosteen_core::MnError::config(
@@ -44,20 +42,20 @@ pub fn run(args: Args) -> MnResult<i32> {
     }
 
     let addr = format!("{host}:{port}");
-    let listener = TcpListener::bind(&addr).map_err(|e| {
-        mangosteen_core::MnError::Network {
-            stage: "绑定网关端口".to_string(),
-            reason: format!(
-                "{addr}：{e}。可能端口已被占用，用 --port 换一个，\
+    let listener = TcpListener::bind(&addr).map_err(|e| mangosteen_core::MnError::Network {
+        stage: "绑定网关端口".to_string(),
+        reason: format!(
+            "{addr}：{e}。可能端口已被占用，用 --port 换一个，\
                  或执行 `mangosteen stop --all` 清理残留进程"
-            ),
-        }
+        ),
     })?;
 
     // 鉴权配置
     let require_key = cfg.gateway.require_api_key;
     let api_key = if require_key {
-        cfg.gateway.api_key.resolve(&mangosteen_platform::paths::real_env)?
+        cfg.gateway
+            .api_key
+            .resolve(&mangosteen_platform::paths::real_env)?
     } else {
         String::new()
     };
@@ -102,20 +100,18 @@ mod tests {
 
     #[test]
     fn rejects_privileged_port() {
-        let a = crate::cli::parse_args(
-            &["serve".to_string(), "--port".to_string(), "80".to_string()],
-        )
-        .unwrap();
+        let a =
+            crate::cli::parse_args(&["serve".to_string(), "--port".to_string(), "80".to_string()])
+                .unwrap();
         let e = run(a).unwrap_err();
         assert!(e.to_string().contains("特权端口"), "got {e}");
     }
 
     #[test]
     fn rejects_unknown_option() {
-        let a = crate::cli::parse_args(
-            &["serve".to_string(), "--weird".to_string(), "1".to_string()],
-        )
-        .unwrap();
+        let a =
+            crate::cli::parse_args(&["serve".to_string(), "--weird".to_string(), "1".to_string()])
+                .unwrap();
         let e = run(a).unwrap_err();
         assert!(e.to_string().contains("--weird"));
     }

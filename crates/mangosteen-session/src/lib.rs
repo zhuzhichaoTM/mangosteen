@@ -301,12 +301,7 @@ impl SessionStore {
     /// 追加一条消息。会话不存在时返回 `None`。
     ///
     /// 标题为空时用首条用户消息自动生成——用户不需要先给对话起名字。
-    pub fn append_message(
-        &self,
-        id: &str,
-        role: &str,
-        content: &str,
-    ) -> MnResult<Option<Session>> {
+    pub fn append_message(&self, id: &str, role: &str, content: &str) -> MnResult<Option<Session>> {
         let mut file = self.load()?;
         let Some(s) = file.sessions.iter_mut().find(|x| x.id == id) else {
             return Ok(None);
@@ -374,7 +369,8 @@ impl SessionStore {
         if file.sessions.len() <= keep {
             return Ok(0);
         }
-        file.sessions.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+        file.sessions
+            .sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
         let removed = file.sessions.len() - keep;
         file.sessions.truncate(keep);
         self.save(&file)?;
@@ -452,9 +448,7 @@ mod tests {
         let s = store.create(SessionKind::Chat, "", None).expect("create");
 
         let long = "这是一段很长的中文内容用来测试标题截断是否按字符进行而不是按字节";
-        store
-            .append_message(&s.id, "user", long)
-            .expect("append");
+        store.append_message(&s.id, "user", long).expect("append");
 
         let got = store.get(&s.id).expect("get").expect("exists");
         assert!(!got.title.is_empty(), "标题应自动生成");
@@ -474,7 +468,11 @@ mod tests {
     fn deploy_session_records_operations() {
         let (store, dir) = temp_store("ops");
         let s = store
-            .create(SessionKind::Deploy, "qwen2.5:q4_k_m", Some("qwen2.5:q4_k_m".into()))
+            .create(
+                SessionKind::Deploy,
+                "qwen2.5:q4_k_m",
+                Some("qwen2.5:q4_k_m".into()),
+            )
             .expect("create");
 
         store
@@ -530,17 +528,16 @@ mod tests {
         let (store, dir) = temp_store("msg");
         let s = store.create(SessionKind::Chat, "", None).expect("create");
         store.append_message(&s.id, "user", "你好").expect("a");
-        store.append_message(&s.id, "assistant", "你好呀").expect("b");
+        store
+            .append_message(&s.id, "assistant", "你好呀")
+            .expect("b");
 
         let got = store.get(&s.id).expect("get").expect("exists");
         let msgs = got.to_chat_messages();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[0]["content"], "你好");
-        assert!(
-            msgs[0].get("at_ms").is_none(),
-            "内部时间戳不应进入协议消息"
-        );
+        assert!(msgs[0].get("at_ms").is_none(), "内部时间戳不应进入协议消息");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -549,7 +546,10 @@ mod tests {
     #[test]
     fn missing_session_returns_none() {
         let (store, dir) = temp_store("missing");
-        assert!(store.append_message("nope", "user", "x").expect("a").is_none());
+        assert!(store
+            .append_message("nope", "user", "x")
+            .expect("a")
+            .is_none());
         assert!(store
             .record_operation("nope", "deploy", "x", true)
             .expect("b")

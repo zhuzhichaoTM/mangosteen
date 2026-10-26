@@ -29,9 +29,7 @@
 //! 全程只读：`CheckCompShareResourceCapacity` 是**模拟调度**，不创建任何资源、
 //! 不产生费用。产线环境可以放心反复跑。
 
-use mangosteen_backend::{
-    scan_all, CompshareClient, Credential, CurlTransport, ScanOptions,
-};
+use mangosteen_backend::{scan_all, CompshareClient, Credential, CurlTransport, ScanOptions};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -147,10 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     avail.len()
                 );
                 for s in avail.iter().take(4) {
-                    println!(
-                        "      {}卡 / {}核 / {}GB",
-                        s.gpu, s.cpu, s.mem_gb
-                    );
+                    println!("      {}卡 / {}核 / {}GB", s.gpu, s.cpu, s.mem_gb);
                 }
                 if avail.len() > 4 {
                     println!("      …还有 {} 个组合", avail.len() - 4);
@@ -178,7 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             e.region,
             e.zone,
             e.gpu_type,
-            if state.starts_with("失败") { "查询失败" } else { &state },
+            if state.starts_with("失败") {
+                "查询失败"
+            } else {
+                &state
+            },
             e.available_specs().len()
         );
         if let Some(err) = &e.error {
@@ -200,7 +199,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== 统计 ===");
     println!("查询组合      : {} 个", matrix.entries.len());
     println!("有货          : {} 个", matrix.in_stock_count());
-    println!("缺货          : {} 个", matrix.entries.len() - matrix.in_stock_count() - matrix.failed_count());
+    println!(
+        "缺货          : {} 个",
+        matrix.entries.len() - matrix.in_stock_count() - matrix.failed_count()
+    );
     println!("查询失败      : {} 个", matrix.failed_count());
     println!("跳过          : {} 项", matrix.skipped.len());
     let out_of_stock = matrix.out_of_stock_types();
@@ -242,7 +244,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 实测：Spot 与 Postpay/Dynamic/Month/Day 的库存池不同，
     // 换模式可能是「查到货」的关键。
     println!("=== 提示 ===");
-    println!("本次使用计费模式 `{}`。库存结果随计费模式变化：", opts.charge_type);
+    println!(
+        "本次使用计费模式 `{}`。库存结果随计费模式变化：",
+        opts.charge_type
+    );
     println!("  · Postpay / Dynamic / Month / Day 通常共享同一库存池");
     println!("  · Spot（抢占式）库存池独立，可能整片为空");
     println!("若目标卡型显示缺货，可用 COMPSHARE_CHARGE_TYPE=Postpay 复测一次。");

@@ -109,7 +109,11 @@ pub fn run(args: Args) -> MnResult<i32> {
         println!("  [{}] {}", tag, output::bold(&c.name));
         println!("         {}", c.detail);
         if let Some(h) = &c.hint {
-            println!("         {} {}", output::dim("→"), output::paint(h, output::Color::Cyan));
+            println!(
+                "         {} {}",
+                output::dim("→"),
+                output::paint(h, output::Color::Cyan)
+            );
         }
     }
 
@@ -221,9 +225,7 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
                 name: "本地优先策略".into(),
                 status: Status::Warn,
                 detail: "被配置关闭，将不再优先尝试本地部署".into(),
-                hint: Some(
-                    "把 scheduler.local_first 改回 true；只在临时排障时才应关闭".into(),
-                ),
+                hint: Some("把 scheduler.local_first 改回 true；只在临时排障时才应关闭".into()),
             });
         }
 
@@ -256,9 +258,9 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
                         .map(|_| "可写".to_string())
                         .unwrap_or_else(|e| e.clone())
                 ),
-                hint: writable.err().map(|_| {
-                    format!("检查该目录权限，或改用有写权限的路径（配置 storage.*）")
-                }),
+                hint: writable
+                    .err()
+                    .map(|_| format!("检查该目录权限，或改用有写权限的路径（配置 storage.*）")),
             });
         }
 
@@ -276,9 +278,7 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
                 name: "网关端口".into(),
                 status: Status::Warn,
                 detail: format!("{port} 已被占用"),
-                hint: Some(
-                    "已有 serve 在运行？否则改配置 gateway.port 或加 --port 启动".into(),
-                ),
+                hint: Some("已有 serve 在运行？否则改配置 gateway.port 或加 --port 启动".into()),
             });
         }
 
@@ -398,16 +398,8 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
             let gib = avail as f64 / (1u64 << 30) as f64;
             out.push(Check {
                 name: "模型库磁盘".into(),
-                status: if gib < 10.0 {
-                    Status::Warn
-                } else {
-                    Status::Ok
-                },
-                detail: format!(
-                    "{} 剩余约 {:.1} GiB",
-                    cfg.storage.models_dir.display(),
-                    gib
-                ),
+                status: if gib < 10.0 { Status::Warn } else { Status::Ok },
+                detail: format!("{} 剩余约 {:.1} GiB", cfg.storage.models_dir.display(), gib),
                 hint: if gib < 10.0 {
                     Some("7B Q4 模型约需 4.5 GiB，32B 约需 20 GiB。请清理或换盘".into())
                 } else {
@@ -502,9 +494,11 @@ mod tests {
 
     #[test]
     fn doctor_rejects_unknown_option() {
-        let a = crate::cli::parse_args(
-            &["doctor".to_string(), "--whatever".to_string(), "1".to_string()],
-        )
+        let a = crate::cli::parse_args(&[
+            "doctor".to_string(),
+            "--whatever".to_string(),
+            "1".to_string(),
+        ])
         .unwrap();
         let e = run(a).unwrap_err();
         assert!(e.to_string().contains("--whatever"));

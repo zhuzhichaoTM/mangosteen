@@ -124,7 +124,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             opts.gpu_allowlist.join(", ")
         }
     );
-    println!("模式     : {}", if launch { "真实启动（--launch）" } else { "仅查询（dry-run）" });
+    println!(
+        "模式     : {}",
+        if launch {
+            "真实启动（--launch）"
+        } else {
+            "仅查询（dry-run）"
+        }
+    );
     println!();
 
     // 计费提醒
@@ -208,8 +215,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== 性价比（元 / GiB显存·小时，从优到劣） ===");
     let by_eff = board.sorted_by_vram_efficiency(|t| mangosteen_backend::known_vram_gb(t));
     for o in by_eff.iter().take(8) {
-        let per_gib = o.per_hour_cny
-            / (mangosteen_backend::known_vram_gb(&o.spec.gpu_type).max(1) as f64);
+        let per_gib =
+            o.per_hour_cny / (mangosteen_backend::known_vram_gb(&o.spec.gpu_type).max(1) as f64);
         println!(
             "  {:<10} {:<22} ¥{:.4}/GiB·h   时价 ¥{:.3}",
             o.spec.gpu_type,

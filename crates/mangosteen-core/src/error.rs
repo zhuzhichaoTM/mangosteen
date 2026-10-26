@@ -50,7 +50,11 @@ pub enum MnError {
     DriverUnavailable { provider: String },
 
     /// 云端服务商返回的业务错误（已归一化）。
-    Provider { provider: String, code: String, message: String },
+    Provider {
+        provider: String,
+        code: String,
+        message: String,
+    },
 
     /// 云端实例状态迁移非法（如对 `Destroyed` 实例执行 `stop`）。
     InvalidTransition {
@@ -207,14 +211,14 @@ impl MnError {
     /// 面向 CLI 的进程退出码。沿用 BSD sysexits 习惯，便于脚本化调用。
     pub fn exit_code(&self) -> i32 {
         match self {
-            MnError::BadRequest { .. } => 64,        // EX_USAGE
+            MnError::BadRequest { .. } => 64, // EX_USAGE
             MnError::ModelNotFound { .. }
             | MnError::GgufFormat { .. }
-            | MnError::HashMismatch { .. } => 66,    // EX_NOINPUT
+            | MnError::HashMismatch { .. } => 66, // EX_NOINPUT
             MnError::Config { .. } | MnError::ConfigIo { .. } => 78, // EX_CONFIG
-            MnError::AccessDenied { .. } => 77,      // EX_NOPERM
+            MnError::AccessDenied { .. } => 77, // EX_NOPERM
             MnError::InsufficientLocalResource { .. } => 69, // EX_UNAVAILABLE
-            _ => 70,                                 // EX_SOFTWARE
+            _ => 70,                          // EX_SOFTWARE
         }
     }
 }

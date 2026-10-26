@@ -99,7 +99,10 @@ fn execute(args: Args, foreground: bool) -> MnResult<i32> {
             "context_len": plan.assessment.context_len,
             "kv_cache": plan.assessment.kv_cache,
         });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
     } else {
         print_deploy_result(&plan, &gw);
         for w in &plan.assessment.warnings {
@@ -140,7 +143,10 @@ fn execute(args: Args, foreground: bool) -> MnResult<i32> {
 }
 
 /// 打印部署结果。
-fn print_deploy_result(plan: &mangosteen_core::plan::DeploymentPlan, gw: &mangosteen_gateway::Gateway) {
+fn print_deploy_result(
+    plan: &mangosteen_core::plan::DeploymentPlan,
+    gw: &mangosteen_gateway::Gateway,
+) {
     output::print_success(&format!(
         "部署完成：{} ({})",
         plan.model.name,
@@ -153,9 +159,15 @@ fn print_deploy_result(plan: &mangosteen_core::plan::DeploymentPlan, gw: &mangos
     output::print_kv(&[
         ("部署 ID".into(), plan.id.clone()),
         ("算力来源".into(), plan.origin.label()),
-        ("落位形态".into(), plan.assessment.placement.describe(plan.model.n_layers)),
+        (
+            "落位形态".into(),
+            plan.assessment.placement.describe(plan.model.n_layers),
+        ),
         ("上下文".into(), plan.assessment.context_len.to_string()),
-        ("KV 精度".into(), plan.assessment.kv_cache.as_cli_value().to_string()),
+        (
+            "KV 精度".into(),
+            plan.assessment.kv_cache.as_cli_value().to_string(),
+        ),
         ("量化".into(), plan.assessment.quant.to_string()),
         ("后端端口".into(), port),
         (
@@ -245,9 +257,12 @@ mod tests {
 
     #[test]
     fn unknown_option_rejected() {
-        let args = crate::cli::parse_args(
-            &["deploy".to_string(), "m".to_string(), "--bogus".to_string(), "1".to_string()],
-        )
+        let args = crate::cli::parse_args(&[
+            "deploy".to_string(),
+            "m".to_string(),
+            "--bogus".to_string(),
+            "1".to_string(),
+        ])
         .unwrap();
         let e = execute(args, false).unwrap_err();
         assert!(e.to_string().contains("--bogus"), "got {e}");
@@ -255,9 +270,8 @@ mod tests {
 
     #[test]
     fn allowed_options_listed_in_error() {
-        let args = crate::cli::parse_args(
-            &["deploy".to_string(), "m".to_string(), "--nope".to_string()],
-        );
+        let args =
+            crate::cli::parse_args(&["deploy".to_string(), "m".to_string(), "--nope".to_string()]);
         // --nope 是布尔开关形式，会被当成带值选项而缺值 → 解析期报错
         assert!(args.is_err() || execute(args.unwrap(), false).is_err());
     }

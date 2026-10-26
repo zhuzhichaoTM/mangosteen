@@ -256,7 +256,12 @@ impl<T: Transport> CompshareClient<T> {
     // ------------------------------------------------------------ 底层调用
 
     /// 发起一次 Action 调用，返回原始 JSON。
-    pub fn call(&self, action: &str, mut params: Params, scope: Scope) -> MnResult<serde_json::Value> {
+    pub fn call(
+        &self,
+        action: &str,
+        mut params: Params,
+        scope: Scope,
+    ) -> MnResult<serde_json::Value> {
         params.set("Action", action);
         match scope {
             Scope::None => {}
@@ -286,8 +291,10 @@ impl<T: Transport> CompshareClient<T> {
         let signature = self.credential.sign(params.as_map());
         params.set("Signature", signature);
 
-        let req = HttpRequest::form_post(&self.endpoint, params.to_form_body())
-            .with_header("U-Timestamp-Ms", mangosteen_core::time::now_unix_millis().to_string());
+        let req = HttpRequest::form_post(&self.endpoint, params.to_form_body()).with_header(
+            "U-Timestamp-Ms",
+            mangosteen_core::time::now_unix_millis().to_string(),
+        );
 
         let resp = self.transport.execute(&req)?;
         self.interpret(action, resp)
@@ -353,8 +360,10 @@ impl<T: Transport> CompshareClient<T> {
         );
 
         let body = serde_json::Value::Object(fields).to_string();
-        let req = HttpRequest::json_post(&self.endpoint, body)
-            .with_header("U-Timestamp-Ms", mangosteen_core::time::now_unix_millis().to_string());
+        let req = HttpRequest::json_post(&self.endpoint, body).with_header(
+            "U-Timestamp-Ms",
+            mangosteen_core::time::now_unix_millis().to_string(),
+        );
         let resp = self.transport.execute(&req)?;
         self.interpret(action, resp)
     }
@@ -537,7 +546,12 @@ impl<T: Transport> CompshareClient<T> {
     }
 
     /// 查询平台镜像列表。
-    pub fn images(&self, image_type: Option<&str>, limit: u32, offset: u32) -> MnResult<ImagesResponse> {
+    pub fn images(
+        &self,
+        image_type: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> MnResult<ImagesResponse> {
         let mut p = Params::new();
         p.set_opt("ImageType", image_type)
             .set_i64("Limit", i64::from(limit))
@@ -670,7 +684,11 @@ impl<T: Transport> CompshareClient<T> {
     }
 
     /// 启动实例（仅 `Stopped` 可用）。
-    pub fn start_instance(&self, id: &str, without_gpu_spec: Option<&str>) -> MnResult<ActionResponse> {
+    pub fn start_instance(
+        &self,
+        id: &str,
+        without_gpu_spec: Option<&str>,
+    ) -> MnResult<ActionResponse> {
         let mut p = Params::new();
         p.set("UHostId", id);
         p.set_opt("WithoutGpuSpec", without_gpu_spec);
@@ -692,7 +710,11 @@ impl<T: Transport> CompshareClient<T> {
     }
 
     /// 删除实例（**仅 `Stopped` 可用**，调用方须先关机）。
-    pub fn terminate_instance(&self, id: &str, release_data_disk: bool) -> MnResult<ActionResponse> {
+    pub fn terminate_instance(
+        &self,
+        id: &str,
+        release_data_disk: bool,
+    ) -> MnResult<ActionResponse> {
         let mut p = Params::new();
         p.set("UHostId", id)
             .set_bool("ReleaseUDisk", release_data_disk);
@@ -883,11 +905,7 @@ impl<T: Transport> CompshareClient<T> {
 
     /// 查询账号是否已开通网络加速（影响海外模型下载速度）。
     pub fn check_net_optimizer(&self) -> MnResult<NetOptimizerResponse> {
-        self.call_typed(
-            "CheckCompShareNetOptimizer",
-            Params::new(),
-            Scope::Region,
-        )
+        self.call_typed("CheckCompShareNetOptimizer", Params::new(), Scope::Region)
     }
 
     /// 查询平台支持的软件及其端口（JupyterLab / SSH / FileBrowser 等）。
@@ -934,8 +952,7 @@ impl<T: Transport> CompshareClient<T> {
             "TargetScope".to_string(),
             serde_json::Value::String(target_scope.to_string()),
         );
-        let value =
-            self.call_json("SwitchCompShareEIPShareBandwidth", fields, Scope::Region)?;
+        let value = self.call_json("SwitchCompShareEIPShareBandwidth", fields, Scope::Region)?;
         serde_json::from_value(value).map_err(|e| MnError::Provider {
             provider: PROVIDER_NAME.to_string(),
             code: "schema_mismatch".to_string(),
@@ -967,27 +984,16 @@ impl<T: Transport> CompshareClient<T> {
         if !http_ports.is_empty() {
             fields.insert(
                 "HttpPorts".to_string(),
-                serde_json::Value::Array(
-                    http_ports
-                        .iter()
-                        .map(|p| serde_json::json!(p))
-                        .collect(),
-                ),
+                serde_json::Value::Array(http_ports.iter().map(|p| serde_json::json!(p)).collect()),
             );
         }
         if !tcp_ports.is_empty() {
             fields.insert(
                 "TcpPorts".to_string(),
-                serde_json::Value::Array(
-                    tcp_ports
-                        .iter()
-                        .map(|p| serde_json::json!(p))
-                        .collect(),
-                ),
+                serde_json::Value::Array(tcp_ports.iter().map(|p| serde_json::json!(p)).collect()),
             );
         }
-        let value =
-            self.call_json("UpdateCompShareInstancePorts", fields, Scope::RegionAndZone)?;
+        let value = self.call_json("UpdateCompShareInstancePorts", fields, Scope::RegionAndZone)?;
         serde_json::from_value(value).map_err(|e| MnError::Provider {
             provider: PROVIDER_NAME.to_string(),
             code: "schema_mismatch".to_string(),
@@ -1098,14 +1104,7 @@ mod tests {
     }
 
     fn client(mock: MockTransport) -> CompshareClient<MockTransport> {
-        CompshareClient::new(
-            DEFAULT_ENDPOINT,
-            cred(),
-            mock,
-            "cn-wlcb",
-            "cn-wlcb-01",
-        )
-        .unwrap()
+        CompshareClient::new(DEFAULT_ENDPOINT, cred(), mock, "cn-wlcb", "cn-wlcb-01").unwrap()
     }
 
     #[test]
@@ -1166,7 +1165,10 @@ mod tests {
         let c = client(mock);
         c.zones_filtered(Some("cn-sh2")).unwrap();
         let body = c.transport().requests()[0].body.clone().unwrap();
-        assert!(body.contains("Action=DescribeCompShareSupportZone"), "{body}");
+        assert!(
+            body.contains("Action=DescribeCompShareSupportZone"),
+            "{body}"
+        );
         assert!(body.contains("Region=cn-sh2"), "{body}");
         // 本接口不接受 Zone：不能把客户端配置的 zone 塞进去
         assert!(!body.contains("Zone="), "{body}");
@@ -1228,7 +1230,10 @@ mod tests {
         let reqs = c.transport().requests();
         assert_eq!(reqs.len(), 1);
         let body = reqs[0].body.as_deref().unwrap();
-        assert!(body.contains("Action=DescribeCompShareSupportZone"), "{body}");
+        assert!(
+            body.contains("Action=DescribeCompShareSupportZone"),
+            "{body}"
+        );
         assert!(body.contains("Region=cn-wlcb"), "{body}");
         assert!(body.contains("PublicKey=test-public-key"), "{body}");
         assert!(body.contains("Signature="), "{body}");
@@ -1262,10 +1267,8 @@ mod tests {
 
     #[test]
     fn business_failure_becomes_provider_error() {
-        let mock = MockTransport::always(
-            200,
-            r#"{"RetCode":226604,"Message":"Resource not enough"}"#,
-        );
+        let mock =
+            MockTransport::always(200, r#"{"RetCode":226604,"Message":"Resource not enough"}"#);
         let c = client(mock);
         let e = c.start_instance("u-1", None).unwrap_err();
         match &e {
@@ -1323,10 +1326,7 @@ mod tests {
 
     #[test]
     fn create_sends_flat_disks_and_memory_in_mb() {
-        let mock = MockTransport::always(
-            200,
-            r#"{"RetCode":0,"UHostIds":["uhost-new"]}"#,
-        );
+        let mock = MockTransport::always(200, r#"{"RetCode":0,"UHostIds":["uhost-new"]}"#);
         let c = client(mock);
         let req = CreateRequest {
             gpu_type: "4090".into(),
@@ -1393,7 +1393,10 @@ mod tests {
         assert_eq!(body["Region"], "cn-wlcb");
         // 公钥与签名都在体里
         assert_eq!(body["PublicKey"], "test-public-key");
-        assert!(body["Signature"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+        assert!(body["Signature"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false));
     }
 
     #[test]
@@ -1412,10 +1415,7 @@ mod tests {
                 "Region".to_string(),
                 serde_json::Value::String("cn-wlcb".to_string()),
             ),
-            (
-                "UHostIds".to_string(),
-                serde_json::json!(["u-1", "u-2"]),
-            ),
+            ("UHostIds".to_string(), serde_json::json!(["u-1", "u-2"])),
         ]);
         let got = crate::sign::signature_of_json("sk", &fields);
         // 手工按协议算：键有序 Action/PublicKey/Region/UHostIds，数组元素直接拼接
@@ -1516,7 +1516,10 @@ mod tests {
         let r = c.check_capacity(&req).unwrap();
         assert!(r.is_enough(1, 16, 64));
         let body = c.transport().requests()[0].body.clone().unwrap();
-        assert!(body.contains("Action=CheckCompShareResourceCapacity"), "{body}");
+        assert!(
+            body.contains("Action=CheckCompShareResourceCapacity"),
+            "{body}"
+        );
         assert!(body.contains("CompShareImageId=img-1"), "{body}");
         assert!(body.contains("Disks.0.Size=100"), "{body}");
     }

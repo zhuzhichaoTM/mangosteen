@@ -22,17 +22,17 @@
 pub mod config;
 pub mod download;
 pub mod extract;
-pub mod webfetch;
 pub mod guard;
 pub mod models;
 pub mod quantize;
 pub mod state;
+pub mod webfetch;
 
 pub use config::ConfigStore;
 pub use download::{download_model, DownloadOptions, Downloaded};
 pub use extract::{extract, ExtractedText};
-pub use webfetch::{fetch, FetchOptions, FetchedPage};
 pub use guard::AccessGuard;
 pub use models::ModelStore;
 pub use quantize::{QuantType, QuantizeRequest, QuantizerProbe};
 pub use state::StateStore;
+pub use webfetch::{fetch, FetchOptions, FetchedPage};
