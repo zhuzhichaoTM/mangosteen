@@ -1,0 +1,15 @@
+[package]
+name = "mangosteen-core"
+description = "Mangosteen 领域层：跨层共享的类型、错误与配置模型（无平台专属代码）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }

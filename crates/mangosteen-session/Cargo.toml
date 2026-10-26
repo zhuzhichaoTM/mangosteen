@@ -1,0 +1,15 @@
+[package]
+name = "mangosteen-session"
+description = "Mangosteen 用户会话与交互层：用户会话 / 部署任务会话 / 推理会话的生命周期与操作记录"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mangosteen-core = { workspace = true }
+mangosteen-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

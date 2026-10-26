@@ -1,0 +1,14 @@
+[package]
+name = "mangosteen-backend"
+description = "Mangosteen 算力执行层·云端后端管理：优云智算（Compshare / UCloud）GPU 实例 API 适配与自动创建"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mangosteen-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

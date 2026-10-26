@@ -1,0 +1,15 @@
+[package]
+name = "mangosteen-local"
+description = "Mangosteen 算力执行层·本地链路：llama.cpp 引擎集成与进程生命周期管理"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mangosteen-core = { workspace = true }
+mangosteen-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

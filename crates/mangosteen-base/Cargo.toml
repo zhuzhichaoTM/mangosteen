@@ -1,0 +1,16 @@
+[package]
+name = "mangosteen-base"
+description = "Mangosteen 基础能力层：模型管理、配置持久化、部署台账、文件访问控制"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mangosteen-core = { workspace = true }
+mangosteen-platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }

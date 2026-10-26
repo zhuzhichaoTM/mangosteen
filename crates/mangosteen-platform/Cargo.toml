@@ -1,0 +1,19 @@
+[package]
+name = "mangosteen-platform"
+description = "Mangosteen 平台适配层：收敛 macOS / Windows / Linux 的硬件采集、路径规范、进程与信号差异"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mangosteen-core = { workspace = true }
+serde = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

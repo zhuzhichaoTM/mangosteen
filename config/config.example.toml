@@ -1,0 +1,261 @@
+# Mangosteen 配置示例
+#
+# 把本文件复制到配置目录并改名为 config.toml，或直接执行：
+#   mangosteen config init
+#
+# 配置目录位置（`mangosteen config path` 可查）：
+#   macOS    ~/Library/Application Support/mangosteen/config.toml
+#   Linux    ${XDG_CONFIG_HOME:-~/.config}/mangosteen/config.toml
+#   Windows  %APPDATA%\mangosteen\config.toml
+
+config_version = 1
+
+# ─────────────────────────────────────────────────────────────
+# 网关：系统唯一收口，上层应用只连这里
+# ─────────────────────────────────────────────────────────────
+[gateway]
+port = 11516                # 避开 11434（Ollama 守护进程固定占用）
+host = "127.0.0.1"          # 仅本机；改成 0.0.0.0 会暴露到局域网，务必配合鉴权
+require_api_key = false     # 开启后客户端须带 Authorization: Bearer <key>
+# api_key = { env = "MANGOSTEEN_GATEWAY_KEY" }
+
+# ─────────────────────────────────────────────────────────────
+# 调度策略
+# ─────────────────────────────────────────────────────────────
+[scheduler]
+# 本地优先原则。除非临时排障，不要改为 false。
+# 设为 false 时 `mangosteen doctor` 会告警。
+local_first = true
+
+# 降级重试次数上限（本地失败 → 换云端节点）
+max_fallbacks = 2
+
+# 引擎启动后等待 /health 就绪的超时（秒）
+launch_timeout_secs = 120
+
+# 云端实例创建 + 启动超时（秒）。镜像首次启动可能较慢，可调大。
+provision_timeout_secs = 600
+
+# 云端价格上限（元/小时）。超过则不选该节点。留空表示不限。
+# max_price_per_hour = 5.0
+
+# 四维权重：相对重要性，不必加和为 1
+[scheduler.weights]
+price = 40          # 价格（越高越看重便宜）
+latency = 15        # 链路延迟
+availability = 30   # 库存与按量释放
+hardware = 15       # GPU 型号偏好与显存富余
+
+# GPU 型号偏好覆盖（归一化型号 → 系数，1.0 为中性）
+# [scheduler.gpu_preference]
+# "RTX 4090" = 1.20
+# "RTX 5090" = 1.25
+# "A100" = 0.80
+
+# ─────────────────────────────────────────────────────────────
+# 本地部署
+# ─────────────────────────────────────────────────────────────
+[local]
+# llama-server 路径。留空则自动在 PATH 与程序同级的 bin/ 中查找。
+# engine_path = "/usr/local/bin/llama-server"
+
+default_context = 8192   # 请求未指定时的默认上下文
+min_context = 2048       # 低于此值不认为「本地可用」
+kv_cache = "f16"         # f16 / q8_0 / q4_0
+batch_size = 512
+
+allow_cpu_fallback = true      # 无 GPU 时允许纯 CPU 推理（很慢但能跑）
+allow_partial_offload = true   # 显存不足时允许部分层卸载
+
+# 启动引擎时是否自动探测并注入动态库搜索路径（默认 true）。
+# 参照 Ollama 的 runner 做法：不依赖二进制自带的 LC_RPATH / RUNPATH，
+# 由宿主进程显式指定库目录，因此 Homebrew / 手工安装的引擎都能跑。
+# 排障时可设为 false，验证「是不是注入导致的问题」。
+auto_library_path = true
+
+# 手工追加引擎环境变量。仅当自动探测失败时需要。
+# 例：某些安装布局下 .dylib 不在 /usr/local/lib 也不在引擎同级目录
+# [local.engine_env]
+# DYLD_FALLBACK_LIBRARY_PATH = "/opt/my-llama/lib"
+# LD_LIBRARY_PATH = "/opt/my-llama/lib"
+
+# 本地推理服务的端口区间（网关会自动跳过已占用端口）
+port_range_start = 11435
+port_range_end = 11999
+
+# ─────────────────────────────────────────────────────────────
+# 存储与文件访问控制
+# ─────────────────────────────────────────────────────────────
+[storage]
+# 模型库目录（Mangosteen 默认允许读取此目录）
+models_dir = "/home/user/.local/share/mangosteen/models"
+cache_dir = "/home/user/.cache/mangosteen"
+
+# 登记模型时是否立即计算 SHA-256。
+# 默认 false：7B 模型约 4.5 GiB，机械盘上需数十秒。
+# 哈希在 `mangosteen models verify` 时按需计算。
+verify_hash = false
+
+# 单个模型文件体积上限（字节）
+max_model_bytes = 214748364800   # 200 GiB
+
+# `models pull` 未写 `<源>:` 前缀时使用的默认模型源。
+# 内置 modelscope（国内快）与 hf（HuggingFace）。
+default_source = "modelscope"
+
+# 额外授权读取的目录。
+# 只有这里列出的目录（以及 models_dir / cache_dir）下的文件才能被登记。
+# 这是安全边界，不要把整个 / 或 ~ 加进来。
+allowed_read_roots = [
+  # "/data/gguf",
+]
+
+# ─────────────────────────────────────────────────────────────
+# 云服务商
+# ─────────────────────────────────────────────────────────────
+# 凭证三种写法（`mangosteen config show` 都只显示脱敏形式）：
+#   secret = { env = "VAR_NAME" }        ← 推荐
+#   secret = { file = "/path/to/secret" }
+#   secret = { inline = "actual-token" } ← 仅调试用
+
+[providers.autodl]
+driver = "autodl"
+enabled = true
+display_name = "AutoDL"
+secret = { env = "AUTODL_API_TOKEN" }
+priority = 1.0
+
+[providers.ucloud]
+driver = "ucloud"
+enabled = true
+display_name = "优云智算"
+secret = { env = "UCLOUD_API_KEY" }
+priority = 1.0
+
+# 优云智算（Compshare / UCloud 开放接口形态）——推荐用这一条
+#
+# 为什么与上面的 [providers.ucloud] 不同：
+#   优云智算的真实 API 是 UCloud RPC 形态（单一端点 + Action 参数 + SHA1 签名），
+#   无法用 profile 字段映射表达，因此由专门驱动实现（driver = "compshare"）。
+#   [providers.ucloud] 那条是通用 REST 形态的占位，二者按需保留其一即可。
+#
+# 凭证分两段：
+#   公钥（AccessKey ID）→ options.public_key
+#   私钥（AccessKey Secret）→ secret（推荐 env 形式）
+# 密钥获取：https://console.compshare.cn/uaccount/api_manage
+#
+# [providers.compshare]
+# driver = "compshare"
+# enabled = true
+# display_name = "优云智算"
+# secret = { env = "COMPSHARE_PRIVATE_KEY" }
+# priority = 1.0
+#
+# [providers.compshare.options]
+# public_key = "your-accesskey-id"
+# region = "cn-wlcb"                        # 地域，可用 `mangosteen backend zones` 查
+# zone = "cn-wlcb-01"                       # 可用区，同一 region 下选一个
+# image_id = "compshareImage-xxxx"          # 必填，`mangosteen backend images` 查可用镜像
+# charge_type = "Postpay"                   # Month / Day / Postpay / Spot；个人场景用 Postpay（关机不收费）
+# disk_type = "CLOUD_SSD"                   # CLOUD_SSD / CLOUD_RSSD（RSSD 仅 A800）
+# disk_size_gb = "100"                      # 系统盘；SSD 系统盘 ≤100GB 部分免费
+# gpu_types = "4090,5090"                   # 允许的卡型号，留空表示不限制
+# max_gpu_count = "1"                       # 单实例卡数上限
+# min_memory_gb = "32"                      # 低于此内存的规格不列为候选
+# max_price_queries = "10"                  # 列举规格时最多查多少次价格（控制接口调用量）
+# operation_timeout_secs = "600"            # 启停/销毁的等待上限
+# poll_interval_secs = "5"                  # 状态轮询间隔（不得为 0）
+# release_data_disk = "true"                # 销毁时是否同时删数据盘
+
+# 阿里云为扩展兼容目标，默认停用（需要双凭证 + RPC 签名）
+[providers.aliyun]
+driver = "aliyun"
+enabled = false
+display_name = "阿里云"
+secret = { env = "ALIBABA_CLOUD_ACCESS_KEY_SECRET" }
+priority = 1.0
+[providers.aliyun.options]
+access_key_id = "LTAI********"
+
+# ─────────────────────────────────────────────────────────────
+# 自定义服务商示例：新增厂商只需写配置，无需改代码
+# ─────────────────────────────────────────────────────────────
+# [providers.mycloud]
+# driver = "mycloud"
+# enabled = true
+# display_name = "我的算力平台"
+# secret = { env = "MYCLOUD_TOKEN" }
+#
+# [providers.mycloud.profile]
+# name = "mycloud"
+# display_name = "我的算力平台"
+#
+# [providers.mycloud.profile.auth]
+# type = "bearer"
+#
+# [providers.mycloud.profile.endpoints]
+# base_url = "https://api.mycloud.example"
+# list_specs = "/v1/gpu/specs"
+# create = "/v1/instances?spec={spec_id}"
+# start = "/v1/instances/{id}/start"
+# stop = "/v1/instances/{id}/stop"
+# destroy = "/v1/instances/{id}"
+# describe = "/v1/instances/{id}"
+# list = "/v1/instances"
+# status_field = "code"
+# success_code = "0"
+# error_field = "message"
+#
+# [providers.mycloud.profile.fields]
+# list_root = "data.items"
+# item_root = "data"
+# id = "instance_id"
+# state = "status"
+# gpu_model = "gpu_type"
+# gpu_count = "gpu_count"
+# vram = "vram_gb"
+# vram_unit = "gib"
+# cpu_cores = "cpu"
+# memory = "memory_gb"
+# memory_unit = "gib"
+# disk = "disk_gb"
+# disk_unit = "gib"
+# image = "image"
+# price = "price_per_hour"
+# ssh_host = "public_ip"
+# ssh_port = "ssh_port"
+# region = "region"
+# stock = "available"
+#
+# [providers.mycloud.profile.states.mapping]
+# running = "running"
+# stopped = "stopped"
+# pending = "pending"
+# failed = "failed"
+
+# ─────────────────────────────────────────────────────────────
+# 模型源（`mangosteen models pull` 从这里下载）
+# ─────────────────────────────────────────────────────────────
+# 内置 modelscope 与 hf 两个源，无需配置即可用。
+# 需要修正厂商改版、或接入内网私有仓库时，才在这里覆盖/新增。
+#
+# 覆盖内置源（只需写要改的字段）：
+# [model_sources.modelscope]
+# name = "modelscope"
+# kind = "ModelScope"
+# base_url = "https://www.modelscope.cn"
+# default_revision = "master"
+
+# 新增自定义源（kind = "Custom" 时必须给 url_template）：
+# [model_sources.myhub]
+# name = "myhub"
+# display_name = "内网模型库"
+# kind = "Custom"
+# base_url = "https://models.corp.internal"
+# default_revision = "main"
+# url_template = "{base}/repo/{repo}/raw/{revision}/{file}"
+# metadata_url_template = "{base}/api/repo/{repo}/files"
+#
+# 之后即可：
+#   mangosteen models search myhub:team/qwen-gguf
+#   mangosteen models pull  myhub:team/qwen-gguf/model-q4_k_m.gguf

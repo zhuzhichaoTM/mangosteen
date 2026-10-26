@@ -1,0 +1,220 @@
+# 云服务商驱动配置示例（参考件）
+#
+# ⚠ 本文件是**参考文档**，不能直接作为 config.toml 使用——
+#   它只包含 profile 段，缺少 driver / secret / enabled 等必填项。
+#
+# 正确用法：把某个 `[providers.<name>.profile]` 段复制进你的 config.toml，
+# 并确保同一服务商下同时存在：
+#
+#   [providers.autodl]
+#   driver = "autodl"
+#   enabled = true
+#   secret = { env = "AUTODL_API_TOKEN" }
+#
+# 完整的可运行示例见 config/config.example.toml。
+#
+# 用途：
+#   1. 厂商 API 改版后，复制对应 profile 段到 config.toml 并修正端点/字段，
+#      不必等 Mangosteen 发布新版本。
+#   2. 接入未内置的服务商时，作为字段映射的写法参考。
+
+[providers.autodl.profile]
+name = "autodl"
+display_name = "AutoDL"
+
+[providers.autodl.profile.auth]
+type = "bearer"
+
+[providers.autodl.profile.endpoints]
+base_url = "https://api.autodl.com"
+list_specs = "/api/v1/machine/region/available"
+create = "/api/v1/instance?snapshot_id={spec_id}"
+start = "/api/v1/instance/{id}/power_on"
+stop = "/api/v1/instance/{id}/power_off"
+destroy = "/api/v1/instance/{id}"
+describe = "/api/v1/instance/{id}"
+list = "/api/v1/instance"
+status_field = "code"
+success_code = "Success"
+error_field = "msg"
+
+[providers.autodl.profile.fields]
+list_root = "data.list"
+item_root = "data"
+id = "instance_id"
+state = "status"
+gpu_model = "gpu_name"
+gpu_count = "gpu_num"
+vram = "gpu_memory"
+vram_unit = "gib"
+cpu_cores = "cpu_num"
+memory = "memory"
+memory_unit = "gib"
+disk = "disk_size"
+disk_unit = "gib"
+image = "image_name"
+price = "price_per_hour"
+ssh_host = "ssh_host"
+ssh_port = "ssh_port"
+region = "region_name"
+stock = "stock"
+display_name = "instance_name"
+created_at = "created_at"
+
+[providers.autodl.profile.states.mapping]
+running = "running"
+shutdown = "stopped"
+stopped = "stopped"
+creating = "creating"
+starting = "starting"
+pending = "pending"
+error = "failed"
+failed = "failed"
+
+[providers.autodl.profile.capabilities]
+on_demand_create = true
+stop_start = true
+price_query = true
+public_inference_url = false
+custom_image = true
+gpu_models = ["RTX 4090", "RTX 5090", "RTX 3090", "A100"]
+
+# ─────────────────────────────────────────────────────────────
+# 优云智算
+# ─────────────────────────────────────────────────────────────
+# ⚠ 注意：优云智算的真实开放接口是 UCloud RPC 形态
+#   （单一端点 + Action 参数 + SHA1 签名），无法用下面的字段映射表达。
+#   实际接入请用专用驱动：
+#
+#     [providers.compshare]
+#     driver = "compshare"
+#     secret = { env = "COMPSHARE_PRIVATE_KEY" }
+#     [providers.compshare.options]
+#     public_key = "your-accesskey-id"
+#     image_id = "compshareImage-xxxx"
+#
+#   下面这段 profile 仅作为「字段名参考」保留——若你确实拿到了一个
+#   REST 形态的兼容网关（带 Token 头），可以在这里修正端点后使用。
+[providers.ucloud.profile]
+name = "ucloud"
+display_name = "优云智算"
+
+[providers.ucloud.profile.auth]
+type = "header"
+name = "Authorization"
+
+[providers.ucloud.profile.endpoints]
+base_url = "https://api.ucloudai.com"
+list_specs = "/v1/gpu/specs"
+create = "/v1/instances?spec_id={spec_id}"
+start = "/v1/instances/{id}/start"
+stop = "/v1/instances/{id}/stop"
+destroy = "/v1/instances/{id}"
+describe = "/v1/instances/{id}"
+list = "/v1/instances"
+status_field = "ret_code"
+success_code = "0"
+error_field = "message"
+
+[providers.ucloud.profile.fields]
+list_root = "data.items"
+item_root = "data"
+id = "instance_id"
+state = "state"
+gpu_model = "gpu_type"
+gpu_count = "gpu_count"
+vram = "gpu_memory_gb"
+vram_unit = "gib"
+cpu_cores = "cpu"
+memory = "memory_gb"
+memory_unit = "gib"
+disk = "disk_gb"
+disk_unit = "gib"
+image = "image_id"
+price = "hour_price"
+ssh_host = "public_ip"
+ssh_port = "ssh_port"
+region = "zone"
+stock = "available"
+display_name = "name"
+created_at = "create_time"
+
+[providers.ucloud.profile.states.mapping]
+running = "running"
+stopped = "stopped"
+shutdown = "stopped"
+pending = "creating"
+deploying = "starting"
+failed = "failed"
+
+[providers.ucloud.profile.capabilities]
+on_demand_create = true
+stop_start = true
+price_query = true
+public_inference_url = false
+custom_image = true
+gpu_models = ["RTX 4090", "RTX 5090"]
+
+# ─────────────────────────────────────────────────────────────
+# 阿里云 ECS（扩展兼容）
+#
+# 注意：阿里云 ECS 使用 RPC 签名认证，下列模板仅说明字段映射关系。
+# 生产使用建议实现独立的 ProviderDriver 处理签名（见 docs/DESIGN.md 6.2）。
+# ─────────────────────────────────────────────────────────────
+[providers.aliyun.profile]
+name = "aliyun"
+display_name = "阿里云"
+
+[providers.aliyun.profile.auth]
+type = "double_header"
+id_header = "x-acs-access-key-id"
+secret_header = "x-acs-access-key-secret"
+
+[providers.aliyun.profile.endpoints]
+base_url = "https://ecs.cn-hangzhou.aliyuncs.com"
+list_specs = "/api/v1/gpu/specs"
+create = "/api/v1/instances?instance_type={spec_id}"
+start = "/api/v1/instances/{id}/start"
+stop = "/api/v1/instances/{id}/stop"
+destroy = "/api/v1/instances/{id}"
+describe = "/api/v1/instances/{id}"
+list = "/api/v1/instances"
+status_field = "Code"
+success_code = "200"
+error_field = "Message"
+
+[providers.aliyun.profile.fields]
+list_root = "Instances.Instance"
+item_root = "Instance"
+id = "InstanceId"
+state = "Status"
+gpu_model = "GPU Model"
+gpu_count = "GPUAmount"
+vram = "GPUMemory"
+vram_unit = "gib"
+cpu_cores = "Cpu"
+memory = "Memory"
+memory_unit = "mib"
+disk = "DiskSize"
+disk_unit = "gib"
+image = "ImageId"
+price = "Price"
+ssh_host = "PublicIpAddress.IpAddress[0]"
+region = "RegionId"
+display_name = "InstanceName"
+created_at = "CreationTime"
+
+[providers.aliyun.profile.states.mapping]
+running = "running"
+stopped = "stopped"
+starting = "starting"
+stopping = "stopping"
+pending = "creating"
+
+[providers.aliyun.profile.capabilities]
+on_demand_create = true
+stop_start = true
+price_query = false
+public_inference_url = true
+custom_image = true
+gpu_models = ["RTX 4090", "A10"]

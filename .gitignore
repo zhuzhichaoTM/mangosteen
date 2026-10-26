@@ -1,0 +1,27 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# 构建产物
+/dist
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 本地配置与数据（绝不提交）
+config/config.toml
+*.local.toml
+/state.json
+/models.json
+*.gguf
+
+# 日志
+*.log

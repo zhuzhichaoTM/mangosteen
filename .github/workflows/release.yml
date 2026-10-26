@@ -1,0 +1,225 @@
+name: Release
+
+# 三平台发布流水线。
+#
+# 触发方式：
+#   · 推送形如 v0.1.0 的 tag
+#   · 手动触发（workflow_dispatch）
+#
+# 产物：每个平台的压缩包 + SHA-256 校验和 + GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # 先跑测试与架构约束检查，任何失败都不发布
+  verify:
+    name: 测试与架构约束
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 全量测试（含端到端与架构约束）
+        run: cargo test --workspace --verbose
+
+      - name: 架构分层约束（单独再跑一次，失败信息更醒目）
+        run: cargo test -p mangosteen-cli --test layering -- --nocapture
+
+  build:
+    name: 构建 ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 缓存依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Linux aarch64 交叉编译需要对应 linker
+      - name: 安装 aarch64 交叉工具链
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: 构建
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: 准备发布包
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          case "${{ matrix.target }}" in
+            *apple-darwin*) OS=macos ;;
+            *linux*)        OS=linux ;;
+            *windows*)      OS=windows ;;
+          esac
+          case "${{ matrix.target }}" in
+            x86_64-*)  ARCH=x86_64 ;;
+            aarch64-*) ARCH=aarch64 ;;
+          esac
+          NAME="mangosteen-${OS}-${ARCH}"
+          echo "NAME=$NAME" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+          BIN="target/${{ matrix.target }}/release/mangosteen"
+          if [ "$OS" = "windows" ]; then BIN="${BIN}.exe"; fi
+
+          mkdir -p "dist/${NAME}/config"
+          cp "$BIN" "dist/${NAME}/"
+          cp README.md "dist/${NAME}/"
+          [ -f LICENSE ] && cp LICENSE "dist/${NAME}/" || true
+          cp -r docs "dist/${NAME}/" 2>/dev/null || true
+          cp config/config.example.toml "dist/${NAME}/config/" 2>/dev/null || true
+          cp -r config/providers "dist/${NAME}/config/" 2>/dev/null || true
+
+          cat > "dist/${NAME}/INSTALL.txt" <<EOF
+          Mangosteen ${VERSION} — ${NAME}
+
+          1. 把 mangosteen 放入 PATH
+          2. 安装推理引擎：brew install llama.cpp（或从 llama.cpp release 下载）
+          3. mangosteen config init && mangosteen doctor
+          4. mangosteen models add <model.gguf>
+          5. mangosteen deploy <模型名>
+          EOF
+
+      - name: 打包（tar.gz）
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          cd dist
+          tar -czf "${{ env.NAME }}.tar.gz" "${{ env.NAME }}"
+          shasum -a 256 "${{ env.NAME }}.tar.gz" > "${{ env.NAME }}.tar.gz.sha256" || \
+            sha256sum "${{ env.NAME }}.tar.gz" > "${{ env.NAME }}.tar.gz.sha256"
+
+      - name: 打包（zip）
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          cd dist
+          Compress-Archive -Path "${{ env.NAME }}" -DestinationPath "${{ env.NAME }}.zip"
+          (Get-FileHash "${{ env.NAME }}.zip" -Algorithm SHA256).Hash.ToLower() + "  ${{ env.NAME }}.zip" | Out-File -Encoding ascii "${{ env.NAME }}.zip.sha256"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  release:
+    name: 创建 Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 列出产物
+        run: ls -lh dist/
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true
+          body: |
+            ## Mangosteen ${{ github.ref_name }}
+
+            个人级大模型部署客户端 —— 本地算力优先 + 云端算力弹性补位。
+
+            ### 安装
+
+            下载对应平台的压缩包解压，把 `mangosteen` 放入 PATH。
+            然后安装推理引擎（llama.cpp 的 `llama-server`）：
+
+            ```bash
+            brew install llama.cpp     # macOS / Linux
+            ```
+
+            Windows 从 [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases)
+            下载并确保 `llama-server.exe` 在 PATH 中。
+
+            ### 校验
+
+            每个包都附带 `.sha256` 文件：
+
+            ```bash
+            shasum -a 256 -c mangosteen-macos-aarch64.tar.gz.sha256
+            ```
+
+            ### 快速开始
+
+            ```bash
+            mangosteen config init
+            mangosteen doctor
+            mangosteen models add ./model.gguf
+            mangosteen deploy <模型名> --context 8192
+            ```
+
+            详见 README.md 与 docs/DESIGN.md。

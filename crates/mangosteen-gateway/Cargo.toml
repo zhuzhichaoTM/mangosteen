@@ -1,0 +1,22 @@
+[package]
+name = "mangosteen-gateway"
+description = "Mangosteen API 网关层：资源评估引擎、调度决策器、统一协议适配层、HTTP 服务"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+mangosteen-core = { workspace = true }
+mangosteen-platform = { workspace = true }
+mangosteen-base = { workspace = true }
+mangosteen-session = { workspace = true }
+mangosteen-local = { workspace = true }
+mangosteen-cloud = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
