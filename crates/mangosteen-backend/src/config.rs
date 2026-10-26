@@ -508,8 +508,10 @@ mod tests {
 
     #[test]
     fn gpu_allowlist_matching() {
-        let mut c = CompshareConfig::default();
-        c.image_id = "i".into();
+        let mut c = CompshareConfig {
+            image_id: "i".into(),
+            ..Default::default()
+        };
         assert!(c.allows_gpu("4090"), "空白名单表示不限制");
         assert!(c.allows_gpu("A100"));
 
@@ -521,8 +523,10 @@ mod tests {
 
     #[test]
     fn instance_name_is_truncated_to_63() {
-        let mut c = CompshareConfig::default();
-        c.name_prefix = "x".repeat(60);
+        let mut c = CompshareConfig {
+            name_prefix: "x".repeat(60),
+            ..Default::default()
+        };
         let name = c.instance_name("11435");
         assert_eq!(name.chars().count(), 63);
         // 短名保持完整

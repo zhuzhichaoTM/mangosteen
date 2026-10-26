@@ -190,8 +190,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ---------- 3. 价格榜单 ----------
     println!("=== 价格榜单（元/小时，从低到高） ===");
     println!(
-        "{:<4} {:<22} {:<12} {:<18} {:<9} {}",
-        "排名", "规格 ID", "可用区", "卡型/显存", "时价", "月成本估算"
+        "{:<4} {:<22} {:<12} {:<18} {:<9} 月成本估算",
+        "排名", "规格 ID", "可用区", "卡型/显存", "时价"
     );
     println!("{}", "-".repeat(96));
     for (rank, o) in board.options.iter().take(15).enumerate() {
@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---------- 4. 性价比视角 ----------
     println!("=== 性价比（元 / GiB显存·小时，从优到劣） ===");
-    let by_eff = board.sorted_by_vram_efficiency(|t| mangosteen_backend::known_vram_gb(t));
+    let by_eff = board.sorted_by_vram_efficiency(mangosteen_backend::known_vram_gb);
     for o in by_eff.iter().take(8) {
         let per_gib =
             o.per_hour_cny / (mangosteen_backend::known_vram_gb(&o.spec.gpu_type).max(1) as f64);

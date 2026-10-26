@@ -375,7 +375,7 @@ fn parse_vram_from_name(name: &str) -> Option<u32> {
             let digits = &upper[start..i];
             if upper[i..].starts_with("GB") {
                 if let Ok(v) = digits.parse::<u32>() {
-                    if v >= 4 && v <= 200 {
+                    if (4..=200).contains(&v) {
                         return Some(v);
                     }
                 }
@@ -707,7 +707,7 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
                         cpu_cores: self.config.default_cpu_cores,
                         // Pro API 不暴露内存规格，按「每卡 8 核配 32GB」估算，
                         // 真实值以创建后的快照为准
-                        memory_bytes: (self.config.default_cpu_cores as u64) * 4 << 30,
+                        memory_bytes: ((self.config.default_cpu_cores as u64) * 4) << 30,
                         disk_bytes: (100 + self.config.expand_system_disk_by_gb as u64) << 30,
                         image: self.config.image_uuid.clone(),
                     },
@@ -811,7 +811,7 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
                             .unwrap_or(0),
                     },
                     cpu_cores: self.config.default_cpu_cores,
-                    memory_bytes: (self.config.default_cpu_cores as u64) * 4 << 30,
+                    memory_bytes: ((self.config.default_cpu_cores as u64) * 4) << 30,
                     disk_bytes: (100 + self.config.expand_system_disk_by_gb as u64) << 30,
                     image: self.config.image_uuid.clone(),
                 },
@@ -921,7 +921,7 @@ impl<T: Transport + 'static> ProviderDriver for AutodlDriver<T> {
                 memory_bytes: if mem_limit > 0 {
                     mem_limit
                 } else {
-                    (self.config.default_cpu_cores as u64) * 4 << 30
+                    ((self.config.default_cpu_cores as u64) * 4) << 30
                 },
                 disk_bytes: d
                     .get("system_init_disk_size")

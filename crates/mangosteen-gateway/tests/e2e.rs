@@ -210,7 +210,7 @@ impl TestEnv {
     /// 接口不阻塞」（`e2e_preview_and_doctor_do_not_probe_engine_synchronously`），
     /// 全局预热会改变它的前提。
     fn warmed_gateway(&self, cfg: Config) -> Gateway {
-        let mut gw = self.gateway(cfg);
+        let gw = self.gateway(cfg);
         let _ = gw.warm_up_engine();
         gw
     }
@@ -883,7 +883,7 @@ fn e2e_preview_reports_local_and_never_charges() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("qwen.gguf", 4096);
     let cfg = env.config(&engine);
-    let mut gw = env.warmed_gateway(cfg);
+    let gw = env.warmed_gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
@@ -950,7 +950,7 @@ fn e2e_preview_api_shape_is_stable() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("qwen.gguf", 4096);
     let cfg = env.config(&engine);
-    let mut gw = env.warmed_gateway(cfg);
+    let gw = env.warmed_gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let (listener, port) = bind_ephemeral();
@@ -2883,7 +2883,7 @@ fn e2e_forced_cloud_preview_skips_local() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("qwen.gguf", 4096);
     let cfg = env.config(&engine);
-    let mut gw = env.warmed_gateway(cfg);
+    let gw = env.warmed_gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     // 先确认默认（auto）会走本地

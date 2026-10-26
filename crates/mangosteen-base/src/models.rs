@@ -178,8 +178,7 @@ impl ModelStore {
         instance_id: &str,
         remote_path: &str,
     ) -> MnResult<ModelEntry> {
-        spec.validate()
-            .map_err(|reason| MnError::bad_request(reason))?;
+        spec.validate().map_err(MnError::bad_request)?;
         let id = ModelEntry::derive_id(&spec.name, spec.quant);
         let entry = ModelEntry {
             id: id.clone(),

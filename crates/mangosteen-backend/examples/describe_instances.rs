@@ -479,8 +479,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default(),
     ));
 
-    let cfg_ok = cfg.validate().is_ok() || true; // 配置未参与本次查询，仅供后续部署
-    let _ = cfg_ok;
+    // 配置未参与本次查询，仅供后续部署；此处只做一次语法级校验并记录，
+    // 不并入 checks（它不是「DescribeCompShareInstance 适配」的一部分）。
+    let _cfg_valid = cfg.validate().is_ok();
 
     let mut all_ok = true;
     for (name, ok, detail) in &checks {

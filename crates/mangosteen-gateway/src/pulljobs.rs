@@ -504,17 +504,30 @@ pub struct DeployHooks {
     ///
     /// 返回 `PreparedDeployment::Done` 表示无需下载（云端路径已在
     /// `prepare` 内完成全部工作），下载与提交都会被跳过。
-    pub prepare: Arc<dyn Fn() -> MnResult<crate::gateway::PreparedDeployment> + Send + Sync>,
+    pub prepare: PrepareHook,
     /// 下载**后**调用：启动本地引擎，返回部署 ID。
-    pub commit: Arc<dyn Fn(crate::gateway::PreparedLocal) -> MnResult<String> + Send + Sync>,
+    pub commit: CommitHook,
     /// **回滚**：撤销这次部署产生的全部痕迹（停引擎、删台账、释放端口、删文件）。
     ///
     /// 参数：`(部署 ID, 要删除的文件路径)`。
     ///
     /// 「是否删文件」由调用方判断——只有**本次下载的**文件才该删。
     /// 模型原本就在本地时（用户点的是「启动」），删掉它等于卸载已有资产。
-    pub abort: Arc<dyn Fn(Option<&str>, Option<&std::path::Path>) -> MnResult<()> + Send + Sync>,
+    pub abort: AbortHook,
 }
+
+/// 模型登记回调：下载落地路径 → 模型 ID。
+pub type RegisterHook = Arc<dyn Fn(&std::path::Path) -> MnResult<String> + Send + Sync>;
+
+/// 回滚钩子：`(部署 ID, 要删除的文件路径)` → 结果。
+pub type AbortHook =
+    Arc<dyn Fn(Option<&str>, Option<&std::path::Path>) -> MnResult<()> + Send + Sync>;
+
+/// `(prepare, commit, abort)` 之外的上层装配入口，供 handlers 构造钩子时复用。
+pub type PrepareHook = Arc<dyn Fn() -> MnResult<crate::gateway::PreparedDeployment> + Send + Sync>;
+
+/// 提交钩子：已准备的本地部署 → 部署 ID。
+pub type CommitHook = Arc<dyn Fn(crate::gateway::PreparedLocal) -> MnResult<String> + Send + Sync>;
 
 /// 启动一个下载任务（在独立线程执行）。
 ///
@@ -531,7 +544,7 @@ pub fn spawn(
     source: ModelSource,
     model: ModelRef,
     mut opts: mangosteen_base::DownloadOptions,
-    register: Arc<dyn Fn(&std::path::Path) -> MnResult<String> + Send + Sync>,
+    register: RegisterHook,
     // 下载并登记成功后自动部署。`None` 表示只下载不部署（CLI 行为）。
     deploy: Option<DeployHooks>,
 ) -> std::thread::JoinHandle<()> {
@@ -693,7 +706,7 @@ pub fn spawn(
                             // 所以这里用 warning 而不是 failed。
                             if let (Some(hooks), Some(p)) = (deploy.as_ref(), prepared) {
                                 jobs.mark_deploying(&job_id);
-                                match (hooks.commit)(p) {
+                                match (hooks.commit)(*p) {
                                     Ok(dep_id) => {
                                         // 启动期间用户点了停止：引擎已经起来了，
                                         // 必须停掉它并回滚（否则「点了停止但模型还在跑」）。

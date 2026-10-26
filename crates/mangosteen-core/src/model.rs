@@ -299,12 +299,10 @@ impl ModelSpec {
     ///
     /// 公式：`2(K 和 V) × n_layers × n_kv_heads × head_dim × 2字节`
     pub fn kv_bytes_per_token(&self) -> u64 {
-        let per_layer = 2u64
-            .saturating_mul(self.n_layers as u64)
+        2u64.saturating_mul(self.n_layers as u64)
             .saturating_mul(self.n_kv_heads as u64)
             .saturating_mul(self.head_dim() as u64)
-            .saturating_mul(2); // f16
-        per_layer
+            .saturating_mul(2) // f16
     }
 
     /// 给定上下文长度的 KV Cache 总字节数。

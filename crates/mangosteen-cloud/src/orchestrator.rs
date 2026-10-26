@@ -35,6 +35,23 @@ use mangosteen_core::{MnError, MnResult};
 
 use super::net::TunnelManager;
 
+/// 候选快照：`(候选规格, 各服务商探测到的延迟毫秒)`。
+///
+/// 单独成别名而非内联元组：`collect_candidates` 与 `rank` 之间传递的是
+/// **同一次采集**的结果，两处写法分叉过一次（一边 `Vec` 一边 `HashMap`
+/// 顺序颠倒），别名把形状钉死。
+pub type CandidateSnapshot = (
+    Vec<(String, AvailableSpec)>,
+    std::collections::HashMap<String, u32>,
+);
+
+/// `pick` 的三元返回：`(最优, 全部排序结果, 原始候选)`。
+pub type PickResult = (
+    ScoredCandidate,
+    Vec<ScoredCandidate>,
+    Vec<(String, AvailableSpec)>,
+);
+
 /// 编排结果。
 #[derive(Debug)]
 pub struct Provisioned {
@@ -161,12 +178,7 @@ impl CloudOrchestrator {
     ///
     /// 单个服务商失败不影响其它服务商的结果（容错要求）。
     /// 全部失败时返回错误消息汇总，便于排障。
-    pub fn collect_candidates(
-        &self,
-    ) -> MnResult<(
-        Vec<(String, AvailableSpec)>,
-        std::collections::HashMap<String, u32>,
-    )> {
+    pub fn collect_candidates(&self) -> MnResult<CandidateSnapshot> {
         let mut candidates = Vec::new();
         let mut latencies = std::collections::HashMap::new();
         let mut failures = Vec::new();
@@ -214,14 +226,7 @@ impl CloudOrchestrator {
     /// 选出最优候选（不创建资源）。
     ///
     /// 供 `mangosteen cloud pick --explain` 使用，便于用户在花钱前看清决策依据。
-    pub fn pick(
-        &self,
-        constraints: &SelectionConstraints,
-    ) -> MnResult<(
-        ScoredCandidate,
-        Vec<ScoredCandidate>,
-        Vec<(String, AvailableSpec)>,
-    )> {
+    pub fn pick(&self, constraints: &SelectionConstraints) -> MnResult<PickResult> {
         let (candidates, latencies) = self.collect_candidates()?;
         let ranked = self.selector.rank(&candidates, &latencies, constraints);
         let best = ranked

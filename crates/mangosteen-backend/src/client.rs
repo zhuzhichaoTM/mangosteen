@@ -30,7 +30,7 @@ use crate::model::{
     CreateInstanceResponse, DescribeInstancesResponse, ImagesResponse, InstancePortsResponse,
     MachineTypeFamiliesResponse, MonitorResponse, NetOptimizerResponse, PriceResponse,
     ProjectListResponse, RefundPriceResponse, SoftwarePortResponse, SoftwareUrlResponse,
-    UpgradePriceResponse, ZoneInfo, ZonesResponse,
+    UpgradePriceResponse, UserPriceRequest, ZoneInfo, ZonesResponse,
 };
 use crate::params::Params;
 use crate::retcode::{provider_error, ApiFailure};
@@ -353,7 +353,7 @@ impl<T: Transport> CompshareClient<T> {
             .entry("PublicKey".to_string())
             .or_insert_with(|| serde_json::Value::String(self.credential.public_key().to_string()));
 
-        let signature = crate::sign::signature_of_json(&self.credential.private_key(), &fields);
+        let signature = crate::sign::signature_of_json(self.credential.private_key(), &fields);
         fields.insert(
             "Signature".to_string(),
             serde_json::Value::String(signature),
@@ -848,28 +848,19 @@ impl<T: Transport> CompshareClient<T> {
     /// 与 [`Self::price`] 的区别：`price` 只查当前配置的那一种模式；
     /// 本方法不传 `ChargeType` 时厂商会同时返回 Month / Day / Postpay / Spot，
     /// 便于用户对比「按量 vs 包月哪个划算」。
-    pub fn user_price(
-        &self,
-        gpu_type: &str,
-        gpu: u32,
-        cpu: u32,
-        memory_mb: u64,
-        image_id: Option<&str>,
-        disk_size_gb: u32,
-        disk_type: &str,
-    ) -> MnResult<PriceResponse> {
+    pub fn user_price(&self, req: &UserPriceRequest<'_>) -> MnResult<PriceResponse> {
         let mut p = Params::new();
-        p.set("GpuType", gpu_type)
-            .set_i64("GPU", i64::from(gpu))
-            .set_i64("Cpu", i64::from(cpu))
-            .set_i64("Memory", memory_mb as i64)
-            .set_opt("CompShareImageId", image_id);
+        p.set("GpuType", req.gpu_type)
+            .set_i64("GPU", i64::from(req.gpu))
+            .set_i64("Cpu", i64::from(req.cpu))
+            .set_i64("Memory", req.memory_mb as i64)
+            .set_opt("CompShareImageId", req.image_id);
         p.set_json(
             "Disks",
             &serde_json::json!([{
                 "IsBoot": true,
-                "Type": disk_type,
-                "Size": disk_size_gb,
+                "Type": req.disk_type,
+                "Size": req.disk_size_gb,
             }]),
         );
         self.call_typed("GetCompShareInstanceUserPrice", p, Scope::RegionAndZone)

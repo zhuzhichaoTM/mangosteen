@@ -341,7 +341,7 @@ fn compute_buffer(spec: &ModelSpec, batch_size: u32) -> u64 {
     let raw = per_token.saturating_mul(batch_size as u64);
     // 分母系数：llama.cpp 复用缓冲，实际远小于逐 token 累加
     let scaled = raw / 4;
-    scaled.max(192 * MIB).min(4 * GIB)
+    scaled.clamp(192 * MIB, 4 * GIB)
 }
 
 /// 权重字节数：优先用实测文件大小（GGUF 元数据与对齐已含在内）。
@@ -435,10 +435,6 @@ fn max_context_within(spec: &ModelSpec, kv: KvCacheType, budget: u64, batch: u32
     ctx
 }
 
-/// 核心入口：给定模型规格与硬件，产出评估结论。
-///
-/// 决策顺序严格遵循「先大后小、先快后慢」：
-/// 1. 全量 GPU 卸载 → 2. 部分卸载 → 3. 纯 CPU → 4. 判定不可行
 /// 用户未指定上下文长度时的**保守默认值**。
 ///
 /// 为什么不用模型原生上限（32k / 128k）：KV cache 与上下文长度线性相关，
@@ -449,6 +445,10 @@ fn max_context_within(spec: &ModelSpec, kv: KvCacheType, budget: u64, batch: u32
 /// 需要更长上下文时由用户显式传 `context_len`。
 pub const DEFAULT_CONTEXT: u32 = 8192;
 
+/// 核心入口：给定模型规格与硬件，产出评估结论。
+///
+/// 决策顺序严格遵循「先大后小、先快后慢」：
+/// 1. 全量 GPU 卸载 → 2. 部分卸载 → 3. 纯 CPU → 4. 判定不可行
 pub fn assess(spec: &ModelSpec, hw: &HardwareProfile, req: &AssessRequest) -> Assessment {
     let mut warnings = Vec::new();
     let _vendor = hw
@@ -564,7 +564,7 @@ pub fn assess(spec: &ModelSpec, hw: &HardwareProfile, req: &AssessRequest) -> As
                 ctx,
                 gpu_budget.saturating_sub(compute_buffer(spec, batch)),
             );
-            if layers == 0 || layers >= spec.n_layers + 1 {
+            if layers == 0 || layers > spec.n_layers {
                 continue;
             }
             let r = requirement(spec, ctx, *kv, batch);

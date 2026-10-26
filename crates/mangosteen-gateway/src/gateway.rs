@@ -55,9 +55,14 @@ const ENGINE_PROBE_BUDGET: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub enum PreparedDeployment {
     /// 决策为本地：参数已定、台账已落，等待下载（若需要）后启动。
-    Local(PreparedLocal),
+    ///
+    /// `Box` 与 [`PreparedDeployment::Done`] 同理：两个变体体积相差一个数量级。
+    Local(Box<PreparedLocal>),
     /// 决策为云端：云端链路不需要本地文件，已在 prepare 内完成。
-    Done(mangosteen_core::plan::DeploymentPlan),
+    ///
+    /// `Box` 是因为 `DeploymentPlan` 远大于 `PreparedLocal`（含云端规格、
+    /// 引擎参数等整块配置）；不装箱会让每次 `prepare` 的返回值都搬几百字节。
+    Done(Box<mangosteen_core::plan::DeploymentPlan>),
 }
 
 /// 本地部署的「已准备」状态，等待 [`Gateway::commit_local`] 启动。
@@ -661,8 +666,9 @@ impl Gateway {
         );
 
         match self.prepare_with_progress(evaluated, req, sink)? {
-            PreparedDeployment::Done(plan) => Ok(plan),
+            PreparedDeployment::Done(plan) => Ok(*plan),
             PreparedDeployment::Local(prepared) => {
+                let prepared = *prepared;
                 // 模型已在本地（evaluate 走的是读盘路径或台账规格），
                 // 因此下载阶段如实标「跳过」而不是假装下过。
                 sink(
@@ -748,7 +754,7 @@ impl Gateway {
         match decision {
             Decision::Reject { reason } => {
                 sink(DeployStage::Selecting, StageOutcome::Failed, reason.clone());
-                return Err(MnError::InsufficientLocalResource { detail: reason });
+                Err(MnError::InsufficientLocalResource { detail: reason })
             }
             Decision::Local { plan } => {
                 // ---- 3a. 准备本地（不启动）----
@@ -788,12 +794,12 @@ impl Gateway {
                     configured_detail(&plan),
                 );
 
-                Ok(PreparedDeployment::Local(PreparedLocal {
+                Ok(PreparedDeployment::Local(Box::new(PreparedLocal {
                     id,
                     evaluated,
                     plan,
                     req: req.clone(),
-                }))
+                })))
             }
             Decision::Cloud {
                 plan: cloud_plan,
@@ -819,7 +825,7 @@ impl Gateway {
                     "云端部署无需本地量化".to_string(),
                 );
                 let plan = self.deploy_cloud(&evaluated, *cloud_plan, trail, &why, sink)?;
-                Ok(PreparedDeployment::Done(plan))
+                Ok(PreparedDeployment::Done(Box::new(plan)))
             }
         }
     }
@@ -1344,11 +1350,9 @@ impl Gateway {
         let plan = record.plan.clone();
 
         match &plan.origin {
-            ComputeOrigin::Local => {
-                return Err(MnError::bad_request(
-                    "本地部署没有「保留实例再启动」的概念：请直接重新部署该模型".to_string(),
-                ));
-            }
+            ComputeOrigin::Local => Err(MnError::bad_request(
+                "本地部署没有「保留实例再启动」的概念：请直接重新部署该模型".to_string(),
+            )),
             ComputeOrigin::Cloud {
                 provider,
                 instance_id,
@@ -1397,7 +1401,7 @@ impl Gateway {
                     return Err(e);
                 }
                 self.state.set_status(id, DeploymentStatus::Ready, None)?;
-                return Ok(());
+                Ok(())
             }
         }
     }

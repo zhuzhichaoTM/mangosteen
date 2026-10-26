@@ -39,10 +39,11 @@ use serde::{Deserialize, Serialize};
 use super::transport::{HttpRequest, HttpResponse, Transport};
 
 /// 认证方式。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthStyle {
     /// `Authorization: Bearer <token>`
+    #[default]
     Bearer,
     /// 自定义头名，如 `Authorization: <token>`（阿里云风格）
     Header { name: String },
@@ -53,12 +54,6 @@ pub enum AuthStyle {
     },
     /// Token 作为查询参数（部分厂商）
     QueryParam { name: String },
-}
-
-impl Default for AuthStyle {
-    fn default() -> Self {
-        AuthStyle::Bearer
-    }
 }
 
 /// JSON 字段路径。支持 `a.b.c` 形式的嵌套取值与 `a[0].b` 的数组下标。

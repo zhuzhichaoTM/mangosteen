@@ -472,11 +472,10 @@ pub fn ensure_llama_server(
     if download_url.trim().is_empty() {
         return Err(MnError::Network {
             stage: "准备云端 llama.cpp".to_string(),
-            reason: format!(
-                "远端没有 llama-server，且未配置下载地址。\
-                 请在 [cloud] 里设置 llama_server_url（llama.cpp 官方 release 的 \
-                 ubuntu-x64 zip 地址），或换一个自带 llama-server 的镜像"
-            ),
+            reason: "远端没有 llama-server，且未配置下载地址。\
+                     请在 [cloud] 里设置 llama_server_url（llama.cpp 官方 release 的 \
+                     ubuntu-x64 zip 地址），或换一个自带 llama-server 的镜像"
+                .to_string(),
         });
     }
 

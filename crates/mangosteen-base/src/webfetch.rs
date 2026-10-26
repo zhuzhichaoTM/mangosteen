@@ -198,8 +198,11 @@ fn validate_url(url: &str) -> MnResult<()> {
     Ok(())
 }
 
+/// meta 行解析结果：`(状态码, 最终 URL, 字节数, content-type)`。
+type MetaLine = (u16, String, u64, String);
+
 /// 拆分 stdout 的正文与 meta 行。
-fn split_meta(raw: &[u8]) -> (Vec<u8>, Option<(u16, String, u64, String)>) {
+fn split_meta(raw: &[u8]) -> (Vec<u8>, Option<MetaLine>) {
     const MARK: &[u8] = b"\n__META__";
     // 从尾部找标记（正文里理论上不会出现该串，但仍从后往前找更稳）
     let pos = raw.windows(MARK.len()).rposition(|w| w == MARK);
@@ -354,7 +357,7 @@ pub fn html_to_text(html: &str) -> (Option<String>, String) {
     // 清理：合并空白、去掉空行过多
     let text = out
         .lines()
-        .map(|l| collapse_ws(l))
+        .map(collapse_ws)
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join("\n");

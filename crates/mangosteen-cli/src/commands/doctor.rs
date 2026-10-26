@@ -260,7 +260,7 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
                 ),
                 hint: writable
                     .err()
-                    .map(|_| format!("检查该目录权限，或改用有写权限的路径（配置 storage.*）")),
+                    .map(|_| "检查该目录权限，或改用有写权限的路径（配置 storage.*）".to_string()),
             });
         }
 

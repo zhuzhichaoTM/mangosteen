@@ -205,7 +205,10 @@ mod tests {
     #[test]
     fn detect_respects_extra_dirs() {
         let tmp = std::env::temp_dir();
-        let dirs = detect_library_dirs(Path::new("/nonexistent/bin/llama-server"), &[tmp.clone()]);
+        let dirs = detect_library_dirs(
+            Path::new("/nonexistent/bin/llama-server"),
+            std::slice::from_ref(&tmp),
+        );
         assert!(dirs.iter().any(|d| d == &tmp), "显式追加的目录应被包含");
     }
 

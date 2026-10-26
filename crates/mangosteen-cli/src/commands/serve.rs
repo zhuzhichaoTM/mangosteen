@@ -55,7 +55,7 @@ pub fn run(args: Args) -> MnResult<i32> {
     let api_key = if require_key {
         cfg.gateway
             .api_key
-            .resolve(&mangosteen_platform::paths::real_env)?
+            .resolve(mangosteen_platform::paths::real_env)?
     } else {
         String::new()
     };

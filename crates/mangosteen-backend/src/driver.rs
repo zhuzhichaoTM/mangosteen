@@ -31,6 +31,7 @@ use crate::mapping::{self, units};
 use crate::model::{
     state, BandwidthSwitchResponse, InstancePortsResponse, NetOptimizerResponse, PriceDetail,
     PriceResponse, RefundPriceResponse, SoftwarePortResponse, UHost, UpgradePriceResponse,
+    UserPriceRequest,
 };
 use crate::retcode::{codes, provider_error};
 use crate::sign::Credential;
@@ -449,15 +450,15 @@ impl<T: Transport> CompshareDriver<T> {
         cpu: u32,
         memory_gb: u64,
     ) -> MnResult<PriceResponse> {
-        self.client.user_price(
+        self.client.user_price(&UserPriceRequest {
             gpu_type,
             gpu,
             cpu,
-            CompshareConfig::memory_mb(memory_gb),
-            Some(self.config.image_id.as_str()).filter(|s| !s.is_empty()),
-            self.config.disk_size_gb,
-            &self.config.disk_type,
-        )
+            memory_mb: CompshareConfig::memory_mb(memory_gb),
+            image_id: Some(self.config.image_id.as_str()).filter(|s| !s.is_empty()),
+            disk_size_gb: self.config.disk_size_gb,
+            disk_type: &self.config.disk_type,
+        })
     }
 
     /// 查询删除实例可退金额（批量）。

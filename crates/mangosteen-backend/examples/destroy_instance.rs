@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "DescribeCompShareInstance",
         {
             let mut p = mangosteen_backend::Params::new();
-            p.set_list("UHostIds", &[id.clone()]);
+            p.set_list("UHostIds", std::slice::from_ref(&id));
             p
         },
         mangosteen_backend::client::Scope::None,
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let deadline = Instant::now() + std::time::Duration::from_secs(300);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3));
-            let r = client.describe_instances(Some(&[id.clone()]), 10, 0)?;
+            let r = client.describe_instances(Some(std::slice::from_ref(&id)), 10, 0)?;
             let st = r
                 .uhost_set
                 .first()
@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[3/3] 确认实例已释放…");
     let deadline = Instant::now() + std::time::Duration::from_secs(120);
     loop {
-        let r = client.describe_instances(Some(&[id.clone()]), 10, 0)?;
+        let r = client.describe_instances(Some(std::slice::from_ref(&id)), 10, 0)?;
         if r.uhost_set.is_empty() {
             println!("[3/3] ✓ 实例已从列表消失，计费已停止");
             break;

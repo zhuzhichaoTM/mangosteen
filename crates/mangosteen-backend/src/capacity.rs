@@ -538,14 +538,9 @@ pub fn provision_cheapest<T: Transport>(
     let mut last_err: Option<MnError> = None;
     // 已尝试（含因售罄跳过）的候选数上限。售罄跳过也计入，
     // 避免库存剧烈变动时无限循环。
-    let mut attempts = 0usize;
     let budget = max_attempts.max(1) * 3;
 
-    for opt in &board.options {
-        if attempts >= budget {
-            break;
-        }
-        attempts += 1;
+    for opt in board.options.iter().take(budget) {
         let spec = &opt.spec;
 
         // ---- 下单前复核库存（关键：库存快照会过期）----
@@ -971,8 +966,8 @@ mod tests {
         let by_type = m.by_gpu_type();
         assert_eq!(by_type.get("4090").map(|v| v.len()), Some(2));
         // 5090 全部缺货，不应出现
-        assert!(by_type.get("5090").is_none());
-        assert!(by_type.get("A100").is_none(), "失败条目不算有货");
+        assert!(!by_type.contains_key("5090"));
+        assert!(!by_type.contains_key("A100"), "失败条目不算有货");
 
         let by_region = m.by_region();
         assert_eq!(by_region.get("cn-wlcb").map(|v| v.len()), Some(1));

@@ -466,6 +466,29 @@ impl PriceDetail {
     }
 }
 
+/// 价格查询请求（按规格询价，不含实例 ID）。
+///
+/// 字段与厂商 `GetCompShareInstanceUserPrice` 入参一一对应。
+/// 单独成结构而非长参数表：本接口是**全部计费模式**的横向对比入口，
+/// 参数多且易错位（`gpu` 与 `cpu` 都是 u32，传反不会报错）。
+#[derive(Debug, Clone)]
+pub struct UserPriceRequest<'a> {
+    /// 显卡型号，如 `"4090"`
+    pub gpu_type: &'a str,
+    /// 显卡数量
+    pub gpu: u32,
+    /// CPU 核数
+    pub cpu: u32,
+    /// 内存（MiB）
+    pub memory_mb: u64,
+    /// 镜像 ID
+    pub image_id: Option<&'a str>,
+    /// 系统盘大小（GiB）
+    pub disk_size_gb: u32,
+    /// 系统盘类型，如 `"CLOUD_SSD"`
+    pub disk_type: &'a str,
+}
+
 /// `GetCompShareInstancePrice` 响应。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PriceResponse {
@@ -1478,8 +1501,10 @@ mod tests {
 
     #[test]
     fn sold_out_is_not_on_sale() {
-        let mut t = AvailableInstanceType::default();
-        t.status = "SoldOut".into();
+        let mut t = AvailableInstanceType {
+            status: "SoldOut".into(),
+            ..Default::default()
+        };
         assert!(!t.is_on_sale());
         t.status = "normal".into();
         assert!(t.is_on_sale());

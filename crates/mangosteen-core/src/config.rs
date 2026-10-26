@@ -26,7 +26,7 @@ use crate::estimate::KvCacheType;
 use crate::policy::{ScoreWeights, SelectionStrategy};
 
 /// 密钥引用。三种来源互斥，按顺序解析。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretRef {
     /// 直接内联（**不推荐**，仅用于本地临时调试）
@@ -36,13 +36,8 @@ pub enum SecretRef {
     /// 从文件读取（文件中为单行密钥，自动 trim）
     File(PathBuf),
     /// 无密钥（部分服务商的本地 mock / 免费额度）
+    #[default]
     None,
-}
-
-impl Default for SecretRef {
-    fn default() -> Self {
-        SecretRef::None
-    }
 }
 
 impl SecretRef {
@@ -1079,12 +1074,16 @@ cache_dir = "/c"
         l.min_context = 2048;
         assert!(l.validate().is_err());
 
-        let mut l = LocalConfig::default();
-        l.port_range_start = 80;
+        let l = LocalConfig {
+            port_range_start: 80,
+            ..Default::default()
+        };
         assert!(l.validate().is_err());
 
-        let mut l = LocalConfig::default();
-        l.batch_size = 0;
+        let l = LocalConfig {
+            batch_size: 0,
+            ..Default::default()
+        };
         assert!(l.validate().is_err());
     }
 

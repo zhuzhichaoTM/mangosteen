@@ -770,8 +770,10 @@ mod tests {
 
     #[test]
     fn invariant_i4_respects_fallback_limit() {
-        let mut cfg = SchedulerConfig::default();
-        cfg.max_fallbacks = 1;
+        let cfg = SchedulerConfig {
+            max_fallbacks: 1,
+            ..Default::default()
+        };
         let a = Assessor::new(hw(4, 8));
         let s = Scheduler::new(a, cfg)
             .with_port_range(11500, 11600)
@@ -857,8 +859,10 @@ mod tests {
 
     #[test]
     fn scheduler_config_price_cap_is_fallback() {
-        let mut cfg = SchedulerConfig::default();
-        cfg.max_price_per_hour = Some(9.9);
+        let cfg = SchedulerConfig {
+            max_price_per_hour: Some(9.9),
+            ..Default::default()
+        };
         let a = Assessor::new(hw(4, 8));
         let s = Scheduler::new(a, cfg)
             .with_port_range(11500, 11600)

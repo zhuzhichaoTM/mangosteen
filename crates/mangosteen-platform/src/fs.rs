@@ -158,7 +158,7 @@ pub fn available_space(path: &Path) -> MnResult<u64> {
         unsafe {
             let mut st: libc::statvfs = std::mem::zeroed();
             if libc::statvfs(c.as_ptr(), &mut st) == 0 {
-                return Ok(st.f_bavail as u64 * st.f_frsize as u64);
+                return Ok(st.f_bavail as u64 * st.f_frsize);
             }
         }
         Err(MnError::Io {

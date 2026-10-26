@@ -100,7 +100,7 @@ impl HostProfile {
     /// 经验规则：只用**物理**核心数。llama.cpp 的线程池在超线程上会出现
     /// 明显的争用，解码吞吐通常反而下降。
     pub fn recommended_threads(&self) -> u32 {
-        self.physical_cores.max(1).min(64)
+        self.physical_cores.clamp(1, 64)
     }
 }
 
@@ -221,13 +221,13 @@ mod tests {
     fn tiny_host_still_keeps_1gib_floor() {
         let h = HostProfile {
             total_memory_bytes: 2 * (1u64 << 30),
-            available_memory_bytes: 1 * (1u64 << 30),
+            available_memory_bytes: 1u64 << 30,
             physical_cores: 2,
             logical_cores: 4,
             cpu_model: "x".into(),
         };
         // 2GiB - 1GiB(floor) = 1GiB
-        assert_eq!(h.usable_memory(), 1 * (1u64 << 30));
+        assert_eq!(h.usable_memory(), 1u64 << 30);
     }
 
     #[test]

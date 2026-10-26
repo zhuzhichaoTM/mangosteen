@@ -375,8 +375,8 @@ fn send_graceful(child: &Child, pid: u32) {
 /// | `probe_http_ok` | 「现在是否活着」，只试一次 | 约 `connect_timeout + read_timeout` | 状态查询、健康检查 |
 ///
 /// 早先 `status` 用 `wait_http_ready` 做探活，导致**每个部署要等十几秒**：
-/// 2 秒超时只是循环的**退出条件**，而单轮里 `connect(800ms) + read(1500ms)
-/// + sleep(200ms)` 最坏 2.5 秒，循环还会多跑一轮。一个部署 5 秒、两个就
+/// 2 秒超时只是循环的**退出条件**，而单轮里 `connect(800ms) + read(1500ms)`
+/// `+ sleep(200ms)` 最坏 2.5 秒，循环还会多跑一轮。一个部署 5 秒、两个就
 /// 10 秒，直接从「毫秒级状态查询」变成「十几秒卡顿」。
 pub fn probe_http_ok(host: &str, port: u16, path: &str, per_op: Duration) -> bool {
     use std::io::{Read, Write};
@@ -648,7 +648,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let found = find_executable("mnfake", &[dir.clone()]);
+            let found = find_executable("mnfake", std::slice::from_ref(&dir));
             assert_eq!(found, Some(fake));
         }
         std::fs::remove_dir_all(&dir).ok();

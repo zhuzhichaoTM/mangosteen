@@ -149,7 +149,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 5. 多计费模式价格（验证 MB 单位与四种模式）----
     println!("=== 5. GetCompShareInstanceUserPrice（4090 / 1卡 / 16核 / 64GB）===");
-    match client.user_price("4090", 1, 16, 64 * 1024, None, 100, "CLOUD_SSD") {
+    match client.user_price(&mangosteen_backend::UserPriceRequest {
+        gpu_type: "4090",
+        gpu: 1,
+        cpu: 16,
+        memory_mb: 64 * 1024,
+        image_id: None,
+        disk_size_gb: 100,
+        disk_type: "CLOUD_SSD",
+    }) {
         Ok(r) => {
             println!("RetCode    : {}", r.ret_code);
             println!("{:<10} {:>12} {:>12}", "计费模式", "实例(元)", "系统盘(元)");

@@ -818,7 +818,6 @@ mod tests {
         assert_eq!(normalize_state("Install"), InstanceState::Creating);
     }
 
-    #[test]
     /// 新建实例的中间态必须映射成 Creating，不能是 Failed。
     #[test]
     fn transitional_states_are_creating() {

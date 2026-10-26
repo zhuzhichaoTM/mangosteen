@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     println!("=== 实例 {id} ===");
-    let before = client.describe_instances(Some(&[id.clone()]), 100, 0)?;
+    let before = client.describe_instances(Some(std::slice::from_ref(&id)), 100, 0)?;
     let cur = before
         .uhost_set
         .iter()
@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("→ 等待状态变为 {target}（最多 180 秒）");
     for i in 1..=60 {
         std::thread::sleep(std::time::Duration::from_secs(3));
-        let r = client.describe_instances(Some(&[id.clone()]), 100, 0)?;
+        let r = client.describe_instances(Some(std::slice::from_ref(&id)), 100, 0)?;
         let u = match r.uhost_set.iter().find(|u| u.id == id) {
             Some(u) => u,
             None => continue,

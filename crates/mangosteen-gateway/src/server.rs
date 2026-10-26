@@ -1340,7 +1340,7 @@ impl GatewayServer {
                         }
                         mangosteen_core::config::SecretRef::None => "none:无需密钥".to_string(),
                     },
-                    "secret_configured": p.secret.resolve(&mangosteen_platform::paths::real_env).is_ok(),
+                    "secret_configured": p.secret.resolve(mangosteen_platform::paths::real_env).is_ok(),
                 })
             })
             .collect();
@@ -1998,13 +1998,9 @@ impl GatewayServer {
             // ModelStore 是 Clone 的（内部只有路径 + 策略），
             // 克隆一份进闭包即可，不需要共享可变状态。
             let models = gw.models().clone();
-            let reg: Arc<dyn Fn(&std::path::Path) -> MnResult<String> + Send + Sync> =
-                Arc::new(move |path: &std::path::Path| {
-                    models
-                        .register_local(path, None)
-                        .map(|r| r.entry.id)
-                        .map_err(|e| e)
-                });
+            let reg: crate::pulljobs::RegisterHook = Arc::new(move |path: &std::path::Path| {
+                models.register_local(path, None).map(|r| r.entry.id)
+            });
             // 部署闭包要用它，但**在这里不能持锁**——只捕获 Arc，
             // 真正执行时才短暂加锁（见下面闭包体）。
             (cfg, reg, Arc::clone(&self.gateway))
@@ -2037,16 +2033,18 @@ impl GatewayServer {
                     opts.expected_bytes = Some(f.size);
                     opts.expected_sha256 = f.sha256.clone();
                 }
-                None => return Response::json(
-                    400,
-                    &ErrorResponse::bad_request(
-                        format!(
+                None => {
+                    return Response::json(
+                        400,
+                        &ErrorResponse::bad_request(
+                            format!(
                             "仓库 {} 中不存在文件 `{target}`。先用「搜索」查看该仓库可下载的文件",
                             model.repo
                         ),
-                        Some("model"),
-                    ),
-                ),
+                            Some("model"),
+                        ),
+                    )
+                }
             },
             Err(e) => {
                 // 元数据取不到不算致命：仍然允许下载（只是没有大小与哈希校验）。
@@ -2140,9 +2138,7 @@ impl GatewayServer {
                         None
                     }
                 };
-            let prepare: Arc<
-                dyn Fn() -> MnResult<crate::gateway::PreparedDeployment> + Send + Sync,
-            > = Arc::new(move || {
+            let prepare: crate::pulljobs::PrepareHook = Arc::new(move || {
                 // 评估：本地文件 > 远端真实元数据 > 按体积粗估
                 let req = {
                     let mut r = crate::assess::DeploymentRequest::for_model("__probe__");
@@ -2254,9 +2250,7 @@ impl GatewayServer {
             let gw_c = gw;
             // commit 需要知道文件落在哪（prepare 时还没有这个文件）
             let final_path_for_commit = final_path.clone();
-            let commit: Arc<
-                dyn Fn(crate::gateway::PreparedLocal) -> MnResult<String> + Send + Sync,
-            > = Arc::new(move |prepared| {
+            let commit: crate::pulljobs::CommitHook = Arc::new(move |prepared| {
                 // prepare 在下载**之前**执行，那时文件还不存在，
                 // plan.model_path 是空的。这里补上真实落盘路径，
                 // 否则引擎会报「模型文件不存在：」（冒号后为空）。
@@ -2284,9 +2278,7 @@ impl GatewayServer {
             //  · 释放端口预留（否则反复「部署→停止」会吃光端口区间）
             //  · 按 `delete_file` 决定是否删模型文件
             let gw_a = gw_for_abort;
-            let abort: Arc<
-                dyn Fn(Option<&str>, Option<&std::path::Path>) -> MnResult<()> + Send + Sync,
-            > = Arc::new(move |dep_id, delete_file| {
+            let abort: crate::pulljobs::AbortHook = Arc::new(move |dep_id, delete_file| {
                 let Some(dep_id) = dep_id else { return Ok(()) };
                 let mut g = gw_a
                     .lock()
@@ -2335,7 +2327,7 @@ impl GatewayServer {
                             self.pull_jobs.set_deployment(&job_id, Some(&plan.id), None);
                         }
                         Ok(crate::gateway::PreparedDeployment::Local(p)) => {
-                            match (hooks.commit)(p) {
+                            match (hooks.commit)(*p) {
                                 Ok(dep_id) => {
                                     self.pull_jobs.set_deployment(&job_id, Some(&dep_id), None)
                                 }
@@ -2395,9 +2387,6 @@ impl GatewayServer {
         )
     }
 
-    /// 查询下载任务（进度）。
-    ///
-    /// `GET /api/models/jobs` 列出全部；带 `?id=` 时只返回该任务。
     // ---------------------------------------------------------- 会话管理
 
     /// 列出会话。`GET /api/sessions?kind=chat|deploy`
