@@ -44,7 +44,6 @@ pub mod protocol;
 pub mod pulljobs;
 pub mod scheduler;
 pub mod server;
-pub mod webui;
 
 pub use assess::{Assessor, DeploymentRequest, Evaluated};
 pub use cloudmon::{spawn_cloud_monitor, CloudMonitor};

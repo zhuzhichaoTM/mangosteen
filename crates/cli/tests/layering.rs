@@ -664,8 +664,8 @@ fn c6_five_layer_architecture_is_complete() {
     // 交互入口：CLI + 内嵌 Web UI
     assert!(file_exists("crates/cli/src/main.rs"), "缺少 CLI 入口");
     assert!(
-        crate_has("mangosteen-gateway", "INDEX_HTML"),
-        "缺少 Web 控制台入口（内嵌单文件 HTML）"
+        file_exists("crates/webui/src/lib.rs"),
+        "第一层缺少独立 Web UI crate"
     );
 
     // ---------- 第二层：API 网关层（唯一收口） ----------

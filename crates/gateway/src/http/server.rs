@@ -851,7 +851,7 @@ impl GatewayServer {
             ("GET", "/") | ("GET", "/index.html") => Response {
                 status: 200,
                 content_type: "text/html; charset=utf-8".to_string(),
-                body: crate::webui::INDEX_HTML.as_bytes().to_vec(),
+                body: mangosteen_webui::INDEX_HTML.as_bytes().to_vec(),
             },
             ("GET", "/health") => self.health(),
             ("GET", "/v1/models") => self.models(),

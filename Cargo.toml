@@ -9,6 +9,7 @@ members = [
     "crates/backend",
     "crates/cloud",
     "crates/gateway",
+    "crates/webui",
     "crates/cli",
 ]
 
@@ -29,6 +30,7 @@ mangosteen-local = { path = "crates/local" }
 mangosteen-backend = { path = "crates/backend" }
 mangosteen-cloud = { path = "crates/cloud" }
 mangosteen-gateway = { path = "crates/gateway" }
+mangosteen-webui = { path = "crates/webui" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
