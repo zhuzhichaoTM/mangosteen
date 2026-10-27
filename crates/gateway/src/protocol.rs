@@ -29,39 +29,7 @@ use mangosteen_core::openai::{
 };
 use mangosteen_core::{MnError, MnResult};
 
-/// 后端算力目标：网关转发时的目的地。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackendTarget {
-    /// 监听地址（本地为 `127.0.0.1`，云端经隧道后也是 `127.0.0.1`）
-    pub host: String,
-    /// 端口
-    pub port: u16,
-    /// 该后端的模型 ID（用于 `auto` 替换与响应回填）
-    pub model_id: String,
-    /// 算力来源描述（写入响应与健康检查）
-    pub origin_label: String,
-}
-
-impl BackendTarget {
-    /// base URL（不含 `/v1`）。
-    pub fn base_url(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
-    }
-
-    /// OpenAI 兼容 base URL。
-    pub fn openai_base_url(&self) -> String {
-        format!("{}/v1", self.base_url())
-    }
-
-    /// 完整上游 URL。
-    pub fn url_for(&self, path: &str) -> String {
-        format!(
-            "{}/v1/{}",
-            self.base_url().trim_end_matches('/'),
-            path.trim_start_matches("/v1/").trim_start_matches('/')
-        )
-    }
-}
+pub use mangosteen_orchestration::backend::BackendTarget;
 
 /// 规范化对话请求。
 ///

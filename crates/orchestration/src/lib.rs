@@ -19,8 +19,10 @@
 //! | [`progress`] | 部署阶段定义与进度上报契约 |
 
 pub mod assess;
+pub mod backend;
 pub mod progress;
 pub mod scheduler;
 
 pub use assess::{Assessor, ComputeTarget, DeploymentRequest, Evaluated, ModelDownloadSpec};
+pub use backend::BackendTarget;
 pub use scheduler::{Decision, LocalLaunchOutcome, Scheduler, SchedulerOutcome};
