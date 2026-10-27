@@ -435,6 +435,50 @@ fn c3_unimplemented_engines_are_absent_from_registry() {
     );
 }
 
+/// C7：云供应商层只负责节点供应，不得持有模型下载/引擎启停逻辑。
+///
+/// 云端部署同样要下载模型、准备并拉起推理引擎；这些执行语义必须复用
+/// `mangosteen-device`，否则同一套「模型 → 引擎」行为会出现两份实现，
+/// 改一处漏一处。
+#[test]
+fn c7_provider_does_not_run_models() {
+    let forbidden = [
+        "fn ensure_llama_server",
+        "fn start_llama_server",
+        "fn stop_llama_server",
+        "fn download_model_remote",
+    ];
+    for (path, src) in crate_sources("mangosteen-provider") {
+        let code = strip_comments_and_strings(&src);
+        for pat in forbidden {
+            assert!(
+                !code.contains(pat),
+                "C7 违反：{} 定义了 `{pat}`。\
+                 模型/引擎执行属于 device，provider 只负责创建与连接节点。",
+                path.display()
+            );
+        }
+    }
+}
+
+/// C7b：`DeviceRuntime` 必须同时覆盖本地与远端目标。
+#[test]
+fn c7_device_runtime_covers_local_and_remote() {
+    let src: String = crate_sources("mangosteen-device")
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect();
+    let code = strip_comments_and_strings(&src);
+    assert!(
+        code.contains("pub trait DeviceRuntime"),
+        "C7 违反：device 缺少统一设备运行时契约（DeviceRuntime）"
+    );
+    assert!(
+        code.contains("enum DeviceTarget") && code.contains("Remote"),
+        "C7 违反：DeviceTarget 必须覆盖本地与远端目标"
+    );
+}
+
 // ============================================================ C4
 
 #[test]
