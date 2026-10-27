@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 /// 仓库根目录。
 fn repo_root() -> PathBuf {
-    // 测试运行时 cwd 是 crate 目录（crates/mangosteen-cli）
+    // 测试运行时 cwd 是 crate 目录（crates/cli）
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -39,9 +39,24 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// 包名 → 目录名。
+///
+/// 目录统一去掉了 `mangosteen-` 前缀（`crates/core` → `crates/core`），
+/// 但 Cargo 包名保留前缀（避免与 std 的 `core` 命名空间混淆）。
+/// 本文件的断言一律用**包名**书写，这里做唯一一次换算。
+fn crate_dir(crate_name: &str) -> String {
+    crate_name
+        .strip_prefix("mangosteen-")
+        .unwrap_or(crate_name)
+        .to_string()
+}
+
 /// 读取某 crate 的全部 `.rs` 源码（拼接）。
 fn crate_sources(crate_name: &str) -> Vec<(PathBuf, String)> {
-    let dir = repo_root().join("crates").join(crate_name).join("src");
+    let dir = repo_root()
+        .join("crates")
+        .join(crate_dir(crate_name))
+        .join("src");
     let mut out = Vec::new();
     collect_rs(&dir, &mut out);
     out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -68,7 +83,7 @@ fn collect_rs(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
 fn crate_manifest(crate_name: &str) -> String {
     let p = repo_root()
         .join("crates")
-        .join(crate_name)
+        .join(crate_dir(crate_name))
         .join("Cargo.toml");
     std::fs::read_to_string(&p).unwrap_or_default()
 }
@@ -633,7 +648,7 @@ fn crate_has(crate_name: &str, needle: &str) -> bool {
 fn c6_five_layer_architecture_is_complete() {
     // ---------- 第一层：用户会话与交互层 ----------
     assert!(
-        file_exists("crates/mangosteen-session/src/lib.rs"),
+        file_exists("crates/session/src/lib.rs"),
         "第一层缺少「用户会话管理」模块（mangosteen-session）"
     );
     assert!(
@@ -645,10 +660,7 @@ fn c6_five_layer_architecture_is_complete() {
         "第一层应区分推理会话与部署任务会话（SessionKind）"
     );
     // 交互入口：CLI + 内嵌 Web UI
-    assert!(
-        file_exists("crates/mangosteen-cli/src/main.rs"),
-        "缺少 CLI 入口"
-    );
+    assert!(file_exists("crates/cli/src/main.rs"), "缺少 CLI 入口");
     assert!(
         crate_has("mangosteen-gateway", "INDEX_HTML"),
         "缺少 Web 控制台入口（内嵌单文件 HTML）"
@@ -656,7 +668,7 @@ fn c6_five_layer_architecture_is_complete() {
 
     // ---------- 第二层：API 网关层（唯一收口） ----------
     assert!(
-        file_exists("crates/mangosteen-gateway/src/server.rs"),
+        file_exists("crates/gateway/src/server.rs"),
         "第二层缺少 API Server"
     );
     for route in ["\"/v1/chat/completions\"", "\"/api/deploy\""] {
@@ -669,7 +681,7 @@ fn c6_five_layer_architecture_is_complete() {
     // ---------- 第三层：编排调度核心层 ----------
     // 模块 1：引擎管理（插件式多推理框架）
     assert!(
-        file_exists("crates/mangosteen-local/src/plugin.rs"),
+        file_exists("crates/local/src/plugin.rs"),
         "第三层缺少「引擎管理」插件模块"
     );
     assert!(
@@ -678,7 +690,7 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 2：模型评估
     assert!(
-        file_exists("crates/mangosteen-gateway/src/assess.rs"),
+        file_exists("crates/gateway/src/assess.rs"),
         "第三层缺少「模型评估」模块"
     );
     assert!(
@@ -687,7 +699,7 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 3：节点选择（多云调度决策器）
     assert!(
-        file_exists("crates/mangosteen-gateway/src/scheduler.rs"),
+        file_exists("crates/gateway/src/scheduler.rs"),
         "第三层缺少「节点选择」模块"
     );
     assert!(
@@ -705,7 +717,7 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 5：多云厂商插件适配
     assert!(
-        file_exists("crates/mangosteen-cloud/src/registry.rs"),
+        file_exists("crates/cloud/src/registry.rs"),
         "第三层缺少多云驱动注册表"
     );
     assert!(
@@ -721,7 +733,7 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 2：模型量化管理（可选能力）
     assert!(
-        file_exists("crates/mangosteen-base/src/quantize.rs"),
+        file_exists("crates/base/src/quantize.rs"),
         "第四层缺少「模型量化管理」模块（基线的可选工具能力）"
     );
     assert!(
@@ -748,7 +760,7 @@ fn c6_five_layer_architecture_is_complete() {
         "第五层缺少文件访问权限控制（AccessGuard）"
     );
     assert!(
-        file_exists("crates/mangosteen-platform/src/process.rs"),
+        file_exists("crates/platform/src/process.rs"),
         "第五层缺少进程/平台基础能力"
     );
 }
@@ -795,10 +807,20 @@ fn workspace_contains_all_layers() {
         "mangosteen-gateway",
         "mangosteen-cli",
     ] {
+        // 目录名去掉了 `mangosteen-` 前缀，包名保留。
+        let dir = c.strip_prefix("mangosteen-").unwrap_or(c);
         assert!(
-            manifest.contains(&format!("crates/{c}")),
-            "工作区缺少 crate `{c}`"
+            manifest.contains(&format!("crates/{dir}")),
+            "工作区缺少 crate `{c}`（目录 crates/{dir}）"
         );
+        // `mangosteen-cli` 是二进制目标，不出现在 [workspace.dependencies]，
+        // 只校验目录存在（上面那条）与它自己的 Cargo.toml 存在。
+        if c != "mangosteen-cli" {
+            assert!(
+                manifest.contains(&format!("{c} = ")),
+                "工作区缺少 crate `{c}` 的包名声明"
+            );
+        }
     }
 }
 

@@ -222,7 +222,13 @@ fn version_is_consistent_across_manifests() {
         "mangosteen-gateway",
         "mangosteen-cli",
     ] {
-        let m = read(&format!("crates/{c}/Cargo.toml"));
+        // 目录去掉了 `mangosteen-` 前缀，包名保留（见 Cargo.toml 的 members）。
+        let dir = c.strip_prefix("mangosteen-").unwrap_or(c);
+        let m = read(&format!("crates/{dir}/Cargo.toml"));
+        assert!(
+            m.contains(&format!("name = \"{c}\"")),
+            "`crates/{dir}/Cargo.toml` 的包名应为 `{c}`"
+        );
         assert!(
             m.contains("version.workspace = true"),
             "`{c}` 应继承 workspace 版本（避免版本漂移）"
@@ -232,7 +238,7 @@ fn version_is_consistent_across_manifests() {
 
 #[test]
 fn cli_binary_name_is_mangosteen() {
-    let m = read("crates/mangosteen-cli/Cargo.toml");
+    let m = read("crates/cli/Cargo.toml");
     assert!(
         m.contains("name = \"mangosteen\""),
         "发布件二进制名必须是 `mangosteen`"
@@ -395,7 +401,7 @@ fn web_ui_stays_self_contained() {
     // 前端不得依赖外部资源：离线/内网环境会白屏。
     // 这条约束在 e2e 里也测了实际响应，这里再加一道静态检查，
     // 让「不小心引入 CDN」在 cargo test 阶段就失败。
-    let src = read("crates/mangosteen-gateway/src/webui.rs");
+    let src = read("crates/gateway/src/webui.rs");
     // rust 源里出现这些就说明页面开始依赖外部资源
     assert!(
         !src.contains("cdn.jsdelivr")

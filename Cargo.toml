@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/mangosteen-core",
-    "crates/mangosteen-platform",
-    "crates/mangosteen-base",
-    "crates/mangosteen-session",
-    "crates/mangosteen-local",
-    "crates/mangosteen-backend",
-    "crates/mangosteen-cloud",
-    "crates/mangosteen-gateway",
-    "crates/mangosteen-cli",
+    "crates/core",
+    "crates/platform",
+    "crates/base",
+    "crates/session",
+    "crates/local",
+    "crates/backend",
+    "crates/cloud",
+    "crates/gateway",
+    "crates/cli",
 ]
 
 [workspace.package]
@@ -21,14 +21,14 @@ authors = ["Mangosteen Contributors"]
 repository = "https://github.com/zhuzhichaoTM/mangosteen"
 
 [workspace.dependencies]
-mangosteen-core = { path = "crates/mangosteen-core" }
-mangosteen-platform = { path = "crates/mangosteen-platform" }
-mangosteen-base = { path = "crates/mangosteen-base" }
-mangosteen-session = { path = "crates/mangosteen-session" }
-mangosteen-local = { path = "crates/mangosteen-local" }
-mangosteen-backend = { path = "crates/mangosteen-backend" }
-mangosteen-cloud = { path = "crates/mangosteen-cloud" }
-mangosteen-gateway = { path = "crates/mangosteen-gateway" }
+mangosteen-core = { path = "crates/core" }
+mangosteen-platform = { path = "crates/platform" }
+mangosteen-base = { path = "crates/base" }
+mangosteen-session = { path = "crates/session" }
+mangosteen-local = { path = "crates/local" }
+mangosteen-backend = { path = "crates/backend" }
+mangosteen-cloud = { path = "crates/cloud" }
+mangosteen-gateway = { path = "crates/gateway" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
