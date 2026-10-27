@@ -401,7 +401,7 @@ fn web_ui_stays_self_contained() {
     // 前端不得依赖外部资源：离线/内网环境会白屏。
     // 这条约束在 e2e 里也测了实际响应，这里再加一道静态检查，
     // 让「不小心引入 CDN」在 cargo test 阶段就失败。
-    let src = read("crates/gateway/src/webui.rs");
+    let src = read("crates/gateway/src/assets/index.html");
     // rust 源里出现这些就说明页面开始依赖外部资源
     assert!(
         !src.contains("cdn.jsdelivr")
