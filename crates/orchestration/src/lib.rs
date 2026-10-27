@@ -16,8 +16,10 @@
 //! |------|------|
 //! | [`assess`] | 模型规格解析后的资源评估 |
 //! | [`scheduler`] | 本地/云端模式决策与节点优选 |
+//! | [`progress`] | 部署阶段定义与进度上报契约 |
 
 pub mod assess;
+pub mod progress;
 pub mod scheduler;
 
 pub use assess::{Assessor, ComputeTarget, DeploymentRequest, Evaluated, ModelDownloadSpec};

@@ -38,7 +38,6 @@
 pub mod cloudmon;
 pub mod gateway;
 pub mod http;
-pub mod progress;
 pub mod protocol;
 pub mod pulljobs;
 pub mod server;
@@ -48,9 +47,10 @@ pub use gateway::{
     ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot, Gateway, GatewayBuilder,
     GatewayStatus,
 };
+pub use mangosteen_orchestration::progress;
+pub use mangosteen_orchestration::progress::{DeployStage, StageEvent, StageOutcome};
 pub use mangosteen_orchestration::{assess, scheduler};
 pub use mangosteen_orchestration::{Assessor, DeploymentRequest, Evaluated};
-pub use progress::{DeployStage, StageEvent, StageOutcome};
 
 /// 在后台预热网关的慢速探测（引擎版本）。
 ///

@@ -242,7 +242,7 @@ fn job_json(j: &crate::pulljobs::PullJob) -> serde_json::Value {
     // 「这步还没到」与「这步跳过了」——后者必须显示原因。把状态判定
     // 放在这里，UI 只管画。
     let trail = &j.deploy_trail;
-    let steps: Vec<serde_json::Value> = crate::progress::DeployStage::STEPS
+    let steps: Vec<serde_json::Value> = mangosteen_orchestration::progress::DeployStage::STEPS
         .iter()
         .map(|s| {
             // 取该阶段的最后一条事件作为它的状态
@@ -281,7 +281,7 @@ fn job_json(j: &crate::pulljobs::PullJob) -> serde_json::Value {
             "id": s.id(),
             "label": s.label(),
             "index": s.index(),
-            "total": crate::progress::DeployStage::total(),
+            "total": mangosteen_orchestration::progress::DeployStage::total(),
         })),
         "deploy_detail": j.deploy_detail,
         "deploy_steps": steps,
@@ -2155,8 +2155,8 @@ impl GatewayServer {
                 // 阶段 1/6：模型评估
                 jobs_p.set_stage(
                     &jid_p,
-                    crate::progress::DeployStage::Assessing,
-                    crate::progress::StageOutcome::Running,
+                    mangosteen_orchestration::progress::DeployStage::Assessing,
+                    mangosteen_orchestration::progress::StageOutcome::Running,
                     "正在读取模型元数据并评估资源需求".to_string(),
                 );
 
@@ -2171,8 +2171,8 @@ impl GatewayServer {
                         Ok(ev) => {
                             jobs_p.set_stage(
                                 &jid_p,
-                                crate::progress::DeployStage::Assessing,
-                                crate::progress::StageOutcome::Done,
+                                mangosteen_orchestration::progress::DeployStage::Assessing,
+                                mangosteen_orchestration::progress::StageOutcome::Done,
                                 format!("{}（元数据来自本地文件）", probe_assessed_detail(&ev)),
                             );
                             ev
@@ -2181,8 +2181,8 @@ impl GatewayServer {
                             // 本地文件坏了 → 也会失败，但给准确原因
                             jobs_p.set_stage(
                                 &jid_p,
-                                crate::progress::DeployStage::Assessing,
-                                crate::progress::StageOutcome::Failed,
+                                mangosteen_orchestration::progress::DeployStage::Assessing,
+                                mangosteen_orchestration::progress::StageOutcome::Failed,
                                 format!("本地模型文件无法解析：{e}"),
                             );
                             return Err(e);
@@ -2203,8 +2203,8 @@ impl GatewayServer {
                             drop(g);
                             jobs_p.set_stage(
                                 &jid_p,
-                                crate::progress::DeployStage::Assessing,
-                                crate::progress::StageOutcome::Done,
+                                mangosteen_orchestration::progress::DeployStage::Assessing,
+                                mangosteen_orchestration::progress::StageOutcome::Done,
                                 format!("{}（元数据来自远端文件头）", probe_assessed_detail(&ev)),
                             );
                             ev
@@ -2218,8 +2218,8 @@ impl GatewayServer {
                             drop(g);
                             jobs_p.set_stage(
                                 &jid_p,
-                                crate::progress::DeployStage::Assessing,
-                                crate::progress::StageOutcome::Done,
+                                mangosteen_orchestration::progress::DeployStage::Assessing,
+                                mangosteen_orchestration::progress::StageOutcome::Done,
                                 format!(
                                     "{}（⚠ 元数据预取失败，以下为按体积的估算值：{}）",
                                     probe_assessed_detail(&ev),
@@ -2234,8 +2234,8 @@ impl GatewayServer {
                 // 阶段 2/6、3/6 由 prepare_with_progress 内部上报
                 let sink_jobs = jobs_p.clone();
                 let sink_id = jid_p.clone();
-                let sink = move |stage: crate::progress::DeployStage,
-                                 outcome: crate::progress::StageOutcome,
+                let sink = move |stage: mangosteen_orchestration::progress::DeployStage,
+                                 outcome: mangosteen_orchestration::progress::StageOutcome,
                                  detail: String| {
                     sink_jobs.set_stage(&sink_id, stage, outcome, detail);
                 };
@@ -2262,8 +2262,8 @@ impl GatewayServer {
                     prepared.with_model_path(final_path_for_commit.to_string_lossy().to_string());
                 let sink_jobs = jobs_c.clone();
                 let sink_id = jid_c.clone();
-                let sink = move |stage: crate::progress::DeployStage,
-                                 outcome: crate::progress::StageOutcome,
+                let sink = move |stage: mangosteen_orchestration::progress::DeployStage,
+                                 outcome: mangosteen_orchestration::progress::StageOutcome,
                                  detail: String| {
                     sink_jobs.set_stage(&sink_id, stage, outcome, detail);
                 };
@@ -2315,8 +2315,8 @@ impl GatewayServer {
                 // 文件已在本地 → 下载阶段直接标「跳过」（不是假装下载过）
                 self.pull_jobs.set_stage(
                     &job_id,
-                    crate::progress::DeployStage::Downloading,
-                    crate::progress::StageOutcome::Skipped,
+                    mangosteen_orchestration::progress::DeployStage::Downloading,
+                    mangosteen_orchestration::progress::StageOutcome::Skipped,
                     format!(
                         "本地已存在完整文件（{}），跳过下载",
                         mangosteen_base::download::human_bytes(size)

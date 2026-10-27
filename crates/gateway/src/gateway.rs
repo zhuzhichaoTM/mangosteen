@@ -557,7 +557,7 @@ impl Gateway {
     /// 若模型尚未下载，用 [`Gateway::prepare_with_progress`] +
     /// [`Gateway::commit_local`] 把「下载」插在两段之间。
     pub fn deploy(&mut self, req: &DeploymentRequest) -> MnResult<DeploymentPlan> {
-        self.deploy_with_progress(req, &crate::progress::noop_sink)
+        self.deploy_with_progress(req, &mangosteen_orchestration::progress::noop_sink)
     }
 
     /// 「准备」阶段：评估 → 选择设备 → 生成配置，**不启动**。
@@ -584,13 +584,13 @@ impl Gateway {
         &mut self,
         evaluated: Evaluated,
         req: &DeploymentRequest,
-        sink: crate::progress::ProgressSink<'_>,
+        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedDeployment> {
         let result = self.prepare_inner(evaluated, req, sink);
         if let Err(e) = &result {
             sink(
-                crate::progress::DeployStage::Failed,
-                crate::progress::StageOutcome::Failed,
+                mangosteen_orchestration::progress::DeployStage::Failed,
+                mangosteen_orchestration::progress::StageOutcome::Failed,
                 format!("{e}"),
             );
         }
@@ -605,13 +605,13 @@ impl Gateway {
     pub fn commit_local(
         &mut self,
         prepared: PreparedLocal,
-        sink: crate::progress::ProgressSink<'_>,
+        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
         let result = self.commit_local_inner(prepared, sink);
         if let Err(e) = &result {
             sink(
-                crate::progress::DeployStage::Failed,
-                crate::progress::StageOutcome::Failed,
+                mangosteen_orchestration::progress::DeployStage::Failed,
+                mangosteen_orchestration::progress::StageOutcome::Failed,
                 format!("{e}"),
             );
         }
@@ -628,15 +628,15 @@ impl Gateway {
     pub fn deploy_with_progress(
         &mut self,
         req: &DeploymentRequest,
-        sink: crate::progress::ProgressSink<'_>,
+        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
         let result = self.deploy_inner(req, sink);
         // 失败统一在这里上报：主体里有十几处 `return Err`，逐个埋点既
         // 啰嗦又容易漏——漏掉的那条会表现为「进度条永远卡在某一步」。
         if let Err(e) = &result {
             sink(
-                crate::progress::DeployStage::Failed,
-                crate::progress::StageOutcome::Failed,
+                mangosteen_orchestration::progress::DeployStage::Failed,
+                mangosteen_orchestration::progress::StageOutcome::Failed,
                 format!("{e}"),
             );
         }
@@ -649,9 +649,9 @@ impl Gateway {
     fn deploy_inner(
         &mut self,
         req: &DeploymentRequest,
-        sink: crate::progress::ProgressSink<'_>,
+        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
 
         sink(
             DeployStage::Assessing,
@@ -686,9 +686,9 @@ impl Gateway {
         &mut self,
         evaluated: Evaluated,
         req: &DeploymentRequest,
-        sink: crate::progress::ProgressSink<'_>,
+        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedDeployment> {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
 
         // ---- 0. 同一模型只允许一个活跃实例 ----
         //
@@ -838,9 +838,9 @@ impl Gateway {
     fn commit_local_inner(
         &mut self,
         prepared: PreparedLocal,
-        sink: crate::progress::ProgressSink<'_>,
+        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
 
         let PreparedLocal {
             id,
@@ -1037,9 +1037,9 @@ impl Gateway {
         cloud_plan: mangosteen_core::plan::CloudPlan,
         trail: Vec<String>,
         why_cloud: &str,
-        sink: crate::progress::ProgressSink<'_>,
+        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
 
         if self.cloud.is_none() {
             return Err(MnError::NoViableCandidate {

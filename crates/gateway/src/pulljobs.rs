@@ -106,14 +106,14 @@ pub struct PullJob {
     /// `deploy_stage` / `deploy_trail`，两者同时维护。
     pub deploy_state: Option<String>,
     /// 当前部署阶段（结构化，前端按它高亮步骤条）。
-    pub deploy_stage: Option<crate::progress::DeployStage>,
+    pub deploy_stage: Option<mangosteen_orchestration::progress::DeployStage>,
     /// 当前阶段的细节说明（如「本地 · 4 线程 · 上下文 8192」）。
     pub deploy_detail: Option<String>,
     /// 部署轨迹：逐条追加的阶段事件。
     ///
     /// 为什么保留全部而非只留最新：用户想回头看「评估结论是什么」、
     /// 「为什么跳过了量化」，只留最新就把这些信息冲掉了。
-    pub deploy_trail: Vec<crate::progress::StageEvent>,
+    pub deploy_trail: Vec<mangosteen_orchestration::progress::StageEvent>,
     /// 自动部署成功后的部署 ID。
     pub deployment_id: Option<String>,
 }
@@ -201,7 +201,7 @@ impl PullJobs {
             // 「部署中」的任务一创建就进入第一阶段，前端立刻能画出步骤条，
             // 不必等到第一次网络请求返回
             deploy_stage: if deploy_after {
-                Some(crate::progress::DeployStage::Assessing)
+                Some(mangosteen_orchestration::progress::DeployStage::Assessing)
             } else {
                 None
             },
@@ -359,7 +359,8 @@ impl PullJobs {
             if let Some(j) = g.get_mut(id) {
                 j.deploy_state = Some("部署中".to_string());
                 if j.deploy_stage.is_none() {
-                    j.deploy_stage = Some(crate::progress::DeployStage::Assessing);
+                    j.deploy_stage =
+                        Some(mangosteen_orchestration::progress::DeployStage::Assessing);
                 }
             }
         }
@@ -378,16 +379,18 @@ impl PullJobs {
     pub fn set_stage(
         &self,
         id: &str,
-        stage: crate::progress::DeployStage,
-        outcome: crate::progress::StageOutcome,
+        stage: mangosteen_orchestration::progress::DeployStage,
+        outcome: mangosteen_orchestration::progress::StageOutcome,
         detail: impl Into<String>,
     ) {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
         if let Ok(mut g) = self.inner.lock() {
             if let Some(j) = g.get_mut(id) {
                 let detail = detail.into();
                 j.deploy_trail
-                    .push(crate::progress::StageEvent::now(stage, outcome, &detail));
+                    .push(mangosteen_orchestration::progress::StageEvent::now(
+                        stage, outcome, &detail,
+                    ));
 
                 // 只在「前进或同级」时更新指针
                 let cur_idx = j.deploy_stage.map(|s| s.index()).unwrap_or(0);
@@ -408,7 +411,7 @@ impl PullJobs {
 
     /// 记录自动部署的结果。
     pub fn set_deployment(&self, id: &str, deployment_id: Option<&str>, note: Option<String>) {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
         if let Ok(mut g) = self.inner.lock() {
             if let Some(j) = g.get_mut(id) {
                 j.deployment_id = deployment_id.map(|s| s.to_string());
@@ -421,11 +424,12 @@ impl PullJobs {
                 if deployment_id.is_some() {
                     j.deploy_stage = Some(DeployStage::Ready);
                     j.deploy_detail = Some("部署完成，模型已就绪".to_string());
-                    j.deploy_trail.push(crate::progress::StageEvent::now(
-                        DeployStage::Ready,
-                        StageOutcome::Done,
-                        "部署完成，模型已就绪",
-                    ));
+                    j.deploy_trail
+                        .push(mangosteen_orchestration::progress::StageEvent::now(
+                            DeployStage::Ready,
+                            StageOutcome::Done,
+                            "部署完成，模型已就绪",
+                        ));
                 } else {
                     j.deploy_stage = Some(DeployStage::Failed);
                     let why = note.clone().unwrap_or_else(|| "自动启动失败".to_string());
@@ -439,11 +443,12 @@ impl PullJobs {
                         .map(|e| e.outcome == StageOutcome::Failed)
                         .unwrap_or(false);
                     if !already_failed {
-                        j.deploy_trail.push(crate::progress::StageEvent::now(
-                            DeployStage::Failed,
-                            StageOutcome::Failed,
-                            why,
-                        ));
+                        j.deploy_trail
+                            .push(mangosteen_orchestration::progress::StageEvent::now(
+                                DeployStage::Failed,
+                                StageOutcome::Failed,
+                                why,
+                            ));
                     }
                 }
                 if let Some(n) = note {
@@ -575,7 +580,7 @@ pub fn spawn(
     std::thread::Builder::new()
         .name(format!("mn-pull-{job_id}"))
         .spawn(move || {
-            use crate::progress::{DeployStage, StageOutcome};
+            use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
             jobs.mark_running(&job_id, opts.expected_bytes);
 
             // 只有「下载完自动部署」的任务才有阶段语义；
@@ -972,7 +977,7 @@ mod tests {
     /// 但**轨迹要保留全部事件**——那是排查依据。
     #[test]
     fn deploy_stage_never_goes_backwards() {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
         let j = PullJobs::new();
         let id = j.create_with("s:o/r/f.gguf", "f.gguf", true);
 
@@ -1015,7 +1020,7 @@ mod tests {
     /// 部署成功 → 终态 Ready。
     #[test]
     fn set_deployment_marks_ready() {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
         let j = PullJobs::new();
         let id = j.create_with("s:o/r/f.gguf", "f.gguf", true);
         j.set_deployment(&id, Some("dep-1"), None);
@@ -1032,7 +1037,7 @@ mod tests {
     /// 失败事件不能因为「网关报一次 + 任务层再报一次」而重复。
     #[test]
     fn failed_deploy_does_not_duplicate_event() {
-        use crate::progress::{DeployStage, StageOutcome};
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
         let j = PullJobs::new();
         let id = j.create_with("s:o/r/f.gguf", "f.gguf", true);
 
