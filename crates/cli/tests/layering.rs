@@ -334,7 +334,7 @@ fn c2_platform_code_is_centralized() {
 /// 某个引擎被特殊对待了。
 #[test]
 fn c3_engine_differences_are_pluginized() {
-    for name in ["gateway.rs", "scheduler.rs", "assess.rs"] {
+    for name in ["mod.rs", "scheduler.rs", "assess.rs"] {
         let found = crate_sources("mangosteen-gateway")
             .into_iter()
             .find(|(p, _)| p.file_name().map(|f| f == name).unwrap_or(false));
@@ -353,9 +353,12 @@ fn c3_engine_differences_are_pluginized() {
     // `gateway.rs` 仍保留薄壳/公开转发，但引擎生命周期与插件分发不再归它。
     let gw = crate_sources("mangosteen-gateway")
         .into_iter()
-        .find(|(p, _)| p.file_name().map(|f| f == "gateway.rs").unwrap_or(false))
+        .find(|(p, _)| {
+            p.file_name().map(|f| f == "mod.rs").unwrap_or(false)
+                && p.to_string_lossy().contains("/gateway/")
+        })
         .map(|(_, s)| strip_comments_and_strings(&s))
-        .expect("gateway.rs 必须存在");
+        .expect("gateway/mod.rs 必须存在");
     assert!(
         gw.contains("engines_registry.get("),
         "C3 违反：网关未通过注册表取引擎插件"
