@@ -11,11 +11,11 @@
 //! ```bash
 //! export COMPSHARE_PUBLIC_KEY='...'
 //! export COMPSHARE_PRIVATE_KEY='...'
-//! cargo run -p mangosteen-cloud --example diagnose_instances
+//! cargo run -p mangosteen-provider --example diagnose_instances
 //! ```
 
-use mangosteen_cloud::compshare::client::Scope;
-use mangosteen_cloud::compshare::{CompshareClient, Credential, CurlTransport, Params};
+use mangosteen_provider::compshare::client::Scope;
+use mangosteen_provider::compshare::{CompshareClient, Credential, CurlTransport, Params};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 不带任何地域过滤的客户端（Scope::None 时不注入 Region/Zone）
     let client = CompshareClient::new(
-        mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
+        mangosteen_provider::compshare::DEFAULT_ENDPOINT,
         credential,
         CurlTransport::new(30),
         "",
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("========== [3] 各可用区可用 GPU 机型 ==========");
     for z in &zones {
         let zc = CompshareClient::new(
-            mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
+            mangosteen_provider::compshare::DEFAULT_ENDPOINT,
             Credential::new(
                 env("COMPSHARE_PUBLIC_KEY").unwrap_or_default(),
                 env("COMPSHARE_PRIVATE_KEY").unwrap_or_default(),

@@ -83,18 +83,18 @@
                        │
 ┌──────────────────────▼────────────────────────────────────┐
 │ 第三层  编排调度核心层                                       │
-│  ① 引擎管理    mangosteen-local::plugin   （插件式多引擎）   │
+│  ① 引擎管理    mangosteen-device::plugin   （插件式多引擎）   │
 │  ② 模型评估    mangosteen-gateway::assess                   │
 │  ③ 节点选择    mangosteen-gateway::scheduler（本地优先打分） │
 │  ④ 节点配置    mangosteen-core::plan      （本地/云端两套）   │
-│  ⑤ 多云适配    mangosteen-cloud + mangosteen-backend        │
+│  ⑤ 多云适配    mangosteen-provider + mangosteen-backend        │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
 │ 第四层  资产与执行层                                         │
 │  ① 模型下载    mangosteen-base::download                    │
 │  ② 模型量化    mangosteen-base::quantize  （可选，非主链路）  │
-│  ③ 加载执行    mangosteen-local::engine                     │
+│  ③ 加载执行    mangosteen-device::engine                     │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
@@ -117,11 +117,11 @@
 | 二 | `mangosteen-gateway::server` | HTTP 服务与路由 |
 | 三 | `mangosteen-gateway::assess` | 模型评估 |
 | 三 | `mangosteen-gateway::scheduler` | 节点选择 |
-| 三 | `mangosteen-local::plugin` | 引擎管理（插件注册表） |
+| 三 | `mangosteen-device::plugin` | 引擎管理（插件注册表） |
 | 三 | `mangosteen-core::plan` | 节点配置（本地 / 云端） |
-| 三 | `mangosteen-cloud` / `mangosteen-backend` | 多云厂商适配 |
+| 三 | `mangosteen-provider` / `mangosteen-backend` | 多云厂商适配 |
 | 四 | `mangosteen-base::download` / `quantize` | 资产 |
-| 四 | `mangosteen-local::engine` | 执行 |
+| 四 | `mangosteen-device::engine` | 执行 |
 | 五 | `mangosteen-core` / `base` / `platform` | 支撑 |
 
 **为什么 `gateway` 同时含第二层与第三层**：模型评估与节点选择是
@@ -1237,7 +1237,7 @@ secret = { inline = "xxx" }              # 显示为 <inline:***redacted***>
 
 | 编号 | 约束       | 校验方式                                                                                                  |
 | -- | -------- | ----------------------------------------------------------------------------------------------------- |
-| C1 | 网关唯一收口   | CLI 的 Cargo.toml 不得依赖 local/cloud；源码不得 `use mangosteen_local::`；不得出现厂商 API 地址；除 `serve` 外不得自建 TCP 连接  |
+| C1 | 网关唯一收口   | CLI 的 Cargo.toml 不得依赖 local/cloud；源码不得 `use mangosteen_device::`；不得出现厂商 API 地址；除 `serve` 外不得自建 TCP 连接  |
 | C2 | 平台无关     | core/gateway/base/local/cloud/backend 源码不得出现 `cfg(target_os)`；不得直接调 `libc::` / `windows_sys::`                            |
 | C3 | 推理引擎唯一   | 全仓不得出现 vLLM / TensorRT / SGLang 等引擎名                                                                  |
 | C4 | 本地优先     | `scheduler.rs` 中 `is_local_viable` 判断必须在 `build_cloud_plan` 之前；`Config::sample` 里 `local_first: true` |

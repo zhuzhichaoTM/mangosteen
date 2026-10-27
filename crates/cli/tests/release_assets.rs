@@ -151,8 +151,8 @@ fn design_doc_covers_all_layers() {
         "mangosteen-platform",
         "mangosteen-base",
         "mangosteen-session",
-        "mangosteen-local",
-        "mangosteen-cloud",
+        "mangosteen-device",
+        "mangosteen-provider",
         "mangosteen-gateway",
         "mangosteen-cli",
     ] {
@@ -215,8 +215,8 @@ fn version_is_consistent_across_manifests() {
         "mangosteen-platform",
         "mangosteen-base",
         "mangosteen-session",
-        "mangosteen-local",
-        "mangosteen-cloud",
+        "mangosteen-device",
+        "mangosteen-provider",
         "mangosteen-gateway",
         "mangosteen-cli",
     ] {

@@ -8,7 +8,7 @@
 //!
 //! * 不实现 HTTP、路由或协议转换（第二层 gateway 的职责）；
 //! * 不直接创建云厂商资源或拉起进程，而是通过 `cloud` / `local` 的公开 API；
-//! * 引擎差异由 `mangosteen_local::EnginePlugin` 吸收，本层不写引擎分支。
+//! * 引擎差异由 `mangosteen_device::EnginePlugin` 吸收，本层不写引擎分支。
 //!
 //! ## 模块
 //!

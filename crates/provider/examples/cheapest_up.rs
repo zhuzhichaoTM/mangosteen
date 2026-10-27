@@ -4,10 +4,10 @@
 //!
 //! ```bash
 //! # 全区（默认）：扫所有可用区，找全平台最便宜
-//! cargo run -p mangosteen-cloud --example cheapest_up -- --all
+//! cargo run -p mangosteen-provider --example cheapest_up -- --all
 //!
 //! # 单可用区：只看某个区
-//! cargo run -p mangosteen-cloud --example cheapest_up -- --zone cn-wlcb/cn-wlcb-01
+//! cargo run -p mangosteen-provider --example cheapest_up -- --zone cn-wlcb/cn-wlcb-01
 //! ```
 //!
 //! 环境变量：
@@ -31,7 +31,7 @@
 
 use std::time::Instant;
 
-use mangosteen_cloud::compshare::{
+use mangosteen_provider::compshare::{
     price_quotes, provision_cheapest, scan, CompshareClient, Credential, CurlTransport,
     ScanOptions, ScanScope,
 };
@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env("COMPSHARE_PRIVATE_KEY").ok_or("缺少 COMPSHARE_PRIVATE_KEY")?,
     )?;
     let client = CompshareClient::new(
-        mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
+        mangosteen_provider::compshare::DEFAULT_ENDPOINT,
         credential,
         CurlTransport::new(40),
         "",
@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(id) => id,
         None => {
             let imgs = client.images(Some("System"), 50, 0)?;
-            mangosteen_cloud::compshare::pick_linux_image(&imgs.image_set)
+            mangosteen_provider::compshare::pick_linux_image(&imgs.image_set)
                 .map(|i| i.id.clone())
                 .ok_or(
                     "未找到可用的 Linux 系统镜像（Windows 镜像无法 SSH/跑推理）。\
@@ -195,7 +195,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("{}", "-".repeat(96));
     for (rank, o) in board.options.iter().take(15).enumerate() {
-        let vram = mangosteen_cloud::compshare::known_vram_gb(&o.spec.gpu_type) * o.spec.gpu as u64;
+        let vram =
+            mangosteen_provider::compshare::known_vram_gb(&o.spec.gpu_type) * o.spec.gpu as u64;
         println!(
             "{:<4} {:<22} {:<12} {:<18} ¥{:<8.3} ¥{:.0}",
             rank + 1,
@@ -213,10 +214,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---------- 4. 性价比视角 ----------
     println!("=== 性价比（元 / GiB显存·小时，从优到劣） ===");
-    let by_eff = board.sorted_by_vram_efficiency(mangosteen_cloud::compshare::known_vram_gb);
+    let by_eff = board.sorted_by_vram_efficiency(mangosteen_provider::compshare::known_vram_gb);
     for o in by_eff.iter().take(8) {
         let per_gib = o.per_hour_cny
-            / (mangosteen_cloud::compshare::known_vram_gb(&o.spec.gpu_type).max(1) as f64);
+            / (mangosteen_provider::compshare::known_vram_gb(&o.spec.gpu_type).max(1) as f64);
         println!(
             "  {:<10} {:<22} ¥{:.4}/GiB·h   时价 ¥{:.3}",
             o.spec.gpu_type,
@@ -252,7 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !launch {
         println!("=== 未启动（dry-run） ===");
         println!("确认无误后加 --launch 真正创建实例：");
-        println!("  cargo run -p mangosteen-cloud --example cheapest_up -- --launch");
+        println!("  cargo run -p mangosteen-provider --example cheapest_up -- --launch");
         println!();
         println!("提醒：创建的实例会持续计费。用完务必销毁：");
         println!("  （示例未内置销毁；请用控制台或后续命令释放）");

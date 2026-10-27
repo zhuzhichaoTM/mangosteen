@@ -10,7 +10,7 @@
 //! ## 本模块的边界
 //!
 //! 只定义**数据模型与规划逻辑**（选哪个本地端口、映射哪条路径、隧道参数长什么样），
-//! 真正的进程拉起与转发在 `mangosteen-cloud` crate 中实现。
+//! 真正的进程拉起与转发在 `mangosteen-provider` crate 中实现。
 //! 这样规划逻辑可以在无网络环境下完整单测。
 
 use std::path::{Path, PathBuf};

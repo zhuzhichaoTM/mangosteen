@@ -164,7 +164,7 @@ fn c1_cli_does_not_depend_on_execution_crates() {
 
     // CLI 只允许依赖：core（领域类型）、platform（路径/终端能力）、
     // base（台账只读）、gateway（唯一后端入口）
-    for forbidden in ["mangosteen-local", "mangosteen-cloud"] {
+    for forbidden in ["mangosteen-device", "mangosteen-provider"] {
         assert!(
             !manifest.contains(forbidden),
             "C1 违反：CLI 不得依赖 `{forbidden}`（网关唯一收口原则）。\
@@ -182,7 +182,7 @@ fn c1_cli_does_not_depend_on_execution_crates() {
 fn c1_cli_sources_do_not_import_execution_crates() {
     for (path, src) in crate_sources("mangosteen-cli") {
         let code = strip_comments_and_strings(&src);
-        for forbidden in ["mangosteen_local::", "mangosteen_cloud::"] {
+        for forbidden in ["mangosteen_device::", "mangosteen_provider::"] {
             assert!(
                 !code.contains(forbidden),
                 "C1 违反：{} 中出现 `{forbidden}`。\
@@ -300,8 +300,8 @@ fn c2_platform_code_is_centralized() {
         "mangosteen-core",
         "mangosteen-base",
         "mangosteen-session",
-        "mangosteen-local",
-        "mangosteen-cloud",
+        "mangosteen-device",
+        "mangosteen-provider",
         "mangosteen-gateway",
     ] {
         assert!(!allowed.contains(crate_name));
@@ -369,7 +369,7 @@ fn c3_engine_differences_are_pluginized() {
 /// 「设置页能选、部署说未适配」这类自相矛盾。
 #[test]
 fn c3_engine_registry_is_single_source() {
-    let local: String = crate_sources("mangosteen-local")
+    let local: String = crate_sources("mangosteen-device")
         .into_iter()
         .map(|(_, s)| s)
         .collect();
@@ -393,7 +393,7 @@ fn c3_engine_registry_is_single_source() {
     for other in [
         "mangosteen-gateway",
         "mangosteen-base",
-        "mangosteen-cloud",
+        "mangosteen-provider",
         "mangosteen-cli",
     ] {
         for (path, src) in crate_sources(other) {
@@ -401,7 +401,7 @@ fn c3_engine_registry_is_single_source() {
             assert!(
                 !c.contains("pub fn with_builtin"),
                 "C3 违反：{} 自定义了引擎插件清单。\
-                 内置清单必须唯一（在 mangosteen-local）。",
+                 内置清单必须唯一（在 mangosteen-device）。",
                 path.display()
             );
         }
@@ -414,7 +414,7 @@ fn c3_engine_registry_is_single_source() {
 fn c3_unimplemented_engines_are_absent_from_registry() {
     // 这条是行为契约，实现在 local crate 的单测里（plugin::tests），
     // 这里做源码级确认：内置注册只登记两个引擎。
-    let src = crate_sources("mangosteen-local")
+    let src = crate_sources("mangosteen-device")
         .into_iter()
         .find(|(p, _)| p.file_name().map(|f| f == "plugin.rs").unwrap_or(false))
         .map(|(_, s)| s)
@@ -495,11 +495,11 @@ fn c5_dependency_direction_is_top_down() {
             &["mangosteen-core", "mangosteen-platform"],
         ),
         (
-            "mangosteen-local",
+            "mangosteen-device",
             &["mangosteen-core", "mangosteen-platform"],
         ),
         (
-            "mangosteen-cloud",
+            "mangosteen-provider",
             &["mangosteen-core", "mangosteen-platform"],
         ),
         (
@@ -510,8 +510,8 @@ fn c5_dependency_direction_is_top_down() {
                 "mangosteen-base",
                 // 网关要为上层暴露会话接口 → 依赖会话层
                 "mangosteen-session",
-                "mangosteen-local",
-                "mangosteen-cloud",
+                "mangosteen-device",
+                "mangosteen-provider",
             ],
         ),
         (
@@ -532,8 +532,8 @@ fn c5_dependency_direction_is_top_down() {
         "mangosteen-platform",
         "mangosteen-base",
         "mangosteen-session",
-        "mangosteen-local",
-        "mangosteen-cloud",
+        "mangosteen-device",
+        "mangosteen-provider",
         "mangosteen-gateway",
         "mangosteen-cli",
     ];
@@ -561,8 +561,8 @@ fn c5_base_does_not_depend_on_execution_or_gateway() {
     let manifest = crate_manifest("mangosteen-base");
     for forbidden in [
         "mangosteen-gateway",
-        "mangosteen-local",
-        "mangosteen-cloud",
+        "mangosteen-device",
+        "mangosteen-provider",
         "mangosteen-cli",
     ] {
         assert!(
@@ -640,11 +640,11 @@ fn c6_five_layer_architecture_is_complete() {
     // ---------- 第三层：编排调度核心层 ----------
     // 模块 1：引擎管理（插件式多推理框架）
     assert!(
-        file_exists("crates/local/src/plugin.rs"),
+        file_exists("crates/device/src/plugin.rs"),
         "第三层缺少「引擎管理」插件模块"
     );
     assert!(
-        crate_has("mangosteen-local", "pub trait EnginePlugin"),
+        crate_has("mangosteen-device", "pub trait EnginePlugin"),
         "引擎管理缺少插件抽象（EnginePlugin）"
     );
     // 模块 2：模型评估
@@ -676,7 +676,7 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 5：多云厂商插件适配
     assert!(
-        file_exists("crates/cloud/src/registry.rs"),
+        file_exists("crates/provider/src/registry.rs"),
         "第三层缺少多云驱动注册表"
     );
     assert!(
@@ -701,7 +701,7 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 3：加载执行
     assert!(
-        crate_has("mangosteen-local", "pub struct EngineHandle"),
+        crate_has("mangosteen-device", "pub struct EngineHandle"),
         "第四层缺少「加载执行」句柄（EngineHandle）"
     );
 
@@ -760,8 +760,8 @@ fn workspace_contains_all_layers() {
         "mangosteen-platform",
         "mangosteen-base",
         "mangosteen-session",
-        "mangosteen-local",
-        "mangosteen-cloud",
+        "mangosteen-device",
+        "mangosteen-provider",
         "mangosteen-gateway",
         "mangosteen-cli",
     ] {
@@ -794,8 +794,8 @@ fn no_unwrap_in_production_paths() {
         "mangosteen-core",
         "mangosteen-platform",
         "mangosteen-base",
-        "mangosteen-local",
-        "mangosteen-cloud",
+        "mangosteen-device",
+        "mangosteen-provider",
         "mangosteen-gateway",
     ] {
         for (_, src) in crate_sources(crate_name) {

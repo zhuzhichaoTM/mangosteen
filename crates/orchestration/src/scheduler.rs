@@ -406,7 +406,7 @@ impl Scheduler {
             &evaluated.assessment,
             // 云端跑的是 llama.cpp，端口用 `LLAMA_CPP_PORT`（8080）。
             // 隧道必须转发到服务真正监听的端口，否则隧道建好了也连不上。
-            mangosteen_cloud::remote::LLAMA_CPP_PORT,
+            mangosteen_provider::remote::LLAMA_CPP_PORT,
         );
 
         // 云端跑 GPU：层数必须全量卸载，否则会用 CPU 算——那不是用户要的。
@@ -433,7 +433,7 @@ impl Scheduler {
                 "/root/mangosteen/models/{}",
                 model_file_name(&evaluated.spec.name)
             ),
-            engine_port: mangosteen_cloud::remote::LLAMA_CPP_PORT,
+            engine_port: mangosteen_provider::remote::LLAMA_CPP_PORT,
             local_port: self.allocate_local_port(),
             engine,
             max_price_per_hour: req.max_price_per_hour.or(self.config.max_price_per_hour),

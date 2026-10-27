@@ -16,7 +16,7 @@
 //! ## 与编排器的分工
 //!
 //! 本驱动**不决定**用哪家服务商，只负责「把这一家的事情做对」。
-//! 选点、重试、隧道由 `mangosteen-cloud` 的编排器与网关负责。
+//! 选点、重试、隧道由 `mangosteen-provider` 的编排器与网关负责。
 
 use std::time::{Duration, Instant};
 

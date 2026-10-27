@@ -7,7 +7,7 @@
 //! export COMPSHARE_PRIVATE_KEY='...'
 //! # 可选：只看某个地域
 //! export COMPSHARE_REGION='cn-sh2'
-//! cargo run -p mangosteen-cloud --example describe_zones
+//! cargo run -p mangosteen-provider --example describe_zones
 //! ```
 //!
 //! ## 这个接口为什么重要
@@ -21,8 +21,8 @@
 //!
 //! 本项目的部署方式依赖 SSH 隧道，因此自动选点必须优先 `IsPod = false`。
 
-use mangosteen_cloud::compshare::client::Scope;
-use mangosteen_cloud::compshare::{CompshareClient, Credential, CurlTransport, Params};
+use mangosteen_provider::compshare::client::Scope;
+use mangosteen_provider::compshare::{CompshareClient, Credential, CurlTransport, Params};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let filter = env("COMPSHARE_REGION");
 
     let client = CompshareClient::new(
-        mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
+        mangosteen_provider::compshare::DEFAULT_ENDPOINT,
         credential,
         CurlTransport::new(30),
         "",

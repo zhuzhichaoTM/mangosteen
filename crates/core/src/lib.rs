@@ -8,7 +8,7 @@
 //!        │
 //! API 网关层 (mangosteen-gateway) ── 资源评估引擎 / 调度决策器 / 统一协议适配层
 //!        │
-//! 算力执行层 (mangosteen-local | mangosteen-cloud)
+//! 算力执行层 (mangosteen-device | mangosteen-provider)
 //!        │
 //! 基础能力层 (mangosteen-base) + 平台适配层 (mangosteen-platform)
 //! ```

@@ -5,8 +5,8 @@ members = [
     "crates/platform",
     "crates/base",
     "crates/session",
-    "crates/local",
-    "crates/cloud",
+    "crates/device",
+    "crates/provider",
     "crates/orchestration",
     "crates/gateway",
     "crates/webui",
@@ -26,8 +26,8 @@ mangosteen-core = { path = "crates/core" }
 mangosteen-platform = { path = "crates/platform" }
 mangosteen-base = { path = "crates/base" }
 mangosteen-session = { path = "crates/session" }
-mangosteen-local = { path = "crates/local" }
-mangosteen-cloud = { path = "crates/cloud" }
+mangosteen-device = { path = "crates/device" }
+mangosteen-provider = { path = "crates/provider" }
 mangosteen-orchestration = { path = "crates/orchestration" }
 mangosteen-gateway = { path = "crates/gateway" }
 mangosteen-webui = { path = "crates/webui" }

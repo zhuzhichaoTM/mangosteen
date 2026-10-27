@@ -117,18 +117,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mangosteen-cloud"
-version = "0.1.0"
-dependencies = [
- "mangosteen-core",
- "mangosteen-platform",
- "serde",
- "serde_json",
- "sha2",
- "toml",
-]
-
-[[package]]
 name = "mangosteen-core"
 version = "0.1.0"
 dependencies = [
@@ -139,27 +127,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "mangosteen-gateway"
+name = "mangosteen-device"
 version = "0.1.0"
 dependencies = [
- "mangosteen-base",
- "mangosteen-cloud",
  "mangosteen-core",
- "mangosteen-local",
- "mangosteen-orchestration",
  "mangosteen-platform",
- "mangosteen-session",
- "mangosteen-webui",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "mangosteen-local"
+name = "mangosteen-gateway"
 version = "0.1.0"
 dependencies = [
+ "mangosteen-base",
  "mangosteen-core",
+ "mangosteen-device",
+ "mangosteen-orchestration",
  "mangosteen-platform",
+ "mangosteen-provider",
+ "mangosteen-session",
+ "mangosteen-webui",
  "serde",
  "serde_json",
 ]
@@ -169,10 +157,10 @@ name = "mangosteen-orchestration"
 version = "0.1.0"
 dependencies = [
  "mangosteen-base",
- "mangosteen-cloud",
  "mangosteen-core",
- "mangosteen-local",
+ "mangosteen-device",
  "mangosteen-platform",
+ "mangosteen-provider",
  "mangosteen-session",
  "serde",
  "serde_json",
@@ -186,6 +174,18 @@ dependencies = [
  "mangosteen-core",
  "serde",
  "windows-sys",
+]
+
+[[package]]
+name = "mangosteen-provider"
+version = "0.1.0"
+dependencies = [
+ "mangosteen-core",
+ "mangosteen-platform",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
 ]
 
 [[package]]

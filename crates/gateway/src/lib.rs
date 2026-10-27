@@ -30,7 +30,7 @@
 //! 2. **网关唯一收口**：CLI 与 TUI 不持有 `LlamaCppEngine` / `CloudOrchestrator`
 //!    的直接引用，一切经过 [`Gateway`]；
 //! 3. **引擎差异插件化**：本层不按引擎写分支。新增推理框架只加
-//!    `EnginePlugin`（见 `mangosteen_local::EngineRegistry`），
+//!    `EnginePlugin`（见 `mangosteen_device::EngineRegistry`），
 //!    网关里出现 `InferenceEngine::` 字面量即违规。
 //!
 //! 这三条由 `tests/layering.rs` 与 `scheduler::tests` 里的不变量测试共同守护。
@@ -95,12 +95,12 @@ pub use server::GatewayServer;
 /// 包一层而不是让 CLI 直接调云端层：CLI 只与网关层交互是硬约束
 /// （网关唯一收口原则）。这里纯转发，不含业务逻辑。
 pub fn diagnose_cloud(config: &mangosteen_core::config::Config) -> Vec<String> {
-    mangosteen_cloud::registry::diagnose(config)
+    mangosteen_provider::registry::diagnose(config)
 }
 
 /// 内置服务商驱动名列表。
 pub fn builtin_providers() -> &'static [&'static str] {
-    mangosteen_cloud::drivers::profiles::builtin_driver_names()
+    mangosteen_provider::drivers::profiles::builtin_driver_names()
 }
 
 /// 依据配置构建驱动注册表，返回 (已注册名称, 跳过原因)。
@@ -109,7 +109,7 @@ pub fn builtin_providers() -> &'static [&'static str] {
 pub fn probe_providers(
     config: &mangosteen_core::config::Config,
 ) -> (Vec<String>, Vec<(String, String)>) {
-    let build = mangosteen_cloud::build_registry(config);
+    let build = mangosteen_provider::build_registry(config);
     let names = build
         .registry
         .names()
@@ -168,7 +168,7 @@ pub fn diagnose_engine_cached(
     cached_version: Option<String>,
 ) -> EngineDiagnosis {
     let local = config.map(|c| c.local.clone()).unwrap_or_default();
-    let engine = mangosteen_local::LlamaCppEngine::from_config(local.engine_path.clone(), None)
+    let engine = mangosteen_device::LlamaCppEngine::from_config(local.engine_path.clone(), None)
         .with_engine_env(local.engine_env.clone())
         .with_auto_library_path(local.auto_library_path);
 
@@ -204,12 +204,12 @@ pub fn diagnose_engine_cached(
 
 /// 诊断本地推理引擎（含动态库路径探测）。
 ///
-/// 这里刻意复用 `mangosteen_local::LlamaCppEngine` 的定位与环境注入逻辑，
+/// 这里刻意复用 `mangosteen_device::LlamaCppEngine` 的定位与环境注入逻辑，
 /// 而不是自己拼一遍——两处逻辑一旦分叉，doctor 的结论就会与实际部署行为
 /// 不一致（曾出现过：doctor 说 OK，部署却因库路径失败）。
 pub fn diagnose_engine(config: Option<&mangosteen_core::config::Config>) -> EngineDiagnosis {
     let local = config.map(|c| c.local.clone()).unwrap_or_default();
-    let engine = mangosteen_local::LlamaCppEngine::from_config(local.engine_path.clone(), None)
+    let engine = mangosteen_device::LlamaCppEngine::from_config(local.engine_path.clone(), None)
         .with_engine_env(local.engine_env.clone())
         .with_auto_library_path(local.auto_library_path);
 

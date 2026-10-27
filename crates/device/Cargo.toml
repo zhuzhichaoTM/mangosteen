@@ -1,6 +1,6 @@
 [package]
-name = "mangosteen-cloud"
-description = "Mangosteen 算力执行层·云端链路：多云统一适配层、驱动注册、网络工具集"
+name = "mangosteen-device"
+description = "Mangosteen 第四层·设备执行层：本地引擎插件、进程运行时与模型工作空间"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,5 @@ repository.workspace = true
 [dependencies]
 mangosteen-core = { workspace = true }
 mangosteen-platform = { workspace = true }
-sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }

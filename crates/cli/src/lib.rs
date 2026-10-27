@@ -11,8 +11,8 @@
 //!
 //! ```text
 //! ✅ 允许：use mangosteen_gateway::{Gateway, GatewayBuilder, DeploymentRequest}
-//! ❌ 禁止：use mangosteen_local::LlamaCppEngine          ← 直连本地引擎
-//! ❌ 禁止：use mangosteen_cloud::CloudOrchestrator       ← 直连云厂商抽象
+//! ❌ 禁止：use mangosteen_device::LlamaCppEngine          ← 直连本地引擎
+//! ❌ 禁止：use mangosteen_provider::CloudOrchestrator       ← 直连云厂商抽象
 //! ❌ 禁止：直接发 HTTP 给云厂商 API
 //! ```
 //!

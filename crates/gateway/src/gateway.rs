@@ -29,12 +29,12 @@ use std::time::Duration;
 
 use mangosteen_base::state::{DeploymentRecord, DeploymentStatus, StateStore};
 use mangosteen_base::ModelStore;
-use mangosteen_cloud::orchestrator::CloudOrchestrator;
 use mangosteen_core::config::{Config, LocalConfig, SchedulerConfig};
 use mangosteen_core::plan::{ComputeOrigin, DeploymentPlan};
 use mangosteen_core::policy::SelectionConstraints;
 use mangosteen_core::{MnError, MnResult};
-use mangosteen_local::engine::{EngineHandle, LlamaCppEngine};
+use mangosteen_device::engine::{EngineHandle, LlamaCppEngine};
+use mangosteen_provider::orchestrator::CloudOrchestrator;
 
 use crate::protocol::BackendTarget;
 use mangosteen_orchestration::assess::{Assessor, DeploymentRequest, Evaluated};
@@ -242,9 +242,9 @@ pub struct Gateway {
     ///
     /// 编排核心层·引擎管理的落地形态：网关只按 `config.local.engine`
     /// 取对应插件，**不写任何引擎专属分支**。新增推理框架只需在
-    /// `mangosteen_local::EngineRegistry::with_builtin` 里登记，
+    /// `mangosteen_device::EngineRegistry::with_builtin` 里登记，
     /// 本文件一行不动（基线「推理引擎插件化原则」）。
-    engines_registry: mangosteen_local::EngineRegistry,
+    engines_registry: mangosteen_device::EngineRegistry,
     cloud: Option<CloudOrchestrator>,
     state: StateStore,
     models: ModelStore,
@@ -304,9 +304,9 @@ impl Gateway {
             scheduler,
             // 注册表在此构造：内置插件清单只在 local crate 里维护一份，
             // 网关不关心有哪些引擎、各自怎么启动。
-            engines_registry: mangosteen_local::EngineRegistry::with_builtin(
+            engines_registry: mangosteen_device::EngineRegistry::with_builtin(
                 local_engine.clone(),
-                mangosteen_local::OllamaEngine::new(),
+                mangosteen_device::OllamaEngine::new(),
             ),
             local_engine,
             cloud,
@@ -1013,7 +1013,7 @@ impl Gateway {
     /// 为云端节点按部署时记录的引擎生成启动配置。
     ///
     /// Gateway 作为第三层编排入口负责调用引擎 SPI；CloudOrchestrator 只执行
-    /// 收到的标准配置，不依赖 `mangosteen-local`，也不解释引擎 flags。
+    /// 收到的标准配置，不依赖 `mangosteen-device`，也不解释引擎 flags。
     fn cloud_launch_config(
         &self,
         plan: &mangosteen_core::plan::CloudPlan,
@@ -1410,7 +1410,7 @@ impl Gateway {
                     }
                 };
                 let health = format!("{base}/health");
-                if let Err(e) = mangosteen_cloud::remote::wait_http_ready(
+                if let Err(e) = mangosteen_provider::remote::wait_http_ready(
                     &health,
                     o.start_timeout(),
                     o.poll_interval(),
@@ -1812,7 +1812,7 @@ impl Gateway {
             hardware: self.assessor.hardware().describe(),
             // 「已就绪」而非「已启用」：凭证缺失的服务商不能降级，
             // 展示成已就绪会误导用户以为本地不足时一定能上云。
-            providers: mangosteen_cloud::build_registry(&self.config)
+            providers: mangosteen_provider::build_registry(&self.config)
                 .registry
                 .names()
                 .iter()
@@ -2238,8 +2238,8 @@ pub struct CloudCandidateBrief {
 /// 为什么不在这里判断引擎类型：探活端点与端口选择都是引擎专属知识
 /// （llama.cpp 用 `plan` 端口 + `/health`；Ollama 用固定 11434 +
 /// `/api/version`）。把这些写进网关，每接一个框架就要改本函数。
-/// 现在统一交给 [`mangosteen_local::EnginePlugin::probe`]。
-fn probe_local_health(registry: &mangosteen_local::EngineRegistry, plan: &DeploymentPlan) -> bool {
+/// 现在统一交给 [`mangosteen_device::EnginePlugin::probe`]。
+fn probe_local_health(registry: &mangosteen_device::EngineRegistry, plan: &DeploymentPlan) -> bool {
     let Some(local) = plan.local.as_ref() else {
         return false;
     };
@@ -2372,7 +2372,7 @@ impl GatewayBuilder {
 
         // 云端编排器：只有存在启用的服务商时才构造
         let cloud = if self.config.has_cloud_capability() {
-            let build = mangosteen_cloud::build_registry(&self.config);
+            let build = mangosteen_provider::build_registry(&self.config);
             if build.registry.is_empty() {
                 None
             } else {
@@ -2385,7 +2385,7 @@ impl GatewayBuilder {
                     pref,
                 )?
                 .with_strategy(self.config.scheduler.strategy);
-                let tunnels = mangosteen_cloud::TunnelManager::new(
+                let tunnels = mangosteen_provider::TunnelManager::new(
                     self.config.local.port_range_start,
                     self.config.local.port_range_end,
                     "ssh",
@@ -2395,7 +2395,7 @@ impl GatewayBuilder {
                     build.registry,
                     selector,
                     tunnels,
-                    mangosteen_cloud::OrchestratorConfig {
+                    mangosteen_provider::OrchestratorConfig {
                         provision_timeout: Duration::from_secs(
                             self.config.scheduler.provision_timeout_secs,
                         ),

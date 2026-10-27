@@ -9,7 +9,7 @@
 //! export COMPSHARE_IMAGE_ID='compshareImage-xxxx'   # 不设则自动挑第一个 Available 的系统镜像
 //! export COMPSHARE_CHARGE_TYPE='Postpay'            # Month / Day / Dynamic / Postpay / Spot
 //! export COMPSHARE_GPU_TYPES='4090,5090'            # 只看这些卡型
-//! cargo run -p mangosteen-cloud --example scan_capacity
+//! cargo run -p mangosteen-provider --example scan_capacity
 //! ```
 //!
 //! ## 这个接口为什么必须「矩阵式」调用
@@ -29,7 +29,7 @@
 //! 全程只读：`CheckCompShareResourceCapacity` 是**模拟调度**，不创建任何资源、
 //! 不产生费用。产线环境可以放心反复跑。
 
-use mangosteen_cloud::compshare::{
+use mangosteen_provider::compshare::{
     scan_all, CompshareClient, Credential, CurlTransport, ScanOptions,
 };
 
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credential = Credential::new(public_key, private_key)?;
 
     let client = CompshareClient::new(
-        mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
+        mangosteen_provider::compshare::DEFAULT_ENDPOINT,
         credential,
         CurlTransport::new(40),
         "",
@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             // 只挑 Linux：Windows 镜像无法 SSH、跑不了推理（实测踩过）
             let imgs = client.images(Some("System"), 50, 0)?;
-            mangosteen_cloud::compshare::pick_linux_image(&imgs.image_set)
+            mangosteen_provider::compshare::pick_linux_image(&imgs.image_set)
                 .map(|i| i.id.clone())
                 .ok_or("未找到可用的 Linux 系统镜像，请用 COMPSHARE_IMAGE_ID 显式指定")?
         }

@@ -215,7 +215,7 @@ mangosteen ui --no-open  # 只起服务（SSH / 无桌面环境）
            │                        │
 ┌──────────▼──────────┐  ┌──────────▼─────────────────┐
 │ 本地算力链路         │  │ 云端算力链路                │
-│ mangosteen-local    │  │ mangosteen-cloud           │
+│ mangosteen-device    │  │ mangosteen-provider           │
 │  llama.cpp 引擎管理  │  │  节点选择器 / 多云适配 / 隧道│
 └──────────┬──────────┘  └──────────┬─────────────────┘
            │                        │
@@ -559,7 +559,7 @@ crates/
 │   ├── config.rs          配置发现与持久化
 │   ├── state.rs           部署台账
 │   └── guard.rs           文件访问控制
-├── mangosteen-local       本地链路：llama.cpp 引擎管理
+├── mangosteen-device       本地链路：llama.cpp 引擎管理
 ├── mangosteen-backend     厂商协议适配：优云智算（UCloud RPC 形态）
 │   ├── sign.rs / sha1.rs  UCloud V1 签名（SHA1 + 参数拼接）
 │   ├── params.rs          参数扁平化（签名用原值、传输用转义）
@@ -567,7 +567,7 @@ crates/
 │   ├── mapping.rs         单位/状态/SSH 端口/价格的唯一换算点
 │   ├── retcode.rs         返回码语义归类（容量不足→换节点 / 欠费→停止重试）
 │   └── driver.rs          ProviderDriver + 业务补偿（先查库存、先关机再删）
-├── mangosteen-cloud       云端链路：驱动 + 编排 + SSH 隧道
+├── mangosteen-provider       云端链路：驱动 + 编排 + SSH 隧道
 ├── mangosteen-gateway     网关层：评估/调度/协议/HTTP
 │   ├── assess.rs          资源评估引擎
 │   ├── scheduler.rs       调度决策器（本地优先）

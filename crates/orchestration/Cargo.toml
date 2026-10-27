@@ -16,7 +16,7 @@ mangosteen-core = { workspace = true }
 mangosteen-platform = { workspace = true }
 mangosteen-base = { workspace = true }
 mangosteen-session = { workspace = true }
-mangosteen-local = { workspace = true }
-mangosteen-cloud = { workspace = true }
+mangosteen-device = { workspace = true }
+mangosteen-provider = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
