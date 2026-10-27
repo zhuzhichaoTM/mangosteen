@@ -474,7 +474,7 @@ starting = "starting"
 
 两条路径对上层完全等价。
 
-#### 6.2.1 第三条路径：`mangosteen-backend`（协议形态完全不同的厂商）
+#### 6.2.1 第三条路径：`provider::compshare`（协议形态完全不同的厂商）
 
 `profile` 能表达"路径 + 字段 + 状态"的差异，但假设了 REST 形态
 （每动作一个 URL、Token 放请求头、JSON body）。**优云智算用的是 UCloud RPC 形态**，
@@ -488,16 +488,16 @@ starting = "starting"
 | 编码 | JSON body | 扁平表单（`Disks.0.Size=100`） |
 | 成功判定 | HTTP 2xx | HTTP 2xx **且** `RetCode == 0` |
 
-签名无法用字段映射表达，所以这类厂商单独放进 `mangosteen-backend`：
+签名无法用字段映射表达，所以这类厂商放进 `mangosteen-provider::compshare`：
 
 ```
-cloud/registry.rs ── handles(driver)? ──▶ backend::build_from_options
-                                              │ sign / params / client / driver
-                                              ▼
-                                       https://api.compshare.cn
+provider/registry.rs ── handles(driver)? ──▶ compshare::build_from_options
+                                               │ sign / params / client / driver
+                                               ▼
+                                        https://api.compshare.cn
 ```
 
-`backend` 内部的分层（每层只做一件事，便于对着文档逐条核对）：
+`compshare` 内部的分层（每层只做一件事，便于对着文档逐条核对）：
 
 | 模块 | 职责 |
 |------|------|
@@ -552,7 +552,7 @@ pub trait Transport: Send + Sync {
 不引入供应链风险。认证头通过 `--config` 从 0600 临时文件读取，  
 避免出现在进程参数列表。
 
-`mangosteen-backend` 出于同样的理由用 curl，但**认证参数在 body 里**
+`mangosteen-provider::compshare` 出于同样的理由用 curl，但**认证参数在 body 里**
 （UCloud 签名的一部分），所以改用 `--data-binary @-` 从 stdin 喂入请求体：
 既不进进程参数列表，也不需要临时文件（少了权限与残留清理两类问题）。
 
