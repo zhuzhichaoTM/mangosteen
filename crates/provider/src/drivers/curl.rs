@@ -187,15 +187,11 @@ impl TempConfig {
         {
             let mut f = std::fs::File::create(&path)
                 .map_err(|e| MnError::io(format!("创建 curl 配置 {}", path.display()), &e))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                f.set_permissions(std::fs::Permissions::from_mode(0o600))
-                    .map_err(|e| MnError::io("设置 curl 配置权限", &e))?;
-            }
             f.write_all(content.as_bytes())
                 .map_err(|e| MnError::io("写入 curl 配置", &e))?;
         }
+        // 含认证头的临时文件必须仅属主可读；平台层在 Windows 上是无操作
+        mangosteen_platform::fs::set_private_permissions(&path)?;
         Ok(Self { path })
     }
 

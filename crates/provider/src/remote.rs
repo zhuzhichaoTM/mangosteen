@@ -347,11 +347,8 @@ impl SshTarget {
         let escaped = pw.replace('\'', r#"'\''"#);
         std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{escaped}'\n"))
             .map_err(|e| MnError::io(format!("写入 askpass 脚本 {}", path.display()), &e))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
-        }
+        // 权限收敛统一走平台层（Windows 无 POSIX 权限位，那里是无操作）
+        let _ = mangosteen_platform::fs::set_private_permissions(&path);
         Ok(Some(path))
     }
 

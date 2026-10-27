@@ -37,22 +37,19 @@ use mangosteen_platform::process::{self, ManagedChild, SpawnOptions};
 ///
 /// 与 Ollama 的 runner 分目录思路一致：同一份发布件可以携带多个平台的
 /// 运行时（用于 CI 产物合并），启动时只挑当前平台的那一份。
+///
+/// 平台标识统一取自 `mangosteen_platform`，本层不再自写 `cfg!(target_os)`。
 fn runtime_subdir_name() -> Option<String> {
-    let os = if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        return None;
+    let os = match mangosteen_platform::os_name() {
+        "macos" => "darwin",
+        "windows" => "windows",
+        "linux" => "linux",
+        _ => return None,
     };
-    let arch = if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else {
-        return None;
+    let arch = match mangosteen_platform::arch_name() {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        _ => return None,
     };
     Some(format!("{os}-{arch}"))
 }
