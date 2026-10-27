@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 mangosteen-core = { workspace = true }
+mangosteen-orchestration = { workspace = true }
 mangosteen-platform = { workspace = true }
 mangosteen-base = { workspace = true }
 mangosteen-session = { workspace = true }

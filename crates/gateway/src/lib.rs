@@ -35,22 +35,21 @@
 //!
 //! 这三条由 `tests/layering.rs` 与 `scheduler::tests` 里的不变量测试共同守护。
 
-pub mod assess;
 pub mod cloudmon;
 pub mod gateway;
 pub mod http;
 pub mod progress;
 pub mod protocol;
 pub mod pulljobs;
-pub mod scheduler;
 pub mod server;
 
-pub use assess::{Assessor, DeploymentRequest, Evaluated};
 pub use cloudmon::{spawn_cloud_monitor, CloudMonitor};
 pub use gateway::{
     ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot, Gateway, GatewayBuilder,
     GatewayStatus,
 };
+pub use mangosteen_orchestration::{assess, scheduler};
+pub use mangosteen_orchestration::{Assessor, DeploymentRequest, Evaluated};
 pub use progress::{DeployStage, StageEvent, StageOutcome};
 
 /// 在后台预热网关的慢速探测（引擎版本）。
@@ -86,8 +85,8 @@ pub fn spawn_warm_up(gateway: std::sync::Arc<std::sync::Mutex<Gateway>>) {
         }
     });
 }
+pub use mangosteen_orchestration::{Decision, Scheduler, SchedulerOutcome};
 pub use protocol::BackendTarget;
-pub use scheduler::{Decision, Scheduler, SchedulerOutcome};
 pub use server::GatewayServer;
 
 /// 云端能力诊断（供 `mangosteen doctor` / `config validate` 使用）。

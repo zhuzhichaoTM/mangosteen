@@ -193,7 +193,7 @@ const REMOTE_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 /// 与 `gateway::assessed_detail` 同样的信息，但在 server 侧构造——
 /// 那边是 `pub(crate)` 之外的私有函数，且这里要用在**持有任务表锁**的
 /// 闭包里（不能再进网关锁拿数据）。
-fn probe_assessed_detail(ev: &crate::assess::Evaluated) -> String {
+fn probe_assessed_detail(ev: &mangosteen_orchestration::assess::Evaluated) -> String {
     crate::gateway::assessed_detail(ev)
 }
 
@@ -1033,7 +1033,8 @@ impl GatewayServer {
             );
         };
 
-        let mut dreq = crate::assess::DeploymentRequest::for_model(model.to_string());
+        let mut dreq =
+            mangosteen_orchestration::assess::DeploymentRequest::for_model(model.to_string());
         if let Some(c) = parsed.get("context_len").and_then(|v| v.as_u64()) {
             dreq.context_len = Some(c as u32);
         }
@@ -1042,7 +1043,7 @@ impl GatewayServer {
         }
         // 设备选择：local / cloud / auto（缺省 auto = 本地优先）
         if let Some(t) = parsed.get("target").and_then(|v| v.as_str()) {
-            match crate::assess::ComputeTarget::parse(t) {
+            match mangosteen_orchestration::assess::ComputeTarget::parse(t) {
                 Some(x) => dreq.target = x,
                 None => {
                     return Response::json(
@@ -1765,7 +1766,9 @@ impl GatewayServer {
                 let (deployable, reason) = if !exists {
                     (false, Some("模型文件不存在或已被删除".to_string()))
                 } else {
-                    let dreq = crate::assess::DeploymentRequest::for_model(m.id.clone());
+                    let dreq = mangosteen_orchestration::assess::DeploymentRequest::for_model(
+                        m.id.clone(),
+                    );
                     match gw.evaluate(&dreq) {
                         Ok(ev) => {
                             if ev.is_local_viable() {
@@ -2093,9 +2096,9 @@ impl GatewayServer {
             let jid = job_id.clone();
             let gw = gw_for_deploy;
             let tgt = if deploy_target == "cloud" {
-                crate::assess::ComputeTarget::Cloud
+                mangosteen_orchestration::assess::ComputeTarget::Cloud
             } else {
-                crate::assess::ComputeTarget::Local
+                mangosteen_orchestration::assess::ComputeTarget::Local
             };
             // 远端元数据预取所需：源、模型引用、下载选项快照。
             // 这一份给 prepare 阶段用（HTTP Range 只取头部）。
@@ -2125,9 +2128,9 @@ impl GatewayServer {
             //
             // 地址用与本地下载完全相同的 `download_url` 规则拼出，
             // 保证云端拿到的就是用户选的那个文件。
-            let dl_spec: Option<crate::assess::ModelDownloadSpec> =
+            let dl_spec: Option<mangosteen_orchestration::assess::ModelDownloadSpec> =
                 match probe_source.download_url(&probe_model) {
-                    Ok(url) => Some(crate::assess::ModelDownloadSpec {
+                    Ok(url) => Some(mangosteen_orchestration::assess::ModelDownloadSpec {
                         url,
                         expected_bytes: probe_opts.expected_bytes,
                     }),
@@ -2141,7 +2144,8 @@ impl GatewayServer {
             let prepare: crate::pulljobs::PrepareHook = Arc::new(move || {
                 // 评估：本地文件 > 远端真实元数据 > 按体积粗估
                 let req = {
-                    let mut r = crate::assess::DeploymentRequest::for_model("__probe__");
+                    let mut r =
+                        mangosteen_orchestration::assess::DeploymentRequest::for_model("__probe__");
                     r.target = tgt;
                     // 云端要据此在远端下载；本地部署用不到，带着也无害
                     r.model_download = dl_spec.clone();
@@ -2748,7 +2752,7 @@ impl GatewayServer {
             }
         };
 
-        let mut dreq = crate::assess::DeploymentRequest::for_model(model);
+        let mut dreq = mangosteen_orchestration::assess::DeploymentRequest::for_model(model);
         if let Some(c) = parsed.get("context_len").and_then(|v| v.as_u64()) {
             dreq.context_len = Some(c as u32);
         }
@@ -2769,7 +2773,7 @@ impl GatewayServer {
         // 结果在「以为用本地」的情况下开出计费实例。
         if let Some(t) = parsed.get("target") {
             let raw = t.as_str().unwrap_or("");
-            match crate::assess::ComputeTarget::parse(raw) {
+            match mangosteen_orchestration::assess::ComputeTarget::parse(raw) {
                 Some(v) => dreq.target = v,
                 None => {
                     return Response::json(
@@ -2845,7 +2849,8 @@ impl GatewayServer {
                 )
             }
         };
-        let mut dreq = crate::assess::DeploymentRequest::for_model(model).local_only();
+        let mut dreq =
+            mangosteen_orchestration::assess::DeploymentRequest::for_model(model).local_only();
         if let Some(c) = parsed.get("context_len").and_then(|v| v.as_u64()) {
             dreq.context_len = Some(c as u32);
         }

@@ -36,9 +36,9 @@ use mangosteen_core::policy::SelectionConstraints;
 use mangosteen_core::{MnError, MnResult};
 use mangosteen_local::engine::{EngineHandle, LlamaCppEngine};
 
-use crate::assess::{Assessor, DeploymentRequest, Evaluated};
 use crate::protocol::BackendTarget;
-use crate::scheduler::{Decision, Scheduler};
+use mangosteen_orchestration::assess::{Assessor, DeploymentRequest, Evaluated};
+use mangosteen_orchestration::scheduler::{Decision, Scheduler};
 
 /// 引擎版本探测的时间预算。
 ///
@@ -2423,13 +2423,6 @@ impl GatewayBuilder {
         let state = StateStore::new(state_path);
 
         Gateway::new(self.config, assessor, local_engine, cloud, state, models)
-    }
-}
-
-impl Assessor {
-    /// 供调度器使用（`Scheduler` 需要自己的评估器实例以计算云端显存）。
-    fn clone_for_scheduler(&self) -> Assessor {
-        Assessor::new(self.hardware().clone())
     }
 }
 

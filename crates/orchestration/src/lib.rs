@@ -21,6 +21,4 @@ pub mod assess;
 pub mod scheduler;
 
 pub use assess::{Assessor, ComputeTarget, DeploymentRequest, Evaluated, ModelDownloadSpec};
-pub use scheduler::{
-    Decision, LocalLaunchOutcome, Scheduler, SchedulerOutcome,
-};
+pub use scheduler::{Decision, LocalLaunchOutcome, Scheduler, SchedulerOutcome};

@@ -155,6 +155,7 @@ dependencies = [
  "mangosteen-cloud",
  "mangosteen-core",
  "mangosteen-local",
+ "mangosteen-orchestration",
  "mangosteen-platform",
  "mangosteen-session",
  "mangosteen-webui",
@@ -168,6 +169,20 @@ version = "0.1.0"
 dependencies = [
  "mangosteen-core",
  "mangosteen-platform",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mangosteen-orchestration"
+version = "0.1.0"
+dependencies = [
+ "mangosteen-base",
+ "mangosteen-cloud",
+ "mangosteen-core",
+ "mangosteen-local",
+ "mangosteen-platform",
+ "mangosteen-session",
  "serde",
  "serde_json",
 ]

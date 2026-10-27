@@ -437,11 +437,11 @@ fn c3_unimplemented_engines_are_absent_from_registry() {
 
 #[test]
 fn c4_scheduler_checks_local_before_cloud() {
-    let src = crate_sources("mangosteen-gateway")
+    let src = crate_sources("mangosteen-orchestration")
         .into_iter()
         .find(|(p, _)| p.file_name().map(|f| f == "scheduler.rs").unwrap_or(false))
         .map(|(_, s)| s)
-        .expect("scheduler.rs must exist");
+        .expect("orchestration/scheduler.rs must exist");
     let code = strip_comments_and_strings(&src);
 
     // decide() 中必须先判断本地可行性
@@ -702,20 +702,20 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 2：模型评估
     assert!(
-        file_exists("crates/gateway/src/assess.rs"),
+        file_exists("crates/orchestration/src/assess.rs"),
         "第三层缺少「模型评估」模块"
     );
     assert!(
-        crate_has("mangosteen-gateway", "pub struct Assessor"),
+        crate_has("mangosteen-orchestration", "pub struct Assessor"),
         "模型评估缺少 Assessor"
     );
     // 模块 3：节点选择（多云调度决策器）
     assert!(
-        file_exists("crates/gateway/src/scheduler.rs"),
+        file_exists("crates/orchestration/src/scheduler.rs"),
         "第三层缺少「节点选择」模块"
     );
     assert!(
-        crate_has("mangosteen-gateway", "pub fn decide"),
+        crate_has("mangosteen-orchestration", "pub fn decide"),
         "节点选择缺少决策入口（decide）"
     );
     // 模块 4：节点配置（本地 / 云端两套配置生成）

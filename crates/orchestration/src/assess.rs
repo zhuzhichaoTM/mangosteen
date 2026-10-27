@@ -321,6 +321,10 @@ impl Assessor {
         self.evaluate_spec(&spec, req)
     }
 
+    pub fn clone_for_scheduler(&self) -> Assessor {
+        Assessor::new(self.hardware().clone())
+    }
+
     /// 在给定预算内挑选能跑的最高质量量化档。
     ///
     /// 用于「用户说想要 32B，但只有 24GB 卡」这类场景：
