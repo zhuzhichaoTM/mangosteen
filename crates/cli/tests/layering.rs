@@ -349,7 +349,9 @@ fn c3_engine_differences_are_pluginized() {
         );
     }
 
-    // 网关必须确实经注册表取插件（防止「删掉了分支但也没接上插件」）
+    // 网关必须确实经注册表取插件（防止「删掉了分支但也没接上插件」）。
+    // 扫描已经按层归位后的 orchestration 目录，避免新文件绕开规则。
+    // `gateway.rs` 仍保留薄壳/公开转发，但引擎生命周期与插件分发不再归它。
     let gw = crate_sources("mangosteen-gateway")
         .into_iter()
         .find(|(p, _)| p.file_name().map(|f| f == "gateway.rs").unwrap_or(false))
@@ -671,6 +673,16 @@ fn c6_five_layer_architecture_is_complete() {
         file_exists("crates/gateway/src/server.rs"),
         "第二层缺少 API Server"
     );
+    for module in [
+        "crates/gateway/src/http/server.rs",
+        "crates/gateway/src/http/request.rs",
+        "crates/gateway/src/http/response.rs",
+        "crates/gateway/src/http/router.rs",
+        "crates/gateway/src/http/upstream.rs",
+        "crates/gateway/src/http/handlers/mod.rs",
+    ] {
+        assert!(file_exists(module), "第二层缺少 HTTP 模块边界：{module}");
+    }
     for route in ["\"/v1/chat/completions\"", "\"/api/deploy\""] {
         assert!(
             crate_has("mangosteen-gateway", route),

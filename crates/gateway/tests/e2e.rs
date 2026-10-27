@@ -3982,7 +3982,7 @@ fn e2e_stream_request_is_relayed_not_buffered() {
 
     // ---- 源码级：直通路径必须存在且被接线 ----
     let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http/server.rs"),
     )
     .unwrap();
     assert!(

@@ -38,6 +38,7 @@
 pub mod assess;
 pub mod cloudmon;
 pub mod gateway;
+pub mod http;
 pub mod progress;
 pub mod protocol;
 pub mod pulljobs;
