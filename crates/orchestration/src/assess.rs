@@ -26,7 +26,6 @@ use mangosteen_core::hardware::HardwareProfile;
 use mangosteen_core::model::ModelSpec;
 use mangosteen_core::{MnError, MnResult};
 use serde::{Deserialize, Serialize};
-
 /// 用户指定的算力落位。
 ///
 /// 为什么需要它：默认策略是「本地优先、不足才降级云端」，这是产品基线。

@@ -8,6 +8,7 @@ members = [
     "crates/local",
     "crates/backend",
     "crates/cloud",
+    "crates/orchestration",
     "crates/gateway",
     "crates/webui",
     "crates/cli",
@@ -29,6 +30,7 @@ mangosteen-session = { path = "crates/session" }
 mangosteen-local = { path = "crates/local" }
 mangosteen-backend = { path = "crates/backend" }
 mangosteen-cloud = { path = "crates/cloud" }
+mangosteen-orchestration = { path = "crates/orchestration" }
 mangosteen-gateway = { path = "crates/gateway" }
 mangosteen-webui = { path = "crates/webui" }
 
