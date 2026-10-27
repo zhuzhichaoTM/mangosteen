@@ -499,8 +499,14 @@ fn c5_dependency_direction_is_top_down() {
             &["mangosteen-core", "mangosteen-platform"],
         ),
         (
+            // provider 只做节点供应与连接；模型下载/引擎启停复用 device 的
+            // 远端运行时，因此允许依赖 device（同层组合，不是反向依赖）。
             "mangosteen-provider",
-            &["mangosteen-core", "mangosteen-platform"],
+            &[
+                "mangosteen-core",
+                "mangosteen-platform",
+                "mangosteen-device",
+            ],
         ),
         (
             "mangosteen-gateway",

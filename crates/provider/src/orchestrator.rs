@@ -531,7 +531,7 @@ impl CloudOrchestrator {
         &self,
         provider: &str,
         instance_id: &str,
-    ) -> MnResult<crate::remote::SshTarget> {
+    ) -> MnResult<mangosteen_device::remote::SshTarget> {
         let driver = self.registry.get(provider)?;
         let inst = driver.describe(instance_id)?;
         let host = inst
@@ -542,7 +542,7 @@ impl CloudOrchestrator {
                 stage: "读取 SSH 信息".to_string(),
                 reason: format!("实例 {instance_id} 未返回 SSH 地址"),
             })?;
-        Ok(crate::remote::SshTarget {
+        Ok(mangosteen_device::remote::SshTarget {
             host,
             port: inst.network.ssh_port.unwrap_or(22),
             user: "root".to_string(),
@@ -560,7 +560,7 @@ impl CloudOrchestrator {
     /// 这里**不销毁实例**，所以仍在计费。上层必须把这一点告诉用户。
     pub fn stop_service(&self, provider: &str, instance_id: &str) -> MnResult<()> {
         let target = self.service_target(provider, instance_id)?;
-        crate::remote::stop_llama_server(&target, &self.config.remote_workdir)
+        mangosteen_device::remote::stop_llama_server(&target, &self.config.remote_workdir)
     }
 
     /// **启动服务**：在已有实例上重新拉起 `llama-server`。
@@ -579,7 +579,7 @@ impl CloudOrchestrator {
         let bin = format!("{workdir}/bin/llama-server");
         // 二进制丢了（用户清理过系统盘 / 换了实例）就不能假装能启动，
         // 直接说清楚要重新部署，而不是抛一个看不懂的 no such file。
-        let probe = crate::remote::ssh_exec(
+        let probe = mangosteen_device::remote::ssh_exec(
             &target,
             &format!("if [ -x {bin} ]; then echo ok; else echo missing; fi"),
             60,
@@ -592,7 +592,7 @@ impl CloudOrchestrator {
                 ),
             });
         }
-        crate::remote::start_llama_server(&target, &bin, &launch.args, &workdir)
+        mangosteen_device::remote::start_llama_server(&target, &bin, &launch.args, &workdir)
     }
 
     /// 隧道管理器（可变借用，用于关闭全部隧道）。
@@ -815,7 +815,7 @@ fn finish_provision(
     // （早期用 Ollama 镜像时 11434 是常驻服务，所以没暴露这个顺序问题。）
     //
     // 顺带好处：下载几 GB 权重期间不需要隧道，少一条会断的链路。
-    let target = crate::remote::SshTarget {
+    let target = mangosteen_device::remote::SshTarget {
         host: tunnel_spec.ssh_host.clone(),
         port: tunnel_spec.ssh_port,
         user: tunnel_spec.ssh_user.clone(),
@@ -846,7 +846,7 @@ fn finish_provision(
     // 是最难排查的症状。所以宁可在这里多等几十秒，也不返回假就绪的实例。
     if plan.remote_model.is_none() {
         // llama.cpp：等模型加载完（大模型可能要几分钟）
-        if let Err(e) = crate::remote::wait_http_ready(
+        if let Err(e) = mangosteen_device::remote::wait_http_ready(
             &format!("{base}/health"),
             config.start_timeout,
             config.poll_interval,
@@ -857,7 +857,7 @@ fn finish_provision(
         }
     } else if let Some(model) = plan.remote_model.as_deref() {
         // Ollama：服务常驻，探 /api/version 确认隧道通，再确保模型在
-        if let Err(e) = crate::remote::wait_http_ready(
+        if let Err(e) = mangosteen_device::remote::wait_http_ready(
             &format!("{base}/api/version"),
             config.start_timeout,
             config.poll_interval,
@@ -866,7 +866,9 @@ fn finish_provision(
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
-        if let Err(e) = crate::remote::ensure_ollama_model(&base, model, config.start_timeout) {
+        if let Err(e) =
+            mangosteen_device::remote::ensure_ollama_model(&base, model, config.start_timeout)
+        {
             let _ = tunnels.close(&tunnel_spec);
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
@@ -897,7 +899,7 @@ fn finish_provision(
 /// 偷偷改成「本地下载几个 GB 再传上去」会让用户以为模型落在云上，
 /// 实际磁盘与带宽被本地吃掉——那不是用户选的东西。
 fn bootstrap_llama(
-    target: &crate::remote::SshTarget,
+    target: &mangosteen_device::remote::SshTarget,
     plan: &CloudPlan,
     launch: &EngineLaunchConfig,
     config: &OrchestratorConfig,
@@ -906,8 +908,8 @@ fn bootstrap_llama(
     let remote_model = &plan.model_path;
 
     // ---- 1. 远端是否已就位 ----
-    let _ = crate::remote::ssh_exec(target, &format!("mkdir -p {workdir}/models"), 60);
-    let remote_size = crate::remote::remote_file_size(target, remote_model)?;
+    let _ = mangosteen_device::remote::ssh_exec(target, &format!("mkdir -p {workdir}/models"), 60);
+    let remote_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
     let want = plan.download_bytes;
 
     let ready = match (remote_size, want) {
@@ -932,13 +934,14 @@ fn bootstrap_llama(
                 ),
             })?;
         eprintln!("[cloud] 远端开始下载模型：{url}");
-        let n = crate::remote::download_model_remote(target, url, remote_model, want)?;
+        let n = mangosteen_device::remote::download_model_remote(target, url, remote_model, want)?;
         eprintln!("[cloud] ✓ 远端已下载模型（{n} 字节）");
     }
 
     // ---- 3. 备好 llama-server 并起服务 ----
-    let bin = crate::remote::ensure_llama_server(target, &workdir, &config.llama_server_url)?;
-    crate::remote::start_llama_server(target, &bin, &launch.args, &workdir)?;
+    let bin =
+        mangosteen_device::remote::ensure_llama_server(target, &workdir, &config.llama_server_url)?;
+    mangosteen_device::remote::start_llama_server(target, &bin, &launch.args, &workdir)?;
     Ok(())
 }
 

@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 mangosteen-core = { workspace = true }
+mangosteen-device = { workspace = true }
 mangosteen-platform = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }

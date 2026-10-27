@@ -35,7 +35,6 @@ pub mod drivers;
 pub mod net;
 pub mod orchestrator;
 pub mod registry;
-pub mod remote;
 
 pub use compshare::CompshareDriver;
 pub use net::TunnelManager;

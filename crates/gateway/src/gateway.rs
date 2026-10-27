@@ -1410,7 +1410,7 @@ impl Gateway {
                     }
                 };
                 let health = format!("{base}/health");
-                if let Err(e) = mangosteen_provider::remote::wait_http_ready(
+                if let Err(e) = mangosteen_device::remote::wait_http_ready(
                     &health,
                     o.start_timeout(),
                     o.poll_interval(),

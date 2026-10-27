@@ -181,6 +181,7 @@ name = "mangosteen-provider"
 version = "0.1.0"
 dependencies = [
  "mangosteen-core",
+ "mangosteen-device",
  "mangosteen-platform",
  "serde",
  "serde_json",
