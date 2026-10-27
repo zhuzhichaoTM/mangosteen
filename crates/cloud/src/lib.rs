@@ -30,12 +30,14 @@
 //!
 //! [`Instance`]: mangosteen_core::cloud::Instance
 
+pub mod compshare;
 pub mod drivers;
 pub mod net;
 pub mod orchestrator;
 pub mod registry;
 pub mod remote;
 
+pub use compshare::CompshareDriver;
 pub use net::TunnelManager;
 pub use orchestrator::{CloudOrchestrator, OrchestratorConfig, Provisioned};
 pub use registry::build_registry;

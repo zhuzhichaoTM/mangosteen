@@ -7,7 +7,7 @@
 //! export COMPSHARE_PRIVATE_KEY='...'
 //! # 可选：不指定则自动取账号下第一个 Running 实例
 //! export COMPSHARE_INSTANCE_ID='uhost-xxxx'
-//! cargo run -p mangosteen-backend --example instance_monitor
+//! cargo run -p mangosteen-cloud --example instance_monitor
 //! ```
 //!
 //! ## 这个示例验证什么
@@ -19,7 +19,7 @@
 //!
 //! 凭证只从环境变量读取，不落盘、不进源码。
 
-use mangosteen_backend::{
+use mangosteen_cloud::compshare::{
     mapping, CompshareClient, CompshareConfig, Credential, CurlTransport, DEFAULT_ENDPOINT,
 };
 
@@ -53,7 +53,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if list.uhost_set.is_empty() {
         println!();
         println!("账号下没有实例，无法验证监控接口。");
-        println!("可先启动一台：`cargo run -p mangosteen-backend --example cheapest_up -- --all --launch`");
+        println!(
+            "可先启动一台：`cargo run -p mangosteen-cloud --example cheapest_up -- --all --launch`"
+        );
         return Ok(());
     }
 

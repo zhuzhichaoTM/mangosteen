@@ -22,7 +22,7 @@
 //! | `GraphicsMemory.Value` | 机型表 | **GB** |
 //!
 //! 把 MB 当 GB 用会让显存/内存评估差 1024 倍，直接把「本地优先」的
-//! 降级判断带偏，因此这里每个字段都标注单位，并在 [`crate::model::units`] 集中换算。
+//! 降级判断带偏，因此这里每个字段都标注单位，并在 [`crate::compshare::model::units`] 集中换算。
 
 use serde::{Deserialize, Deserializer};
 
@@ -241,7 +241,7 @@ pub struct MonitorMessages {
     )]
     pub mem_usage_rate: Option<f64>,
     /// GPU 信息。厂商未文档化其结构（实测关机时为 `null`），
-    /// 因此原样保留，由 [`crate::mapping`] 做尽力提取。
+    /// 因此原样保留，由 [`crate::compshare::mapping`] 做尽力提取。
     #[serde(rename = "GpuInfo", default)]
     pub gpu_info: Option<serde_json::Value>,
 }
@@ -614,7 +614,7 @@ impl ZoneInfo {
         }
     }
 
-    /// `region/zone` 简写，与 [`crate::CompshareClient::scope_label`] 一致。
+    /// `region/zone` 简写，与 [`super::CompshareClient::scope_label`] 一致。
     pub fn scope_label(&self) -> String {
         format!("{}/{}", self.region, self.zone)
     }

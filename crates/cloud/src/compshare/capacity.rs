@@ -31,9 +31,9 @@ use std::collections::BTreeMap;
 
 use mangosteen_core::MnResult;
 
-use crate::client::{CapacityRequest, CompshareClient};
-use crate::model::{CapacitySpec, ZoneInfo};
-use crate::transport::Transport;
+use crate::compshare::client::{CapacityRequest, CompshareClient};
+use crate::compshare::model::{CapacitySpec, ZoneInfo};
+use crate::compshare::transport::Transport;
 
 /// 单个 (可用区, 卡型) 的库存查询结果。
 #[derive(Debug, Clone, PartialEq)]
@@ -216,9 +216,9 @@ pub struct QuotableSpec {
 }
 
 impl QuotableSpec {
-    /// 构成规格 ID（与 `crate::mapping::spec_id` 同格式）。
+    /// 构成规格 ID（与 `crate::compshare::mapping::spec_id` 同格式）。
     pub fn spec_id(&self) -> String {
-        crate::mapping::spec_id(&self.gpu_type, self.gpu, self.cpu, self.mem_gb)
+        crate::compshare::mapping::spec_id(&self.gpu_type, self.gpu, self.cpu, self.mem_gb)
     }
 
     /// 用 `Memory` 参数（MB）表示的取值——价格接口要求 MB。
@@ -273,7 +273,7 @@ impl PriceBoard {
     pub fn cheapest_releasable(&self) -> Option<&PricedOption> {
         self.options
             .iter()
-            .filter(|o| crate::mapping::is_spot_releasable(&o.charge_type))
+            .filter(|o| crate::compshare::mapping::is_spot_releasable(&o.charge_type))
             .min_by(|a, b| {
                 a.per_hour_cny
                     .partial_cmp(&b.per_hour_cny)
@@ -318,7 +318,7 @@ pub fn price_quotes<T: Transport>(
     disk_type: &str,
     disk_size_gb: u32,
 ) -> PriceBoard {
-    use crate::client::PriceRequest;
+    use crate::compshare::client::PriceRequest;
 
     let mut board = PriceBoard::default();
     let transport = client.transport();
@@ -356,7 +356,7 @@ pub fn price_quotes<T: Transport>(
                     continue;
                 };
                 let raw = d.total();
-                match crate::mapping::hourly_price(&d.charge_type, raw) {
+                match crate::compshare::mapping::hourly_price(&d.charge_type, raw) {
                     Some(per_hour) if per_hour > 0.0 => {
                         board.options.push(PricedOption {
                             spec: spec.clone(),
@@ -485,7 +485,7 @@ pub fn precheck_stock<T: Transport>(
 /// ## 费用安全
 ///
 /// 每台创建后再等 Running；等待失败会由驱动内 `destroy` 回滚
-/// （见 [`crate::driver::CompshareDriver::provision_ready`]）。
+/// （见 [`crate::compshare::driver::CompshareDriver::provision_ready`]）。
 /// 本函数**不会**留下计费中的孤儿实例。
 pub fn provision_cheapest<T: Transport>(
     client: &CompshareClient<T>,
@@ -494,7 +494,7 @@ pub fn provision_cheapest<T: Transport>(
     scan_opts: &ScanOptions,
     max_attempts: usize,
 ) -> MnResult<Launched> {
-    use crate::driver::CompshareDriver;
+    use crate::compshare::driver::CompshareDriver;
     use mangosteen_core::MnError;
 
     let matrix = scan(client, scope, image_id, scan_opts)?;
@@ -527,7 +527,7 @@ pub fn provision_cheapest<T: Transport>(
             .collect::<Vec<_>>()
             .join("；");
         return Err(MnError::Provider {
-            provider: crate::PROVIDER_NAME.to_string(),
+            provider: super::PROVIDER_NAME.to_string(),
             code: "price_unavailable".to_string(),
             message: format!("所有有货配置都无法取得价格。{detail}"),
         });
@@ -568,7 +568,7 @@ pub fn provision_cheapest<T: Transport>(
         // 为该 (可用区, 卡型) 绑定的驱动：不同可用区要用不同的 Region/Zone
         let transport = client.transport();
         let scoped = client.with_scope(transport, &spec.region, &spec.zone)?;
-        let cfg = crate::config::CompshareConfig {
+        let cfg = crate::compshare::config::CompshareConfig {
             region: spec.region.clone(),
             zone: spec.zone.clone(),
             image_id: image_id.to_string(),
@@ -580,7 +580,7 @@ pub fn provision_cheapest<T: Transport>(
             ..Default::default()
         };
         let driver = CompshareDriver::new(
-            crate::PROVIDER_NAME,
+            super::PROVIDER_NAME,
             cfg,
             scoped.credential().clone(),
             transport,
@@ -871,9 +871,9 @@ pub fn scan_zones<T: Transport>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CapacityResponse;
-    use crate::transport::HttpResponse;
-    use crate::Credential;
+    use crate::compshare::model::CapacityResponse;
+    use crate::compshare::transport::HttpResponse;
+    use crate::compshare::Credential;
     use std::sync::Mutex;
 
     fn cred() -> Credential {
@@ -1132,7 +1132,10 @@ mod tests {
     }
 
     impl Transport for ZoneVendor {
-        fn execute(&self, req: &crate::transport::HttpRequest) -> MnResult<HttpResponse> {
+        fn execute(
+            &self,
+            req: &crate::compshare::transport::HttpRequest,
+        ) -> MnResult<HttpResponse> {
             let body = req.body.clone().unwrap_or_default();
             self.calls.lock().unwrap().push(body.clone());
             let get = |k: &str| {
@@ -1182,7 +1185,7 @@ mod tests {
     }
 
     fn client(vendor: ZoneVendor) -> CompshareClient<ZoneVendor> {
-        CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap()
+        CompshareClient::new(crate::compshare::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap()
     }
 
     #[test]
@@ -1482,7 +1485,10 @@ mod tests {
     }
 
     impl Transport for PriceVendor {
-        fn execute(&self, req: &crate::transport::HttpRequest) -> MnResult<HttpResponse> {
+        fn execute(
+            &self,
+            req: &crate::compshare::transport::HttpRequest,
+        ) -> MnResult<HttpResponse> {
             let body = req.body.clone().unwrap_or_default();
             self.calls.lock().unwrap().push(body.clone());
             let get = |k: &str| {
@@ -1536,7 +1542,8 @@ mod tests {
                 "5090",
                 r#"[{"ChargeType":"Postpay","Instance":1.5,"SystemDisks":0.0}]"#,
             );
-        let c = CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap();
+        let c = CompshareClient::new(crate::compshare::DEFAULT_ENDPOINT, cred(), vendor, "", "")
+            .unwrap();
         let board = price_quotes(
             &c,
             &[priced_spec("A100", 64), priced_spec("5090", 96)],
@@ -1557,7 +1564,8 @@ mod tests {
         // 月价 720 → 1.0 元/小时
         let vendor = PriceVendor::new("cn-wlcb-01")
             .with_price("4090", r#"[{"ChargeType":"Month","Instance":720.0}]"#);
-        let c = CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap();
+        let c = CompshareClient::new(crate::compshare::DEFAULT_ENDPOINT, cred(), vendor, "", "")
+            .unwrap();
         let board = price_quotes(&c, &[priced_spec("4090", 64)], "Month", "CLOUD_SSD", 100);
         let opt = board.cheapest().unwrap();
         assert!(
@@ -1573,7 +1581,8 @@ mod tests {
         // A100 未注册价格 → 失败，但不影响 5090
         let vendor = PriceVendor::new("cn-wlcb-01")
             .with_price("5090", r#"[{"ChargeType":"Postpay","Instance":2.0}]"#);
-        let c = CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap();
+        let c = CompshareClient::new(crate::compshare::DEFAULT_ENDPOINT, cred(), vendor, "", "")
+            .unwrap();
         let board = price_quotes(
             &c,
             &[priced_spec("A100", 64), priced_spec("5090", 96)],
@@ -1591,7 +1600,8 @@ mod tests {
     fn price_quotes_sends_region_zone_and_memory_in_mb() {
         let vendor = PriceVendor::new("cn-wlcb-01")
             .with_price("5090", r#"[{"ChargeType":"Postpay","Instance":2.0}]"#);
-        let c = CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap();
+        let c = CompshareClient::new(crate::compshare::DEFAULT_ENDPOINT, cred(), vendor, "", "")
+            .unwrap();
         price_quotes(&c, &[priced_spec("5090", 96)], "Postpay", "CLOUD_SSD", 100);
         let calls = c.transport().calls();
         let body = &calls[0];
@@ -1609,7 +1619,8 @@ mod tests {
     #[test]
     fn price_quotes_all_failed_returns_empty_board() {
         let vendor = PriceVendor::new("cn-wlcb-01");
-        let c = CompshareClient::new(crate::DEFAULT_ENDPOINT, cred(), vendor, "", "").unwrap();
+        let c = CompshareClient::new(crate::compshare::DEFAULT_ENDPOINT, cred(), vendor, "", "")
+            .unwrap();
         let board = price_quotes(&c, &[priced_spec("4090", 64)], "Postpay", "CLOUD_SSD", 100);
         assert!(board.options.is_empty());
         assert_eq!(board.failed.len(), 1);
@@ -1628,7 +1639,10 @@ mod tests {
     }
 
     impl Transport for StockVendor {
-        fn execute(&self, req: &crate::transport::HttpRequest) -> MnResult<HttpResponse> {
+        fn execute(
+            &self,
+            req: &crate::compshare::transport::HttpRequest,
+        ) -> MnResult<HttpResponse> {
             let body = req.body.clone().unwrap_or_default();
             if self.broken {
                 return Ok(HttpResponse::new(
@@ -1657,7 +1671,7 @@ mod tests {
 
     fn stock_client(specs: &str, broken: bool) -> CompshareClient<StockVendor> {
         CompshareClient::new(
-            crate::DEFAULT_ENDPOINT,
+            crate::compshare::DEFAULT_ENDPOINT,
             cred(),
             StockVendor {
                 zone: "cn-wlcb-01".into(),

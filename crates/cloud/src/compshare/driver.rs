@@ -11,7 +11,7 @@
 //! | `Start` 仅 `Stopped` 可用、`Stop` 仅 `Running` 可用 | 动作前先查状态，已处于目标态则幂等返回 |
 //! | 创建接口只返回实例 ID，不返回详情 | 创建后立即 `Describe` 补齐规格/网络；补查失败也保留 ID 以便回滚 |
 //! | 实例操作有 10 分钟并发锁 | 识别 `InstanceOperationInProgress` 并给出可操作提示 |
-//! | `Memory` 单位是 MB，机型表是 GB | 单位换算集中在 [`crate::mapping::units`] |
+//! | `Memory` 单位是 MB，机型表是 GB | 单位换算集中在 [`crate::compshare::mapping::units`] |
 //!
 //! ## 与编排器的分工
 //!
@@ -25,17 +25,19 @@ use mangosteen_core::cloud::{
 };
 use mangosteen_core::{MnError, MnResult};
 
-use crate::client::{CapacityRequest, CompshareClient, CreateRequest, PriceRequest, PROVIDER_NAME};
-use crate::config::CompshareConfig;
-use crate::mapping::{self, units};
-use crate::model::{
+use crate::compshare::client::{
+    CapacityRequest, CompshareClient, CreateRequest, PriceRequest, PROVIDER_NAME,
+};
+use crate::compshare::config::CompshareConfig;
+use crate::compshare::mapping::{self, units};
+use crate::compshare::model::{
     state, BandwidthSwitchResponse, InstancePortsResponse, NetOptimizerResponse, PriceDetail,
     PriceResponse, RefundPriceResponse, SoftwarePortResponse, UHost, UpgradePriceResponse,
     UserPriceRequest,
 };
-use crate::retcode::{codes, provider_error};
-use crate::sign::Credential;
-use crate::transport::Transport;
+use crate::compshare::retcode::{codes, provider_error};
+use crate::compshare::sign::Credential;
+use crate::compshare::transport::Transport;
 
 /// 分页查询单页上限（厂商限制 100）。
 const PAGE_LIMIT: u32 = 100;
@@ -107,13 +109,16 @@ impl<T: Transport> CompshareDriver<T> {
     }
 
     /// 查询平台镜像列表（供选择 `image_id`）。
-    pub fn list_images(&self, image_type: Option<&str>) -> MnResult<Vec<crate::model::ImageInfo>> {
+    pub fn list_images(
+        &self,
+        image_type: Option<&str>,
+    ) -> MnResult<Vec<crate::compshare::model::ImageInfo>> {
         let r = self.client.images(image_type, PAGE_LIMIT, 0)?;
         Ok(r.image_set)
     }
 
     /// 查询支持的地域/可用区。
-    pub fn list_zones(&self) -> MnResult<Vec<crate::model::ZoneInfo>> {
+    pub fn list_zones(&self) -> MnResult<Vec<crate::compshare::model::ZoneInfo>> {
         let r = self.client.zones()?;
         Ok(r.zones)
     }
@@ -126,7 +131,7 @@ impl<T: Transport> CompshareDriver<T> {
     ///
     /// 返回 `Ok(None)` 表示可用区列表里查不到当前可用区（不阻断，交由创建时的
     /// 真实校验兜底）；`Ok(Some(zone))` 表示找到了对应可用区。
-    pub fn check_zone_image_compat(&self) -> MnResult<Option<crate::model::ZoneInfo>> {
+    pub fn check_zone_image_compat(&self) -> MnResult<Option<crate::compshare::model::ZoneInfo>> {
         let r = self.client.zones_filtered(Some(&self.config.region))?;
         let found = r.zones.into_iter().find(|z| z.zone == self.config.zone);
         if let Some(z) = &found {
@@ -482,7 +487,7 @@ impl<T: Transport> CompshareDriver<T> {
     }
 
     /// 查询机型族列表（全量机型目录，含未上架）。
-    pub fn machine_types(&self) -> MnResult<Vec<crate::model::MachineTypeFamily>> {
+    pub fn machine_types(&self) -> MnResult<Vec<crate::compshare::model::MachineTypeFamily>> {
         Ok(self.client.machine_type_families()?.families)
     }
 
@@ -986,7 +991,7 @@ fn augment_cleanup(base: MnError, id: &str, cleanup: MnResult<()>) -> MnError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::MockTransport;
+    use crate::compshare::transport::MockTransport;
 
     fn cfg() -> CompshareConfig {
         CompshareConfig {
@@ -1143,8 +1148,8 @@ mod tests {
     impl Transport for FakeVendor {
         fn execute(
             &self,
-            req: &crate::transport::HttpRequest,
-        ) -> MnResult<crate::transport::HttpResponse> {
+            req: &crate::compshare::transport::HttpRequest,
+        ) -> MnResult<crate::compshare::transport::HttpResponse> {
             let body = req.body.clone().unwrap_or_default();
             // 从请求体里取出 Action。
             //
@@ -1168,7 +1173,7 @@ mod tests {
                         code: "unrouted".to_string(),
                         message: format!("测试未注册 Action `{action}` 的响应"),
                     })?;
-            Ok(crate::transport::HttpResponse::new(200, resp))
+            Ok(crate::compshare::transport::HttpResponse::new(200, resp))
         }
     }
 
@@ -1375,7 +1380,7 @@ mod tests {
         )]);
         let d = driver(vendor);
         let e = d.create("4090/1x16c/64g", None).unwrap_err();
-        assert!(crate::client::is_capacity_shortage(&e), "{e}");
+        assert!(crate::compshare::client::is_capacity_shortage(&e), "{e}");
         // 无库存时绝不能发创建请求（否则会被厂商计费）
         assert!(
             !d.client().transport().called("CreateCompShareInstance"),

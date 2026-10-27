@@ -47,6 +47,7 @@ pub mod plan;
 pub mod policy;
 pub mod source;
 pub mod time;
+pub mod transport;
 
 pub use error::{MnError, MnResult};
 

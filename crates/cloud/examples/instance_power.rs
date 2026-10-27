@@ -3,8 +3,8 @@
 //! ```bash
 //! export COMPSHARE_PUBLIC_KEY='...'
 //! export COMPSHARE_PRIVATE_KEY='...'
-//! cargo run -p mangosteen-backend --example instance_power -- start uhost-xxxx
-//! cargo run -p mangosteen-backend --example instance_power -- stop  uhost-xxxx
+//! cargo run -p mangosteen-cloud --example instance_power -- start uhost-xxxx
+//! cargo run -p mangosteen-cloud --example instance_power -- stop  uhost-xxxx
 //! ```
 //!
 //! ## 为什么不直接调 CLI
@@ -13,7 +13,7 @@
 //! 与 `describe_instances` / `destroy_instance` 同类，用于验证适配层。
 //! 正常业务路径是 `mangosteen deploy` / `mangosteen stop`。
 
-use mangosteen_backend::{
+use mangosteen_cloud::compshare::{
     CompshareClient, CompshareConfig, Credential, CurlTransport, DEFAULT_ENDPOINT,
 };
 

@@ -91,15 +91,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
-name = "mangosteen-backend"
-version = "0.1.0"
-dependencies = [
- "mangosteen-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "mangosteen-base"
 version = "0.1.0"
 dependencies = [
@@ -129,11 +120,11 @@ dependencies = [
 name = "mangosteen-cloud"
 version = "0.1.0"
 dependencies = [
- "mangosteen-backend",
  "mangosteen-core",
  "mangosteen-platform",
  "serde",
  "serde_json",
+ "sha2",
  "toml",
 ]
 

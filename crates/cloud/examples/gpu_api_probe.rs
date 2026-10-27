@@ -3,7 +3,7 @@
 //! ```bash
 //! export COMPSHARE_PUBLIC_KEY='...'
 //! export COMPSHARE_PRIVATE_KEY='...'
-//! cargo run -p mangosteen-backend --example gpu_api_probe
+//! cargo run -p mangosteen-cloud --example gpu_api_probe
 //! ```
 //!
 //! ## 这个示例只调用「不会改变资源」的接口
@@ -21,7 +21,7 @@
 //! 2. 参数编码是否被厂商接受（`RetCode == 0`）；
 //! 3. 响应字段名与单位是否与文档一致（尤其价格与内存的 MB/GB）。
 
-use mangosteen_backend::{
+use mangosteen_cloud::compshare::{
     CompshareClient, CompshareConfig, Credential, CurlTransport, DEFAULT_ENDPOINT,
 };
 
@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- 5. 多计费模式价格（验证 MB 单位与四种模式）----
     println!("=== 5. GetCompShareInstanceUserPrice（4090 / 1卡 / 16核 / 64GB）===");
-    match client.user_price(&mangosteen_backend::UserPriceRequest {
+    match client.user_price(&mangosteen_cloud::compshare::UserPriceRequest {
         gpu_type: "4090",
         gpu: 1,
         cpu: 16,

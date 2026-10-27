@@ -301,7 +301,6 @@ fn c2_platform_code_is_centralized() {
         "mangosteen-base",
         "mangosteen-session",
         "mangosteen-local",
-        "mangosteen-backend",
         "mangosteen-cloud",
         "mangosteen-gateway",
     ] {
@@ -499,18 +498,9 @@ fn c5_dependency_direction_is_top_down() {
             "mangosteen-local",
             &["mangosteen-core", "mangosteen-platform"],
         ),
-        // backend（厂商协议适配）只依赖 core：
-        // 它不认识本地引擎、不依赖其它云端实现，也不应依赖 platform
-        // （签名/参数编码是纯计算，没有平台差异）
-        ("mangosteen-backend", &["mangosteen-core"]),
         (
             "mangosteen-cloud",
-            &[
-                "mangosteen-core",
-                "mangosteen-platform",
-                // 特殊协议形态的厂商驱动由 backend 提供
-                "mangosteen-backend",
-            ],
+            &["mangosteen-core", "mangosteen-platform"],
         ),
         (
             "mangosteen-gateway",
@@ -543,7 +533,6 @@ fn c5_dependency_direction_is_top_down() {
         "mangosteen-base",
         "mangosteen-session",
         "mangosteen-local",
-        "mangosteen-backend",
         "mangosteen-cloud",
         "mangosteen-gateway",
         "mangosteen-cli",
@@ -562,48 +551,6 @@ fn c5_dependency_direction_is_top_down() {
             assert!(
                 !declared,
                 "C5 违反：`{crate_name}` 不得依赖 `{other}`（依赖方向必须自上而下）"
-            );
-        }
-    }
-}
-
-/// backend 必须保持「纯协议适配」定位：它只能被云端层引用，
-/// 不允许被网关/CLI 直接使用（否则会绕过驱动注册表）。
-#[test]
-fn c5_backend_is_only_reachable_through_cloud_layer() {
-    for crate_name in ["mangosteen-gateway", "mangosteen-cli", "mangosteen-base"] {
-        let manifest = crate_manifest(crate_name);
-        assert!(
-            !manifest.contains("mangosteen-backend"),
-            "C5 违反：`{crate_name}` 直接依赖 mangosteen-backend。\
-             厂商驱动必须经 mangosteen-cloud 的注册表统一加载。"
-        );
-        for (path, src) in crate_sources(crate_name) {
-            let code = strip_comments_and_strings(&src);
-            assert!(
-                !code.contains("mangosteen_backend::"),
-                "C5 违反：{} 直接引用 mangosteen_backend",
-                path.display()
-            );
-        }
-    }
-}
-
-/// backend 内部禁止出现平台分支：签名与参数编码是与 OS 无关的纯计算。
-#[test]
-fn c5_backend_has_no_platform_branches() {
-    for (path, src) in crate_sources("mangosteen-backend") {
-        let code = strip_comments_and_strings(&src);
-        for pat in [
-            "cfg(target_os",
-            "cfg!(target_os",
-            "cfg(unix)",
-            "cfg(windows)",
-        ] {
-            assert!(
-                !code.contains(pat),
-                "C5 违反：{} 出现平台分支 `{pat}`。backend 只做协议适配。",
-                path.display()
             );
         }
     }
@@ -814,7 +761,6 @@ fn workspace_contains_all_layers() {
         "mangosteen-base",
         "mangosteen-session",
         "mangosteen-local",
-        "mangosteen-backend",
         "mangosteen-cloud",
         "mangosteen-gateway",
         "mangosteen-cli",
@@ -849,7 +795,6 @@ fn no_unwrap_in_production_paths() {
         "mangosteen-platform",
         "mangosteen-base",
         "mangosteen-local",
-        "mangosteen-backend",
         "mangosteen-cloud",
         "mangosteen-gateway",
     ] {

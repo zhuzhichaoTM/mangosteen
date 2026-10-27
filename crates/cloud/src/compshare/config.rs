@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use mangosteen_core::{MnError, MnResult};
 
-use crate::client::DEFAULT_ENDPOINT;
+use crate::compshare::client::DEFAULT_ENDPOINT;
 
 /// 允许的计费模式（见厂商创建接口文档）。
 pub const CHARGE_TYPES: &[&str] = &["Month", "Day", "Postpay", "Spot"];

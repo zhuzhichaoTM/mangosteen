@@ -8,7 +8,7 @@
 //!
 //! 0. 若 `driver` 是**协议形态特殊**的服务商（当前为 `compshare`：
 //!    UCloud RPC + SHA1 签名，无法用字段映射表达）→ 转交
-//!    `mangosteen-backend` 构造专用驱动；
+//!    `cloud::compshare` 构造专用驱动；
 //! 1. 若配置带了 `profile` 段 → 用它构造 [`RestDriver`]（**配置路径**）；
 //! 2. 否则查内置 profile（autodl / ucloud / aliyun）→ 构造 [`RestDriver`]；
 //! 3. 都没有 → 记入 `skipped`，**不中断**其它服务商的加载。
@@ -79,13 +79,9 @@ fn build_one<F>(
 where
     F: Fn() -> Arc<dyn Transport + Send + Sync>,
 {
-    // 0. 协议形态特殊的服务商：转交 mangosteen-backend
-    //    · compshare：UCloud RPC + SHA1 签名（通用 REST profile 表达不了）
-    //    · autodl_pro：REST + Bearer，但库存/规格/SSH 语义都与通用 profile 不同
-    if mangosteen_backend::autodl::handles(&pc.driver) {
-        return build_autodl(name, pc, make_transport);
-    }
-    if mangosteen_backend::handles(&pc.driver) {
+    // 0. 优云智算：UCloud RPC + SHA1 签名（通用 REST profile 表达不了），
+    //    走 `compshare` 专用驱动。这是当前唯一内置、经验证的云厂商。
+    if crate::compshare::handles(&pc.driver) {
         return build_compshare(name, pc, make_transport);
     }
 
@@ -98,65 +94,6 @@ where
     // 3. 构造驱动
     let transport = make_transport();
     let driver = SharedRestDriver::from_shared(profile, creds, transport)?;
-    Ok(Box::new(driver))
-}
-
-/// 把本层的 [`Transport`] 适配成 `mangosteen-backend` 的 `Transport`。
-///
-/// 两个 crate 各自定义了同形状的传输抽象（都不愿为对方引入依赖），
-/// 这里做一次零成本桥接：只转换请求/响应结构，不复制任何逻辑。
-/// 好处是 `compshare` 驱动与其它驱动**共用同一套 curl 调用设施**。
-struct BackendTransport(Arc<dyn Transport + Send + Sync>);
-
-impl mangosteen_backend::Transport for BackendTransport {
-    fn execute(
-        &self,
-        req: &mangosteen_backend::HttpRequest,
-    ) -> MnResult<mangosteen_backend::HttpResponse> {
-        let converted = super::drivers::HttpRequest {
-            method: req.method.clone(),
-            url: req.url.clone(),
-            headers: req.headers.clone(),
-            body: req.body.clone(),
-        };
-        let resp = self.0.execute(&converted)?;
-        Ok(mangosteen_backend::HttpResponse::new(
-            resp.status,
-            resp.body,
-        ))
-    }
-}
-
-/// 构造 AutoDL Pro 驱动。
-///
-/// 凭证只有一段：开发者 Token，走 `secret`（推荐 `{ file = "..." }`），
-/// 与优云的「公钥 + 私钥」两段不同。
-fn build_autodl<F>(
-    name: &str,
-    pc: &ProviderConfig,
-    make_transport: &F,
-) -> MnResult<Box<dyn ProviderDriver>>
-where
-    F: Fn() -> Arc<dyn Transport + Send + Sync>,
-{
-    if pc.secret.is_none() {
-        return Err(MnError::config(
-            format!("providers.{name}.secret"),
-            "AutoDL 需要开发者 Token。推荐写成 secret = { file = \"...\" }，\
-             或 secret = { env = \"AUTODL_TOKEN\" }（控制台 → 设置 → 开发者 Token）",
-        ));
-    }
-    let token = pc.secret.resolve(mangosteen_platform::paths::real_env)?;
-    if token.trim().is_empty() {
-        return Err(MnError::config(
-            format!("providers.{name}.secret"),
-            "开发者 Token 为空",
-        ));
-    }
-    let config = mangosteen_backend::autodl::AutodlConfig::from_options(&pc.options)?;
-    let transport: Arc<dyn mangosteen_backend::Transport + Send + Sync> =
-        Arc::new(BackendTransport(make_transport()));
-    let driver = mangosteen_backend::autodl::make_driver(name, config, &token, transport)?;
     Ok(Box::new(driver))
 }
 
@@ -174,10 +111,8 @@ where
     F: Fn() -> Arc<dyn Transport + Send + Sync>,
 {
     let private_key = resolve_private_key(name, pc)?;
-    let transport: Arc<dyn mangosteen_backend::Transport + Send + Sync> =
-        Arc::new(BackendTransport(make_transport()));
-    let driver =
-        mangosteen_backend::build_from_options(name, &pc.options, &private_key, transport)?;
+    let transport: Arc<dyn crate::compshare::Transport + Send + Sync> = make_transport();
+    let driver = crate::compshare::build_from_options(name, &pc.options, &private_key, transport)?;
     Ok(Box::new(driver))
 }
 
@@ -302,23 +237,12 @@ pub fn diagnose(config: &Config) -> Vec<String> {
     for name in enabled {
         let pc = &config.providers[name];
 
-        // 协议特殊的服务商有单独的配置要求，单独诊断。
-        //
-        // 这两个驱动由 `mangosteen-backend` 提供，**没有** REST profile——
-        // 漏掉这个分流会让诊断输出「无内置 profile，将被跳过」这种
-        // 与事实相反的警告（实际能正常注册）。
-        if mangosteen_backend::autodl::handles(&pc.driver)
-            || mangosteen_backend::handles(&pc.driver)
-        {
-            let built = if mangosteen_backend::autodl::handles(&pc.driver) {
-                build_autodl(name, pc, &|| {
-                    Arc::new(CurlTransport::new(30)) as Arc<dyn Transport + Send + Sync>
-                })
-            } else {
-                build_compshare(name, pc, &|| {
-                    Arc::new(CurlTransport::new(30)) as Arc<dyn Transport + Send + Sync>
-                })
-            };
+        // 优云智算走专用驱动，**没有** REST profile——漏掉这个分流会让诊断
+        // 输出「无内置 profile，将被跳过」这种与事实相反的警告。
+        if crate::compshare::handles(&pc.driver) {
+            let built = build_compshare(name, pc, &|| {
+                Arc::new(CurlTransport::new(30)) as Arc<dyn Transport + Send + Sync>
+            });
             if let Err(e) = built {
                 out.push(format!("服务商 `{name}`：{e}"));
             }
@@ -399,158 +323,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn skips_disabled_providers() {
-        let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider("autodl", SecretRef::Inline("tok".into()), false),
-        );
-        let r = build_registry_with(&c, mock_factory());
-        assert!(r.registry.is_empty());
-        assert_eq!(r.skipped.len(), 1);
-        assert!(r.skipped[0].1.contains("未启用"));
-    }
-
-    #[test]
-    fn registers_enabled_builtin_provider() {
-        let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider("autodl", SecretRef::Inline("tok".into()), true),
-        );
-        let r = build_registry_with(&c, mock_factory());
-        assert_eq!(r.registry.len(), 1);
-        assert!(r.registry.contains("autodl"));
-        assert!(r.skipped.is_empty());
-    }
-
-    #[test]
-    fn multiple_providers_all_registered() {
-        let mut c = base_config();
-        for name in ["autodl", "ucloud"] {
-            c.providers.insert(
-                name.into(),
-                provider(name, SecretRef::Inline("tok".into()), true),
-            );
-        }
-        // 阿里云使用双凭证认证，需同时提供 access_key_id
-        let mut ali = provider("aliyun", SecretRef::Inline("secret".into()), true);
-        ali.options
-            .insert("access_key_id".into(), "LTAI-test".into());
-        c.providers.insert("aliyun".into(), ali);
-        let r = build_registry_with(&c, mock_factory());
-        assert_eq!(r.registry.len(), 3);
-        assert_eq!(r.registry.names(), vec!["aliyun", "autodl", "ucloud"]);
-    }
-
-    #[test]
-    fn missing_secret_is_skipped_not_fatal() {
-        let mut c = base_config();
-        c.providers
-            .insert("autodl".into(), provider("autodl", SecretRef::None, true));
-        c.providers.insert(
-            "ucloud".into(),
-            provider("ucloud", SecretRef::Inline("tok".into()), true),
-        );
-        let r = build_registry_with(&c, mock_factory());
-        // 一个失败不应影响另一个（容错要求）
-        assert_eq!(r.registry.len(), 1);
-        assert!(r.registry.contains("ucloud"));
-        assert_eq!(r.skipped.len(), 1);
-        assert_eq!(r.skipped[0].0, "autodl");
-        assert!(r.skipped[0].1.contains("凭证"));
-    }
-
-    #[test]
-    fn unknown_driver_is_skipped_with_reason() {
-        let mut c = base_config();
-        c.providers.insert(
-            "mystery".into(),
-            provider("mystery-cloud", SecretRef::Inline("tok".into()), true),
-        );
-        let r = build_registry_with(&c, mock_factory());
-        assert!(r.registry.is_empty());
-        assert!(r.skipped[0].1.contains("mystery-cloud"));
-    }
-
-    #[test]
-    fn env_secret_resolution() {
-        // 用真实过程环境：设置后应能解析
-        std::env::set_var("MANGOSTEEN_TEST_TOKEN", "env-token-value");
-        let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider(
-                "autodl",
-                SecretRef::Env("MANGOSTEEN_TEST_TOKEN".into()),
-                true,
-            ),
-        );
-        let r = build_registry_with(&c, mock_factory());
-        assert_eq!(r.registry.len(), 1, "skipped: {:?}", r.skipped);
-        std::env::remove_var("MANGOSTEEN_TEST_TOKEN");
-    }
-
-    #[test]
-    fn missing_env_secret_is_reported() {
-        let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider(
-                "autodl",
-                SecretRef::Env("MANGOSTEEN_ABSENT_TOKEN_XYZ".into()),
-                true,
-            ),
-        );
-        let r = build_registry_with(&c, mock_factory());
-        assert!(r.registry.is_empty());
-        assert!(r.skipped[0].1.contains("环境变量"), "got {:?}", r.skipped);
-    }
-
-    #[test]
-    fn diagnose_flags_no_providers() {
-        let c = base_config();
-        let d = diagnose(&c);
-        assert!(d[0].contains("未启用任何云服务商"));
-    }
-
-    #[test]
-    fn diagnose_flags_inline_secret() {
-        let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider("autodl", SecretRef::Inline("plain-text-key".into()), true),
-        );
-        let d = diagnose(&c);
-        assert!(d.iter().any(|s| s.contains("内联明文密钥")), "{d:?}");
-    }
-
-    #[test]
-    fn diagnose_flags_missing_credentials() {
-        let mut c = base_config();
-        c.providers
-            .insert("autodl".into(), provider("autodl", SecretRef::None, true));
-        let d = diagnose(&c);
-        assert!(d.iter().any(|s| s.contains("未配置")), "{d:?}");
-    }
-
-    #[test]
-    fn registry_drivers_are_usable() {
-        let mut c = base_config();
-        c.providers.insert(
-            "autodl".into(),
-            provider("autodl", SecretRef::Inline("tok".into()), true),
-        );
-        let r = build_registry_with(&c, mock_factory());
-        let driver = r.registry.get("autodl").unwrap();
-        // mock 返回空列表
-        assert!(driver.list_available_specs().unwrap().is_empty());
-        assert_eq!(driver.display_name(), "AutoDL");
-    }
-
-    // ---------------------------------------------------------- compshare 分流
-
     /// 构造一个 compshare 服务商配置。
     fn compshare_provider(secret: SecretRef, with_public_key: bool) -> ProviderConfig {
         let mut options = BTreeMap::new();
@@ -572,7 +344,123 @@ mod tests {
     }
 
     #[test]
-    fn compshare_is_registered_via_backend() {
+    fn skips_disabled_providers() {
+        let mut c = base_config();
+        c.providers.insert(
+            "compshare".into(),
+            compshare_provider(SecretRef::Inline("sk".into()), true),
+        );
+        c.providers.get_mut("compshare").unwrap().enabled = false;
+        let r = build_registry_with(&c, mock_factory());
+        assert!(r.registry.is_empty());
+        assert_eq!(r.skipped.len(), 1);
+        assert!(r.skipped[0].1.contains("未启用"));
+    }
+
+    #[test]
+    fn registers_enabled_compshare_provider() {
+        let mut c = base_config();
+        c.providers.insert(
+            "compshare".into(),
+            compshare_provider(SecretRef::Inline("sk".into()), true),
+        );
+        let r = build_registry_with(&c, mock_factory());
+        assert_eq!(r.registry.len(), 1, "skipped: {:?}", r.skipped);
+        assert!(r.registry.contains("compshare"));
+    }
+
+    #[test]
+    fn missing_secret_is_skipped_not_fatal() {
+        let mut c = base_config();
+        c.providers.insert(
+            "compshare".into(),
+            compshare_provider(SecretRef::None, true),
+        );
+        c.providers.insert(
+            "other".into(),
+            provider("other-rest", SecretRef::Inline("tok".into()), true),
+        );
+        let r = build_registry_with(&c, mock_factory());
+        // 一个失败不应影响另一个（容错要求）；`other-rest` 无内置 profile 会被跳过
+        assert_eq!(r.registry.len(), 0);
+        assert_eq!(r.skipped.len(), 2);
+        assert!(r.skipped.iter().any(|(n, _)| n == "compshare"));
+        assert!(r.skipped[0].1.contains("私钥") || r.skipped[1].1.contains("私钥"));
+    }
+
+    #[test]
+    fn unknown_driver_is_skipped_with_reason() {
+        let mut c = base_config();
+        c.providers.insert(
+            "mystery".into(),
+            provider("mystery-cloud", SecretRef::Inline("tok".into()), true),
+        );
+        let r = build_registry_with(&c, mock_factory());
+        assert!(r.registry.is_empty());
+        assert!(r.skipped[0].1.contains("mystery-cloud"));
+    }
+
+    #[test]
+    fn env_secret_resolution() {
+        std::env::set_var("MANGOSTEEN_TEST_TOKEN", "env-token-value");
+        let mut c = base_config();
+        c.providers.insert(
+            "compshare".into(),
+            compshare_provider(SecretRef::Env("MANGOSTEEN_TEST_TOKEN".into()), true),
+        );
+        let r = build_registry_with(&c, mock_factory());
+        assert_eq!(r.registry.len(), 1, "skipped: {:?}", r.skipped);
+        std::env::remove_var("MANGOSTEEN_TEST_TOKEN");
+    }
+
+    #[test]
+    fn missing_env_secret_is_reported() {
+        let mut c = base_config();
+        c.providers.insert(
+            "compshare".into(),
+            compshare_provider(SecretRef::Env("MANGOSTEEN_ABSENT_TOKEN_XYZ".into()), true),
+        );
+        let r = build_registry_with(&c, mock_factory());
+        assert!(r.registry.is_empty());
+        assert!(r.skipped[0].1.contains("环境变量"), "got {:?}", r.skipped);
+    }
+
+    #[test]
+    fn diagnose_flags_no_providers() {
+        let c = base_config();
+        let d = diagnose(&c);
+        assert!(d[0].contains("未启用任何云服务商"));
+    }
+
+    #[test]
+    fn diagnose_flags_inline_secret() {
+        let mut c = base_config();
+        c.providers.insert(
+            "compshare".into(),
+            compshare_provider(SecretRef::Inline("plain-text-key".into()), true),
+        );
+        let d = diagnose(&c);
+        assert!(d.iter().any(|s| s.contains("内联明文密钥")), "{d:?}");
+    }
+
+    #[test]
+    fn diagnose_flags_missing_credentials() {
+        let mut c = base_config();
+        c.providers.insert(
+            "compshare".into(),
+            compshare_provider(SecretRef::None, true),
+        );
+        let d = diagnose(&c);
+        assert!(
+            d.iter().any(|s| s.contains("未配置") || s.contains("私钥")),
+            "{d:?}"
+        );
+    }
+
+    // ---------------------------------------------------------- compshare 分流
+
+    #[test]
+    fn compshare_is_registered_via_driver() {
         let mut c = base_config();
         c.providers.insert(
             "compshare".into(),
@@ -634,22 +522,21 @@ mod tests {
             compshare_provider(SecretRef::None, true), // 缺私钥 → 失败
         );
         c.providers.insert(
-            "autodl".into(),
-            provider("autodl", SecretRef::Inline("tok".into()), true),
+            "other".into(),
+            provider("other-rest", SecretRef::Inline("tok".into()), true),
         );
         let r = build_registry_with(&c, mock_factory());
-        assert_eq!(r.registry.len(), 1);
-        assert!(r.registry.contains("autodl"));
-        assert_eq!(r.skipped.len(), 1);
-        assert_eq!(r.skipped[0].0, "compshare");
+        assert!(r.registry.is_empty());
+        assert_eq!(r.skipped.len(), 2);
+        assert!(r.skipped.iter().any(|(n, _)| n == "compshare"));
     }
 
     #[test]
     fn compshare_driver_name_is_not_confused_with_ucloud_profile() {
-        // `ucloud` 走通用 REST profile，`compshare` 走 backend，两者不能混
-        assert!(mangosteen_backend::handles("compshare"));
-        assert!(!mangosteen_backend::handles("ucloud"));
-        assert!(builtin_profile("ucloud").is_some());
+        // 配置 profile 与 compshare 专用驱动是两条路径，不能混淆
+        assert!(crate::compshare::handles("compshare"));
+        assert!(!crate::compshare::handles("ucloud"));
+        assert!(builtin_profile("ucloud").is_none());
     }
 
     #[test]

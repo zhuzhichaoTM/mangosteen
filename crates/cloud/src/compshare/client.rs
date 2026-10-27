@@ -6,7 +6,7 @@
 //!
 //! 本模块只做三件事：**拼参数、签名、把响应解析成结构体**。
 //! 它不决定「该不该创建实例」「失败要不要重试」——那是上层
-//! （[`crate::driver`] 与网关的调度决策器）的事。
+//! （[`crate::compshare::driver`] 与网关的调度决策器）的事。
 //!
 //! 这样拆分的好处：协议层可以对着文档逐条核对，业务策略可以独立演进。
 //!
@@ -25,17 +25,17 @@
 use mangosteen_core::{MnError, MnResult};
 use serde::de::DeserializeOwned;
 
-use crate::model::{
+use crate::compshare::model::{
     ActionResponse, AvailableTypesResponse, BandwidthSwitchResponse, CapacityResponse,
     CreateInstanceResponse, DescribeInstancesResponse, ImagesResponse, InstancePortsResponse,
     MachineTypeFamiliesResponse, MonitorResponse, NetOptimizerResponse, PriceResponse,
     ProjectListResponse, RefundPriceResponse, SoftwarePortResponse, SoftwareUrlResponse,
     UpgradePriceResponse, UserPriceRequest, ZoneInfo, ZonesResponse,
 };
-use crate::params::Params;
-use crate::retcode::{provider_error, ApiFailure};
-use crate::sign::Credential;
-use crate::transport::{HttpRequest, HttpResponse, Transport};
+use crate::compshare::params::Params;
+use crate::compshare::retcode::{provider_error, ApiFailure};
+use crate::compshare::sign::Credential;
+use crate::compshare::transport::{HttpRequest, HttpResponse, Transport};
 
 /// 厂商默认 API 入口。
 pub const DEFAULT_ENDPOINT: &str = "https://api.compshare.cn";
@@ -152,7 +152,7 @@ impl<T: Transport> CompshareClient<T> {
     /// （不传即查询全部地域），若强制非空就会逼调用方编一个假值，
     /// 而厂商会直接回 `Params [Region] not available`。
     ///
-    /// 「部署必须指定地域」这类业务约束由 [`crate::CompshareConfig`] 负责，
+    /// 「部署必须指定地域」这类业务约束由 [`super::CompshareConfig`] 负责，
     /// 协议层不应越界。
     pub fn new(
         endpoint: impl Into<String>,
@@ -316,7 +316,7 @@ impl<T: Transport> CompshareClient<T> {
     /// | 不传 | `210 Missing params [UHostIds]` |
     ///
     /// 只有 `application/json` + 真正的 JSON 数组能成功，且签名时数组
-    /// 按「元素直接拼接」计算（见 [`crate::sign::signature_of_json`]）。
+    /// 按「元素直接拼接」计算（见 [`crate::compshare::sign::signature_of_json`]）。
     pub fn call_json(
         &self,
         action: &str,
@@ -353,7 +353,8 @@ impl<T: Transport> CompshareClient<T> {
             .entry("PublicKey".to_string())
             .or_insert_with(|| serde_json::Value::String(self.credential.public_key().to_string()));
 
-        let signature = crate::sign::signature_of_json(self.credential.private_key(), &fields);
+        let signature =
+            crate::compshare::sign::signature_of_json(self.credential.private_key(), &fields);
         fields.insert(
             "Signature".to_string(),
             serde_json::Value::String(signature),
@@ -1048,7 +1049,7 @@ impl<T: Transport> CompshareClient<T> {
 /// 集中在这里而不是每个调用点各写一遍：漏一处就是
 /// 「密码明明给了却登录失败」，而且错得很隐蔽（厂商只回「参数非法」）。
 fn base64_encode(plain: &str) -> String {
-    crate::base64::encode(plain.as_bytes())
+    crate::compshare::base64::encode(plain.as_bytes())
 }
 
 /// 从响应里取 `RetCode`，同时兼容数字与字符串两种形式。
@@ -1077,7 +1078,7 @@ pub fn is_capacity_shortage(err: &MnError) -> bool {
         MnError::Provider { code, message, .. } => {
             let parsed = code.parse::<i64>().unwrap_or(0);
             matches!(
-                crate::retcode::classify(parsed, message),
+                crate::compshare::retcode::classify(parsed, message),
                 ApiFailure::ResourceNotEnough
             )
         }
@@ -1088,7 +1089,7 @@ pub fn is_capacity_shortage(err: &MnError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::MockTransport;
+    use crate::compshare::transport::MockTransport;
 
     fn cred() -> Credential {
         Credential::new("test-public-key", "test-private-key").unwrap()
@@ -1408,11 +1409,14 @@ mod tests {
             ),
             ("UHostIds".to_string(), serde_json::json!(["u-1", "u-2"])),
         ]);
-        let got = crate::sign::signature_of_json("sk", &fields);
+        let got = crate::compshare::sign::signature_of_json("sk", &fields);
         // 手工按协议算：键有序 Action/PublicKey/Region/UHostIds，数组元素直接拼接
         let expect_src =
             "ActionGetCompShareInstanceMonitorPublicKeypkRegioncn-wlcbUHostIdsu-1u-2sk";
-        assert_eq!(got, crate::sha1::hex_digest(expect_src.as_bytes()));
+        assert_eq!(
+            got,
+            crate::compshare::sha1::hex_digest(expect_src.as_bytes())
+        );
 
         // 对照：错误口径（逗号分隔 / JSON 字面量）必须得到不同结果，
         // 否则上面的断言无法证明「拼接方式」被正确实现
@@ -1422,7 +1426,10 @@ mod tests {
             "UHostIds".to_string(),
             serde_json::Value::String("u-1,u-2".to_string()),
         );
-        assert_ne!(alt1, crate::sign::signature_of_json("sk", &wrong));
+        assert_ne!(
+            alt1,
+            crate::compshare::sign::signature_of_json("sk", &wrong)
+        );
     }
 
     #[test]

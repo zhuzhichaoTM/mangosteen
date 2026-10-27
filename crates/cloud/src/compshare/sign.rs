@@ -20,13 +20,13 @@
 //! 2. **签名用原始值**，URL 转义只在构造请求体时做；两者混用会得到不同签名。
 //! 3. **拼接串末尾**紧跟 `PrivateKey`，中间没有分隔符。
 //!
-//! 以上三点由 [`crate::params`] 的扁平化逻辑与 [`official_test_vector`] 共同保证。
+//! 以上三点由 [`crate::compshare::params`] 的扁平化逻辑与 [`official_test_vector`] 共同保证。
 
 use std::collections::BTreeMap;
 
 use mangosteen_core::{MnError, MnResult};
 
-use crate::sha1;
+use crate::compshare::sha1;
 
 /// UCloud 风格凭证：公钥（AccessKey ID）+ 私钥（AccessKey Secret）。
 #[derive(Clone)]

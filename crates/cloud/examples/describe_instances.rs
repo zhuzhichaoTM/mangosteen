@@ -8,7 +8,7 @@
 //! # 可选：限定地域/可用区。不设则查询全部地域（厂商支持不传）
 //! export COMPSHARE_REGION='cn-wlcb'
 //! export COMPSHARE_ZONE='cn-wlcb-01'
-//! cargo run -p mangosteen-backend --example describe_instances
+//! cargo run -p mangosteen-cloud --example describe_instances
 //! ```
 //!
 //! ## 凭证为什么只从环境变量读
@@ -28,8 +28,10 @@
 
 use std::collections::BTreeMap;
 
-use mangosteen_backend::client::Scope;
-use mangosteen_backend::{mapping, CompshareClient, CompshareConfig, Credential, CurlTransport};
+use mangosteen_cloud::compshare::client::Scope;
+use mangosteen_cloud::compshare::{
+    mapping, CompshareClient, CompshareConfig, Credential, CurlTransport,
+};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -40,7 +42,7 @@ fn env(name: &str) -> Option<String> {
 /// 为什么需要这一步：`UHostSet: []` 只能证明「鉴权通过」，
 /// 却完全没走到字段解析、单位换算、状态归一化这些真正容易出错的地方。
 /// 可用区、机型、镜像三个接口必然有数据，正好用来验证解析链路。
-fn probe_reference_data<T: mangosteen_backend::Transport>(
+fn probe_reference_data<T: mangosteen_cloud::compshare::Transport>(
     client: &CompshareClient<T>,
     region: &str,
     zone: &str,
@@ -94,7 +96,7 @@ fn probe_reference_data<T: mangosteen_backend::Transport>(
     if !probe_region.is_empty() {
         // 用一个临时客户端把 region/zone 绑到探测到的可用区
         let prober = CompshareClient::new(
-            mangosteen_backend::DEFAULT_ENDPOINT,
+            mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
             // 复用同一份凭证配置（重新构造一个轻量客户端）
             Credential::new(
                 std::env::var("COMPSHARE_PUBLIC_KEY").unwrap_or_default(),
@@ -212,7 +214,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let all_regions = region.is_empty();
 
     println!("=== 连接信息 ===");
-    println!("API 入口 : {}", mangosteen_backend::DEFAULT_ENDPOINT);
+    println!(
+        "API 入口 : {}",
+        mangosteen_cloud::compshare::DEFAULT_ENDPOINT
+    );
     println!("凭证     : {}", credential.redacted());
     println!(
         "查询范围 : {}",
@@ -229,7 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // CompshareClient 的 region/zone 允许为空，语义是「不注入该参数」
     // （DescribeCompShareInstance 的 Region/Zone 本身可选）。
     let client = CompshareClient::new(
-        mangosteen_backend::DEFAULT_ENDPOINT,
+        mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
         credential,
         CurlTransport::new(30),
         &region,
@@ -245,7 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    let mut params = mangosteen_backend::Params::new();
+    let mut params = mangosteen_cloud::compshare::Params::new();
     params.set_i64("Limit", i64::from(limit));
     params.set_i64("Offset", i64::from(offset));
     // 显式传 Region/Zone（仅当用户指定），走 Scope::None 以保留「不传=全地域」语义
@@ -315,7 +320,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let instances: Vec<_> = uhost_set
         .iter()
-        .filter_map(|v| serde_json::from_value::<mangosteen_backend::UHost>(v.clone()).ok())
+        .filter_map(|v| {
+            serde_json::from_value::<mangosteen_cloud::compshare::UHost>(v.clone()).ok()
+        })
         .map(|u| (mapping::to_instance("compshare", &u, ""), u))
         .collect();
 
@@ -502,10 +509,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== 现有实例的规格 ID（形如 GpuType/卡数x核数/内存GB，可用于对比选点） ===");
     let mut seen: BTreeMap<String, String> = BTreeMap::new();
     for (_, u) in &instances {
-        let id = mangosteen_backend::spec_id(&u.gpu_type, u.gpu, u.cpu, u.memory_mb / 1024);
+        let id =
+            mangosteen_cloud::compshare::spec_id(&u.gpu_type, u.gpu, u.cpu, u.memory_mb / 1024);
         seen.insert(id.clone(), format!("{} 台在册", 1));
         // 可直接用 parse_spec_id 反向校验格式
-        if let Ok((g, k, c, m)) = mangosteen_backend::parse_spec_id(&id) {
+        if let Ok((g, k, c, m)) = mangosteen_cloud::compshare::parse_spec_id(&id) {
             println!("  {id}   → GpuType={g} 卡数={k} 核数={c} 内存={m}GB");
         }
     }

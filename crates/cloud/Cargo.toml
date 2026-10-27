@@ -11,7 +11,7 @@ repository.workspace = true
 [dependencies]
 mangosteen-core = { workspace = true }
 mangosteen-platform = { workspace = true }
-mangosteen-backend = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 
 use mangosteen_core::{MnError, MnResult};
 
-use crate::sign::{encode_f64, encode_value_bool};
+use crate::compshare::sign::{encode_f64, encode_value_bool};
 
 /// 待签名/待发送的参数集合（已扁平化）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn signature_uses_raw_values_not_escaped() {
-        use crate::sign::{signature_of, Credential};
+        use crate::compshare::sign::{signature_of, Credential};
         let cred = Credential::new("pk", "sk").unwrap();
         let mut p = Params::action("X");
         p.set("Name", "a b");

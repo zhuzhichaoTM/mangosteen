@@ -19,7 +19,7 @@ use mangosteen_core::cloud::{
     NetworkEndpoint, PriceQuote,
 };
 
-use crate::model::{state, AvailableInstanceType, GraphicsMemory, PriceDetail, UHost};
+use crate::compshare::model::{state, AvailableInstanceType, GraphicsMemory, PriceDetail, UHost};
 
 /// 单位换算（单一实现点）。
 pub mod units {
@@ -266,8 +266,10 @@ pub fn is_linux_image(name: &str, os_hint: &str) -> bool {
 ///
 /// 刻意**不**回退到「随便一个可用镜像」：开出一台 Windows 实例
 /// 既不能 SSH 也不能跑推理，纯属浪费计费时间。
-pub fn pick_linux_image(images: &[crate::model::ImageInfo]) -> Option<&crate::model::ImageInfo> {
-    let available: Vec<&crate::model::ImageInfo> = images
+pub fn pick_linux_image(
+    images: &[crate::compshare::model::ImageInfo],
+) -> Option<&crate::compshare::model::ImageInfo> {
+    let available: Vec<&crate::compshare::model::ImageInfo> = images
         .iter()
         .filter(|i| i.status.eq_ignore_ascii_case("Available"))
         .collect();
@@ -322,8 +324,8 @@ pub fn percent_to_ratio(raw: f64) -> f64 {
 ///    另一块空转时，用户关心的是「有没有卡被打满」，取平均会掩盖瓶颈。
 /// 2. **最新时间戳取所有指标的最大值**：各指标上传有先后，
 ///    取最大能反映「这份快照有多新」，避免用旧指标的时间冒充整体时间。
-pub fn to_instance_metrics(m: &crate::model::MonitorInstance) -> InstanceMetrics {
-    use crate::model::metric;
+pub fn to_instance_metrics(m: &crate::compshare::model::MonitorInstance) -> InstanceMetrics {
+    use crate::compshare::model::metric;
 
     let mut out = InstanceMetrics {
         instance_id: m.id.clone(),
@@ -638,7 +640,7 @@ pub fn vendor_state_constants() -> [&'static str; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{
+    use crate::compshare::model::{
         IpInfo, MonitorInstance, MonitorMessages, MonitorMetric, MonitorResult, MonitorValue,
     };
 
@@ -992,7 +994,7 @@ mod tests {
 
     #[test]
     fn pick_linux_image_prefers_ubuntu_and_skips_windows() {
-        use crate::model::ImageInfo;
+        use crate::compshare::model::ImageInfo;
         let mk = |id: &str, name: &str, status: &str| ImageInfo {
             id: id.into(),
             name: name.into(),

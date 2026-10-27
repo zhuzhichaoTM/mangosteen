@@ -5,7 +5,7 @@
 //! ```bash
 //! export COMPSHARE_PUBLIC_KEY='...'
 //! export COMPSHARE_PRIVATE_KEY='...'
-//! cargo run -p mangosteen-backend --example destroy_instance -- uhost-xxxx
+//! cargo run -p mangosteen-cloud --example destroy_instance -- uhost-xxxx
 //! ```
 //!
 //! ## 为什么需要这个示例
@@ -14,7 +14,7 @@
 //! 运行中的实例必须先关机、等它真的变成 `Stopped`，才能删除。
 //!
 //! 这个「先关机再删除」的补偿逻辑已经封装在
-//! [`mangosteen_backend::CompshareDriver::destroy`]（`ProviderDriver` 实现）里，
+//! [`mangosteen_cloud::compshare::CompshareDriver::destroy`]（`ProviderDriver` 实现）里，
 //! 本示例只是把它暴露成一个可执行的命令行工具。
 //!
 //! ## 费用安全
@@ -25,7 +25,7 @@
 
 use std::time::Instant;
 
-use mangosteen_backend::{CompshareClient, Credential, CurlTransport};
+use mangosteen_cloud::compshare::{CompshareClient, Credential, CurlTransport};
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 先查实例属于哪个可用区：删除接口需要 Region/Zone
     let probe = CompshareClient::new(
-        mangosteen_backend::DEFAULT_ENDPOINT,
+        mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
         credential.clone(),
         CurlTransport::new(30),
         "",
@@ -52,11 +52,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw = probe.call(
         "DescribeCompShareInstance",
         {
-            let mut p = mangosteen_backend::Params::new();
+            let mut p = mangosteen_cloud::compshare::Params::new();
             p.set_list("UHostIds", std::slice::from_ref(&id));
             p
         },
-        mangosteen_backend::client::Scope::None,
+        mangosteen_cloud::compshare::client::Scope::None,
     )?;
     let arr = raw
         .get("UHostSet")
@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let client = CompshareClient::new(
-        mangosteen_backend::DEFAULT_ENDPOINT,
+        mangosteen_cloud::compshare::DEFAULT_ENDPOINT,
         credential,
         CurlTransport::new(40),
         &region,
