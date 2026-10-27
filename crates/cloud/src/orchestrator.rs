@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use mangosteen_core::cloud::{AvailableSpec, DriverRegistry, Instance, InstanceState};
 use mangosteen_core::net::TunnelSpec;
-use mangosteen_core::plan::CloudPlan;
+use mangosteen_core::plan::{CloudPlan, EngineLaunchConfig};
 use mangosteen_core::policy::{NodeSelector, ScoredCandidate, SelectionConstraints};
 use mangosteen_core::{MnError, MnResult};
 
@@ -322,6 +322,7 @@ impl CloudOrchestrator {
         &mut self,
         constraints: &SelectionConstraints,
         plan: &CloudPlan,
+        launch: &EngineLaunchConfig,
     ) -> MnResult<Provisioned> {
         let (_best, ranked, _all) = self.pick(constraints)?;
         let ordered: Vec<CreateCandidate> = ranked
@@ -340,7 +341,14 @@ impl CloudOrchestrator {
         )?;
 
         let driver = self.registry.get(&provider)?;
-        finish_provision(driver, instance, plan, &mut self.tunnels, &self.config)
+        finish_provision(
+            driver,
+            instance,
+            plan,
+            launch,
+            &mut self.tunnels,
+            &self.config,
+        )
     }
 
     /// 按给定顺序逐个尝试创建，直到有一台进入 `Running`。
@@ -563,7 +571,8 @@ impl CloudOrchestrator {
         &self,
         provider: &str,
         instance_id: &str,
-        plan: &CloudPlan,
+        _plan: &CloudPlan,
+        launch: &EngineLaunchConfig,
     ) -> MnResult<()> {
         let target = self.service_target(provider, instance_id)?;
         let workdir = self.config.remote_workdir.trim_end_matches('/').to_string();
@@ -583,7 +592,7 @@ impl CloudOrchestrator {
                 ),
             });
         }
-        crate::remote::start_llama_server(&target, &bin, &plan.engine_args(), &workdir)
+        crate::remote::start_llama_server(&target, &bin, &launch.args, &workdir)
     }
 
     /// 隧道管理器（可变借用，用于关闭全部隧道）。
@@ -728,6 +737,7 @@ fn finish_provision(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
     instance: Instance,
     plan: &CloudPlan,
+    launch: &EngineLaunchConfig,
     tunnels: &mut TunnelManager,
     config: &OrchestratorConfig,
 ) -> MnResult<Provisioned> {
@@ -814,7 +824,7 @@ fn finish_provision(
 
     if plan.remote_model.is_none() {
         // 权重准备 + 起 llama-server，全部走 ssh（不依赖隧道）
-        if let Err(e) = bootstrap_llama(&target, plan, config) {
+        if let Err(e) = bootstrap_llama(&target, plan, launch, config) {
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
@@ -889,6 +899,7 @@ fn finish_provision(
 fn bootstrap_llama(
     target: &crate::remote::SshTarget,
     plan: &CloudPlan,
+    launch: &EngineLaunchConfig,
     config: &OrchestratorConfig,
 ) -> MnResult<()> {
     let workdir = config.remote_workdir.trim_end_matches('/').to_string();
@@ -927,7 +938,7 @@ fn bootstrap_llama(
 
     // ---- 3. 备好 llama-server 并起服务 ----
     let bin = crate::remote::ensure_llama_server(target, &workdir, &config.llama_server_url)?;
-    crate::remote::start_llama_server(target, &bin, &plan.engine_args(), &workdir)?;
+    crate::remote::start_llama_server(target, &bin, &launch.args, &workdir)?;
     Ok(())
 }
 
@@ -1504,7 +1515,11 @@ mod tests {
         let mut o = orchestrator(vec![Box::new(d)]);
 
         let e = o
-            .provision(&SelectionConstraints::default(), &plan())
+            .provision(
+                &SelectionConstraints::default(),
+                &plan(),
+                &EngineLaunchConfig::default(),
+            )
             .unwrap_err();
         let msg = e.to_string();
         // 失败信息里必须包含回滚结果
@@ -1530,7 +1545,11 @@ mod tests {
         let mut o = orchestrator(vec![Box::new(d)]);
 
         let e = o
-            .provision(&SelectionConstraints::default(), &plan())
+            .provision(
+                &SelectionConstraints::default(),
+                &plan(),
+                &EngineLaunchConfig::default(),
+            )
             .unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("手工处理"), "必须提示人工介入：{msg}");
@@ -1549,7 +1568,11 @@ mod tests {
         let mut o = orchestrator(vec![Box::new(d)]);
 
         let e = o
-            .provision(&SelectionConstraints::default(), &plan())
+            .provision(
+                &SelectionConstraints::default(),
+                &plan(),
+                &EngineLaunchConfig::default(),
+            )
             .unwrap_err();
         assert!(e.to_string().contains("容量不足"), "got {e}");
         let c = calls.lock().unwrap().clone();
@@ -1565,7 +1588,11 @@ mod tests {
         let mut o = orchestrator(vec![Box::new(d)]);
 
         let e = o
-            .provision(&SelectionConstraints::default(), &plan())
+            .provision(
+                &SelectionConstraints::default(),
+                &plan(),
+                &EngineLaunchConfig::default(),
+            )
             .unwrap_err();
         assert!(e.to_string().contains("SSH"), "got {e}");
         // 拿不到 SSH 也必须销毁实例，避免白花钱
@@ -1583,7 +1610,11 @@ mod tests {
         let calls = d.calls.clone();
         let mut o = orchestrator(vec![Box::new(d)]);
         let e = o
-            .provision(&SelectionConstraints::default(), &plan())
+            .provision(
+                &SelectionConstraints::default(),
+                &plan(),
+                &EngineLaunchConfig::default(),
+            )
             .unwrap_err();
         assert!(
             e.to_string().contains("未进入 Running") || e.to_string().contains("回滚"),

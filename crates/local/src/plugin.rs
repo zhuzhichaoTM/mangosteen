@@ -33,10 +33,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mangosteen_core::config::InferenceEngine;
+use mangosteen_core::plan::EngineLaunchConfig;
 use mangosteen_core::plan::LocalPlan;
 use mangosteen_core::MnResult;
 
 use crate::engine::{EngineHandle, LlamaCppEngine, OllamaEngine};
+use crate::llama_args::llama_cpp_args;
 
 /// 一个推理引擎插件。
 ///
@@ -51,6 +53,11 @@ pub trait EnginePlugin: std::fmt::Debug + Send + Sync {
     /// `ready_timeout` 是等待就绪的上限；实现可以忽略它
     /// （例如复用常驻服务时无需等待）。
     fn launch(&self, plan: &LocalPlan, ready_timeout: Duration) -> MnResult<EngineHandle>;
+
+    /// 为目标节点生成标准化进程启动配置。
+    ///
+    /// 实现负责引擎专属 flags；调用方只指定绑定地址/端口，不解释配置内容。
+    fn launch_config(&self, plan: &LocalPlan, bind_host: &str, port: u16) -> EngineLaunchConfig;
 
     /// 探活一个**已在运行**的实例。
     ///
@@ -75,7 +82,18 @@ impl EnginePlugin for LlamaCppEngine {
     }
 
     fn launch(&self, plan: &LocalPlan, ready_timeout: Duration) -> MnResult<EngineHandle> {
-        LlamaCppEngine::launch(self, plan, ready_timeout)
+        LlamaCppEngine::launch(
+            self,
+            plan,
+            llama_cpp_args(plan, &plan.host, plan.port),
+            ready_timeout,
+        )
+    }
+
+    fn launch_config(&self, plan: &LocalPlan, bind_host: &str, port: u16) -> EngineLaunchConfig {
+        EngineLaunchConfig {
+            args: llama_cpp_args(plan, bind_host, port),
+        }
     }
 
     fn probe(&self, plan: &LocalPlan) -> bool {
@@ -104,6 +122,10 @@ impl EnginePlugin for OllamaEngine {
         // Ollama 认它自己库里的模型名，不认我们的 .gguf 路径。
         let name = model_name_for_ollama(&plan.model_path);
         self.attach(&name)
+    }
+
+    fn launch_config(&self, _plan: &LocalPlan, _bind_host: &str, _port: u16) -> EngineLaunchConfig {
+        EngineLaunchConfig::default()
     }
 
     fn probe(&self, _plan: &LocalPlan) -> bool {

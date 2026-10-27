@@ -13,6 +13,16 @@ use serde::{Deserialize, Serialize};
 use crate::estimate::{Assessment, KvCacheType, Placement};
 use crate::model::ModelSpec;
 
+/// 推理引擎的标准化启动配置。
+///
+/// 调度与节点配置层只传递配置，不解释引擎参数；具体 flags 由 `EnginePlugin`
+/// 生成，执行层将参数原样传给目标引擎。云端与本地共用此契约。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineLaunchConfig {
+    /// 已由对应引擎插件生成的进程参数。
+    pub args: Vec<String>,
+}
+
 /// 算力来源。调度决策器的核心输出，也是一切审计日志的分组维度。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -43,8 +53,7 @@ impl ComputeOrigin {
 
 /// 本地部署参数集合，直接映射为 llama-server 命令行。
 ///
-/// 字段与 llama.cpp 参数的对应关系写在每个字段的文档上，
-/// 修改此结构必须同步 [`crate::plan::LocalPlan::to_engine_args`] 与单测。
+/// 字段与通用部署意图的对应关系写在每个字段的文档上。引擎专属参数由插件生成。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalPlan {
     /// GGUF 模型绝对路径
@@ -125,42 +134,8 @@ impl LocalPlan {
         }
     }
 
-    /// 生成 llama-server 参数列表（不含二进制路径）。
+    /// 参数顺序由对应引擎插件定义；部署意图仅保留数据字段。
     ///
-    /// 参数顺序固定，便于快照测试与日志对比。
-    pub fn to_engine_args(&self) -> Vec<String> {
-        let mut a = vec![
-            "--model".to_string(),
-            self.model_path.clone(),
-            "--ctx-size".to_string(),
-            self.context_size.to_string(),
-            "--threads".to_string(),
-            self.threads.to_string(),
-            "--batch-size".to_string(),
-            self.batch_size.to_string(),
-            "--n-gpu-layers".to_string(),
-            self.gpu_layers.to_string(),
-            "--cache-type-k".to_string(),
-            self.kv_cache_type_k.as_cli_value().to_string(),
-            "--cache-type-v".to_string(),
-            self.kv_cache_type_v.as_cli_value().to_string(),
-            "--host".to_string(),
-            self.host.clone(),
-            "--port".to_string(),
-            self.port.to_string(),
-        ];
-        if self.flash_attention {
-            a.push("--flash-attn".to_string());
-        }
-        if self.use_mmap {
-            a.push("--mmap".to_string());
-        }
-        if self.use_mlock {
-            a.push("--mlock".to_string());
-        }
-        a
-    }
-
     /// 该方案是否完全驻显存。
     pub fn is_full_gpu(&self, total_layers: u32) -> bool {
         self.gpu_layers >= total_layers
@@ -227,16 +202,7 @@ pub struct CloudPlan {
     pub remote_model: Option<String>,
 }
 
-impl CloudPlan {
-    /// 云端 llama-server 完整参数。`host` 强制为 `0.0.0.0`
-    /// （实例内需监听所有网卡，再由 SSH 隧道暴露到本机 127.0.0.1）。
-    pub fn engine_args(&self) -> Vec<String> {
-        let mut engine = self.engine.clone();
-        engine.host = "0.0.0.0".to_string();
-        engine.port = self.engine_port;
-        engine.to_engine_args()
-    }
-}
+// 云端运行参数由引擎插件生成；CloudPlan 只保留节点配置数据。
 
 /// 一份完整的部署方案。网关的「唯一真相」。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -375,38 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn engine_args_are_complete_and_ordered() {
-        let s = spec();
-        let a = crate::estimate::assess(&s, &hw(24), &AssessRequest::default().with_context(4096));
-        let p = LocalPlan::from_assessment(&s, "/models/q.gguf", &a, 11435);
-        let args = p.to_engine_args();
-
-        // 关键参数成对出现
-        for flag in [
-            "--model",
-            "--ctx-size",
-            "--threads",
-            "--batch-size",
-            "--n-gpu-layers",
-            "--cache-type-k",
-            "--cache-type-v",
-            "--host",
-            "--port",
-        ] {
-            let pos = args
-                .iter()
-                .position(|x| x == flag)
-                .unwrap_or_else(|| panic!("missing {flag} in {args:?}"));
-            assert!(pos + 1 < args.len(), "{flag} has no value");
-        }
-        assert!(args.contains(&"/models/q.gguf".to_string()));
-        assert!(args.contains(&"11435".to_string()));
-        assert!(args.contains(&"127.0.0.1".to_string()));
-        assert!(args.contains(&"--flash-attn".to_string()));
-    }
-
-    #[test]
-    fn cloud_engine_binds_all_interfaces() {
+    fn cloud_plan_keeps_node_configuration_data() {
         let s = spec();
         let a = crate::estimate::assess(&s, &hw(24), &AssessRequest::default().with_context(4096));
         let engine = LocalPlan::from_assessment(&s, "/root/models/q.gguf", &a, 8080);
@@ -428,9 +363,8 @@ mod tests {
             engine,
             max_price_per_hour: Some(2.5),
         };
-        let args = cp.engine_args();
-        assert!(args.contains(&"0.0.0.0".to_string()));
-        assert!(args.contains(&"8080".to_string()));
+        assert_eq!(cp.engine_port, 8080);
+        assert_eq!(cp.engine.engine, crate::config::InferenceEngine::default());
     }
 
     #[test]

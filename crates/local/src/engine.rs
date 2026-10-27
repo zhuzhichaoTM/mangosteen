@@ -476,11 +476,15 @@ impl LlamaCppEngine {
     ///
     /// `ready_timeout` 内必须能通过 `/health`，否则杀掉进程并返回错误
     /// （可重试 → 触发云端降级）。
-    pub fn launch(&self, plan: &LocalPlan, ready_timeout: Duration) -> MnResult<EngineHandle> {
+    pub fn launch(
+        &self,
+        plan: &LocalPlan,
+        args: Vec<String>,
+        ready_timeout: Duration,
+    ) -> MnResult<EngineHandle> {
         let bin = self.locate()?;
 
-        // 参数由 plan 唯一决定，不做任何隐式补充
-        let args = plan.to_engine_args();
+        // 参数由引擎插件生成；执行器只负责原样启动。
 
         // 启动前校验模型文件存在（省掉一次无意义的进程拉起）
         let model = Path::new(&plan.model_path);
@@ -997,7 +1001,9 @@ mod tests {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
             let e = LlamaCppEngine::new(Some(fake), vec![], None);
             let plan = plan_with_port(11999, "/nonexistent/model.gguf");
-            let err = e.launch(&plan, Duration::from_millis(300)).unwrap_err();
+            let err = e
+                .launch(&plan, Vec::new(), Duration::from_millis(300))
+                .unwrap_err();
             assert!(matches!(err, MnError::ModelNotFound { .. }), "got {err:?}");
         }
         std::fs::remove_dir_all(&d).ok();
@@ -1021,7 +1027,9 @@ mod tests {
 
         let e = LlamaCppEngine::new(Some(fake), vec![], None);
         let plan = plan_with_port(port, &model.to_string_lossy());
-        let err = e.launch(&plan, Duration::from_millis(300)).unwrap_err();
+        let err = e
+            .launch(&plan, Vec::new(), Duration::from_millis(300))
+            .unwrap_err();
         assert!(err.to_string().contains("已被占用"), "got {err}");
         drop(listener);
         std::fs::remove_dir_all(&d).ok();
@@ -1042,7 +1050,9 @@ mod tests {
 
         let e = LlamaCppEngine::new(Some(fake), vec![], Some(d.clone()));
         let plan = plan_with_port(11998, &model.to_string_lossy());
-        let err = e.launch(&plan, Duration::from_secs(5)).unwrap_err();
+        let err = e
+            .launch(&plan, Vec::new(), Duration::from_secs(5))
+            .unwrap_err();
         match &err {
             MnError::EngineExited { code, .. } => assert_eq!(*code, Some(3)),
             other => panic!("期望 EngineExited，实际 {other:?}"),
@@ -1068,7 +1078,9 @@ mod tests {
             let e = LlamaCppEngine::new(Some(fake), vec![], Some(d.clone()));
             let plan = plan_with_port(11997, &model.to_string_lossy());
             let started = std::time::Instant::now();
-            let err = e.launch(&plan, Duration::from_millis(600)).unwrap_err();
+            let err = e
+                .launch(&plan, Vec::new(), Duration::from_millis(600))
+                .unwrap_err();
             // 必须真的超时，不能立刻返回
             assert!(started.elapsed() >= Duration::from_millis(500));
             assert!(err.to_string().contains("未通过 /health 就绪"), "got {err}");

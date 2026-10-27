@@ -1010,6 +1010,23 @@ impl Gateway {
         }
     }
 
+    /// 为云端节点按部署时记录的引擎生成启动配置。
+    ///
+    /// Gateway 作为第三层编排入口负责调用引擎 SPI；CloudOrchestrator 只执行
+    /// 收到的标准配置，不依赖 `mangosteen-local`，也不解释引擎 flags。
+    fn cloud_launch_config(
+        &self,
+        plan: &mangosteen_core::plan::CloudPlan,
+    ) -> MnResult<mangosteen_core::plan::EngineLaunchConfig> {
+        let Some(plugin) = self.engines_registry.get(plan.engine.engine) else {
+            return Err(MnError::bad_request(format!(
+                "云端部署记录中的推理引擎 {} 尚未适配",
+                plan.engine.engine.display_name()
+            )));
+        };
+        Ok(plugin.launch_config(&plan.engine, "0.0.0.0", plan.engine_port))
+    }
+
     /// 执行云端部署。
     ///
     /// `why_cloud` 说明「为什么必须走云端」，用于在无可用服务商时给出**准确**的
@@ -1111,8 +1128,9 @@ impl Gateway {
             "正在创建云端实例并建立 SSH 隧道".to_string(),
         );
 
+        let launch_config = self.cloud_launch_config(&cloud_plan)?;
         let orchestrator = self.cloud.as_mut().expect("checked above");
-        match orchestrator.provision(&constraints, &cloud_plan) {
+        match orchestrator.provision(&constraints, &cloud_plan, &launch_config) {
             Ok(p) => {
                 // 回填实际选中的服务商与实例 ID
                 if let Some(c) = plan.cloud.as_mut() {
@@ -1362,6 +1380,7 @@ impl Gateway {
                 })?;
                 self.state
                     .set_status(id, DeploymentStatus::Provisioning, None)?;
+                let launch_config = self.cloud_launch_config(&cloud_plan)?;
                 let o = self.cloud.as_mut().ok_or_else(|| {
                     MnError::bad_request("未配置云端能力，无法操作云端部署".to_string())
                 })?;
@@ -1373,7 +1392,8 @@ impl Gateway {
                     return Err(e);
                 }
                 // 2) 起推理进程
-                if let Err(e) = o.start_service(provider, instance_id, &cloud_plan) {
+                if let Err(e) = o.start_service(provider, instance_id, &cloud_plan, &launch_config)
+                {
                     let msg = e.to_string();
                     self.state
                         .set_status(id, DeploymentStatus::Failed, Some(msg.clone()))?;

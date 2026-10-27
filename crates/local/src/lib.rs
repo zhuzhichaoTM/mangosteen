@@ -31,6 +31,7 @@
 //! [`LocalPlan`]: mangosteen_core::plan::LocalPlan
 
 pub mod engine;
+pub mod llama_args;
 pub mod plugin;
 
 pub use engine::{EngineHandle, EngineStatus, LlamaCppEngine, OllamaEngine};
