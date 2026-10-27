@@ -195,10 +195,10 @@ mangosteen ui --no-open  # 只起服务（SSH / 无桌面环境）
 | 唯一 | 含义 | 为什么 |
 |------|------|--------|
 | 唯一收口 | 所有操作经 API 网关 | 上层不感知算力来源；CLI/TUI 无法绕过调度直连引擎 |
-| 唯一引擎 | 本地与云端都用 llama.cpp | 同一个模型、同一套参数，推理行为完全一致 |
-| 唯一格式 | 只支持 GGUF | 与 llama.cpp 生态完全对齐，不引入格式转换链 |
+| 唯一引擎 | 默认 llama.cpp，可经插件接入其它框架 | 同一套参数语义；新增框架不改调度主链路 |
+| 唯一格式 | 不限格式，但标识类型 | 非 GGUF 是别的引擎要用的；不替用户决定格式 |
 
-### 四层架构
+### 分层架构
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -226,8 +226,11 @@ mangosteen ui --no-open  # 只起服务（SSH / 无桌面环境）
 │ 平台适配层    mangosteen-platform                     │
 │  硬件采集 / 路径规范 / 进程信号 / 原子写              │
 ├─────────────────────────────────────────────────────┤
-│ 领域层        mangosteen-core / orchestration          │
+│ 领域层        mangosteen-core                         │
 │  纯类型与算法：估算公式 / 状态机 / 打分 / 协议结构      │
+├─────────────────────────────────────────────────────┤
+│ 编排层        mangosteen-orchestration               │
+│  评估 / 模式决策 / 节点优选 / 部署契约                 │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -530,44 +533,52 @@ cargo test -p mangosteen-cli --test layering   # 只跑架构约束
 
 ```
 crates/
-├── mangosteen-core        领域层：类型 + 纯算法（无平台代码、无 IO）
-│   ├── model.rs           GGUF 规格、量化格式
-│   ├── hardware.rs        硬件画像
-│   ├── estimate.rs        资源估算（纯函数，100% 可单测）
-│   ├── plan.rs            部署方案
-│   ├── cloud.rs           多云统一抽象 + 驱动接口
-│   ├── policy.rs          四维打分
-│   ├── config.rs          配置模型
-│   ├── gguf.rs            GGUF 解析
-│   ├── openai.rs          OpenAI 协议结构
-│   └── net.rs             隧道/端口映射模型
-├── mangosteen-platform    平台适配层：所有 cfg(target_os) 都在这里
-│   ├── hardware.rs        nvidia-smi / system_profiler / /proc / WMI
-│   ├── paths.rs           XDG / Library / AppData
-│   ├── process.rs         子进程 + 信号 + 僵尸回收
-│   ├── docconv.rs         富文档转换工具选择（textutil / pdftotext / Word COM）
-│   └── fs.rs              原子写 + 权限 + 符号链接防护
-├── mangosteen-base        基础能力层
-│   ├── models.rs          模型台账
-│   ├── config.rs          配置发现与持久化
-│   ├── state.rs           部署台账
-│   └── guard.rs           文件访问控制
-├── mangosteen-device       本地链路：llama.cpp 引擎管理
-├── mangosteen-backend     厂商协议适配：优云智算（UCloud RPC 形态）
-│   ├── sign.rs / sha1.rs  UCloud V1 签名（SHA1 + 参数拼接）
-│   ├── params.rs          参数扁平化（签名用原值、传输用转义）
-│   ├── client.rs          各 Action 调用（创建/查询/启停/删除/价格/镜像/可用区）
-│   ├── mapping.rs         单位/状态/SSH 端口/价格的唯一换算点
-│   ├── retcode.rs         返回码语义归类（容量不足→换节点 / 欠费→停止重试）
-│   └── driver.rs          ProviderDriver + 业务补偿（先查库存、先关机再删）
-├── mangosteen-provider       云端链路：驱动 + 编排 + SSH 隧道
-├── mangosteen-gateway     网关层：评估/调度/协议/HTTP
-│   ├── assess.rs          资源评估引擎
-│   ├── scheduler.rs       调度决策器（本地优先）
-│   ├── protocol.rs        统一协议适配
-│   ├── gateway.rs         门面
-│   └── server.rs          HTTP 服务
-└── mangosteen-cli         交互层：CLI + TUI
+├── core                  领域层：类型 + 纯算法 + 跨层契约
+│   ├── model.rs          GGUF 规格、量化格式
+│   ├── hardware.rs       硬件画像
+│   ├── estimate.rs       资源估算（纯函数）
+│   ├── plan.rs           部署方案（本地/云端 + EngineLaunchConfig）
+│   ├── cloud.rs          多云统一抽象 + ProviderDriver 接口
+│   ├── policy.rs         四维打分
+│   ├── config.rs         配置模型
+│   ├── gguf.rs           GGUF 解析
+│   ├── openai.rs         OpenAI 协议结构
+│   ├── transport.rs      HttpRequest / HttpResponse / Transport
+│   └── net.rs            隧道/端口映射模型
+├── platform              平台适配层：所有 cfg(target_os) 都在这里
+│   ├── hardware.rs       nvidia-smi / system_profiler / /proc / WMI
+│   ├── paths.rs          XDG / Library / AppData
+│   ├── process.rs        子进程 + 信号 + 僵尸回收
+│   ├── docconv.rs        富文档转换工具选择
+│   └── fs.rs             原子写 + 权限 + 符号链接防护
+├── session               第一层：会话持久化
+├── cli                   第一层：CLI + TUI（只调用 gateway）
+├── webui                 第一层：单文件 Web 控制台资源
+├── gateway               第二层：HTTP 服务、路由、OpenAI 协议（唯一收口）
+│   ├── http/             解析 / 路由 / handlers / 流式转发
+│   └── protocol.rs       协议规范化
+├── orchestration         第三层：评估 / 模式决策 / 节点优选 / 部署契约
+│   ├── assess.rs         资源评估
+│   ├── scheduler.rs      本地优先决策与云端候选打分
+│   ├── progress.rs       部署阶段进度契约
+│   └── backend.rs        后端目标（BackendTarget）
+├── device                第四层：本地/云端共用的执行语义
+│   ├── engine.rs         llama.cpp / Ollama 引擎实现
+│   ├── plugin.rs         引擎插件注册表
+│   ├── llama_args.rs     引擎参数生成（插件侧）
+│   └── remote.rs         远端 SSH 执行、模型下载、引擎启停（DeviceRuntime）
+├── provider              第四层：GPU 节点供应（不运行模型）
+│   ├── registry.rs       驱动注册表（配置驱动）
+│   ├── drivers/          通用 REST 驱动 + profile 模板
+│   ├── net.rs            SSH 隧道 / 端口映射
+│   ├── orchestrator.rs   实例生命周期与收尾
+│   └── compshare/        优云智算（UCloud RPC 形态）专用驱动
+└── base                  基础能力：模型/部署台账、配置、访问控制、资产工具
+    ├── models.rs         模型台账
+    ├── state.rs          部署台账
+    ├── config.rs         配置发现与持久化
+    ├── guard.rs          文件访问控制
+    └── download.rs       模型下载 / 校验 / 缓存
 ```
 
 ### 设计文档
@@ -582,8 +593,8 @@ crates/
 Mangosteen 是**个人级桌面客户端**，明确不做：
 
 * 集群管理、多租户、分布式推理（企业级能力）
-* 内置对话界面、Agent 框架（只提供 API，上层应用自带）
-* 第二个推理引擎（vLLM / TensorRT-LLM 等）
+* Agent 框架（只提供部署与推理 API，上层应用自带）
+* 未经核对的云厂商内置模板（通过配置 profile 动态接入）
 
 云端优化目标为 RTX 4090 / 5090 等消费级显卡实例；其它硬件仅做扩展兼容。
 
