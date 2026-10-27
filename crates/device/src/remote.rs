@@ -38,6 +38,110 @@ pub const OLLAMA_PORT: u16 = 11434;
 /// 把隧道转发到 11434——那里根本没有服务，隧道建好了也连不上。
 pub const LLAMA_CPP_PORT: u16 = 8080;
 
+/// 设备执行目标：本地进程或远端节点。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceTarget {
+    /// 本机执行
+    Local,
+    /// 远端节点执行（由 provider 创建并给出连接信息）
+    Remote(SshTarget),
+}
+
+/// 统一的设备运行时契约。
+///
+/// 本地与云端共用同一套模型准备 / 引擎启停语义：本地实现直接拉起进程，
+/// 远端实现经 SSH 在节点内执行。上层只依赖本 trait，不区分目标形态。
+pub trait DeviceRuntime: Send + Sync {
+    /// 目标描述。
+    fn target(&self) -> &DeviceTarget;
+
+    /// 确保推理引擎二进制可用，返回可执行路径。
+    fn ensure_engine(&self, workdir: &str, download_url: &str) -> MnResult<String>;
+
+    /// 确保模型文件就位（远端按 URL 下载并校验大小）。
+    fn ensure_model(&self, url: &str, dest: &str, expected_bytes: Option<u64>) -> MnResult<u64>;
+
+    /// 拉起推理服务。
+    fn launch(&self, bin: &str, args: &[String], workdir: &str) -> MnResult<()>;
+
+    /// 服务是否在运行。
+    fn is_running(&self, workdir: &str) -> MnResult<bool>;
+
+    /// 停止服务（保留节点）。
+    fn stop(&self, workdir: &str) -> MnResult<()>;
+}
+
+/// 远端设备运行时：所有操作经 SSH 在节点内执行。
+#[derive(Debug, Clone)]
+pub struct RemoteRuntime {
+    target: DeviceTarget,
+    /// 远端工作目录（模型、二进制、日志）
+    workdir: String,
+}
+
+impl RemoteRuntime {
+    /// 构造。`target` 必须是 [`DeviceTarget::Remote`]。
+    pub fn new(target: DeviceTarget, workdir: impl Into<String>) -> Self {
+        Self {
+            target,
+            workdir: workdir.into().trim_end_matches('/').to_string(),
+        }
+    }
+
+    fn ssh(&self) -> MnResult<&SshTarget> {
+        match &self.target {
+            DeviceTarget::Remote(t) => Ok(t),
+            DeviceTarget::Local => Err(MnError::bad_request("RemoteRuntime 需要远端节点连接信息")),
+        }
+    }
+}
+
+impl DeviceRuntime for RemoteRuntime {
+    fn target(&self) -> &DeviceTarget {
+        &self.target
+    }
+
+    fn ensure_engine(&self, workdir: &str, download_url: &str) -> MnResult<String> {
+        let workdir = if workdir.is_empty() {
+            self.workdir.as_str()
+        } else {
+            workdir
+        };
+        ensure_llama_server(self.ssh()?, workdir, download_url)
+    }
+
+    fn ensure_model(&self, url: &str, dest: &str, expected_bytes: Option<u64>) -> MnResult<u64> {
+        download_model_remote(self.ssh()?, url, dest, expected_bytes)
+    }
+
+    fn launch(&self, bin: &str, args: &[String], workdir: &str) -> MnResult<()> {
+        let workdir = if workdir.is_empty() {
+            self.workdir.as_str()
+        } else {
+            workdir
+        };
+        start_llama_server(self.ssh()?, bin, args, workdir)
+    }
+
+    fn is_running(&self, workdir: &str) -> MnResult<bool> {
+        let workdir = if workdir.is_empty() {
+            self.workdir.as_str()
+        } else {
+            workdir
+        };
+        llama_server_running(self.ssh()?, workdir)
+    }
+
+    fn stop(&self, workdir: &str) -> MnResult<()> {
+        let workdir = if workdir.is_empty() {
+            self.workdir.as_str()
+        } else {
+            workdir
+        };
+        stop_llama_server(self.ssh()?, workdir)
+    }
+}
+
 /// 一次 HTTP 调用的结果。
 #[derive(Debug, Clone)]
 pub struct HttpReply {
@@ -318,7 +422,7 @@ mod tests {
 use std::path::PathBuf;
 
 /// SSH 目标。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshTarget {
     /// 主机（域名或 IP）
     pub host: String,

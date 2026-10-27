@@ -70,68 +70,61 @@
 │      · 推理会话（对话上下文）                                │
 │      · 部署任务会话（状态 + 操作记录）                       │
 │  交互入口：mangosteen-cli（CLI/TUI）                         │
-│            mangosteen-gateway::webui（内嵌 Web 控制台）      │
+│            mangosteen-webui（独立 Web 控制台静态资源）       │
 └──────────────────────┬────────────────────────────────────┘
                        │ 只与 API Server 通信
 ┌──────────────────────▼────────────────────────────────────┐
 │ 第二层  API 网关层                                          │
-│  mangosteen-gateway::server   唯一收口                      │
+│  mangosteen-gateway   唯一收口                              │
 │      · [OI] 兼容接口（/v1/*）                               │
 │      · 部署管理接口（/api/*）                               │
 │      · 鉴权、协议解析、请求路由、状态回传                    │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
-│ 第三层  编排调度核心层                                       │
-│  ① 引擎管理    mangosteen-device::plugin   （插件式多引擎）   │
-│  ② 模型评估    mangosteen-gateway::assess                   │
-│  ③ 节点选择    mangosteen-gateway::scheduler（本地优先打分） │
-│  ④ 节点配置    mangosteen-core::plan      （本地/云端两套）   │
-│  ⑤ 多云适配    mangosteen-provider + mangosteen-backend        │
+│ 第三层  编排调度核心层（mangosteen-orchestration）            │
+│  ① 模型评估    orchestration::assess                        │
+│  ② 模式决策    orchestration::scheduler（本地优先）           │
+│  ③ 节点优选    orchestration::scheduler + core::policy       │
+│  ④ 节点配置    core::plan（本地/云端两套 + EngineLaunchConfig）│
+│  ⑤ 部署编排    gateway 门面 → orchestration 决策 → 执行       │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
-│ 第四层  资产与执行层                                         │
-│  ① 模型下载    mangosteen-base::download                    │
-│  ② 模型量化    mangosteen-base::quantize  （可选，非主链路）  │
-│  ③ 加载执行    mangosteen-device::engine                     │
+│ 第四层  设备执行与节点供应                                    │
+│  device（本地/云端共用）：模型下载、格式适配、引擎插件、      │
+│         远端 SSH 执行、模型加载、探活、停止                   │
+│  provider（仅节点供应）：GPU 实例 CRUD、厂商驱动、            │
+│         SSH 隧道、节点连接（不运行模型）                      │
+│  base：模型/部署台账、配置存储、文件访问控制（可选量化）       │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
 │ 第五层  基础支撑层                                           │
-│  core（领域类型 / 配置结构 / 错误）                          │
-│  base（台账持久化 / 配置存储 / 文件访问控制）                 │
+│  core（领域类型 / 配置结构 / 错误 / SPI / 纯算法）            │
 │  platform（平台适配：路径 / 进程 / 硬件 / 动态库）            │
 └───────────────────────────────────────────────────────────┘
-```
-
 ### 2.2 crate 与层的对应关系
 
-层是**逻辑划分**，crate 是**编译单元**。两者不是一一对应，原因写在下面。
+层是**逻辑划分**，crate 是**编译单元**。当前按职责一个 crate 只归一层。
 
 | 层 | crate | 说明 |
 |----|-------|------|
 | 一 | `mangosteen-session` | 会话领域模型 + 持久化 |
 | 一 | `mangosteen-cli` | 交互入口（参数解析、TUI） |
-| 一 | `mangosteen-gateway::webui` | 内嵌 Web 控制台（单文件 HTML） |
-| 二 | `mangosteen-gateway::server` | HTTP 服务与路由 |
-| 三 | `mangosteen-gateway::assess` | 模型评估 |
-| 三 | `mangosteen-gateway::scheduler` | 节点选择 |
-| 三 | `mangosteen-device::plugin` | 引擎管理（插件注册表） |
-| 三 | `mangosteen-core::plan` | 节点配置（本地 / 云端） |
-| 三 | `mangosteen-provider` / `mangosteen-backend` | 多云厂商适配 |
-| 四 | `mangosteen-base::download` / `quantize` | 资产 |
-| 四 | `mangosteen-device::engine` | 执行 |
-| 五 | `mangosteen-core` / `base` / `platform` | 支撑 |
+| 一 | `mangosteen-webui` | 单文件 Web 控制台静态资源 |
+| 二 | `mangosteen-gateway` | HTTP 服务、路由、OpenAI 协议、唯一收口 |
+| 三 | `mangosteen-orchestration` | 模型评估、模式决策、节点优选、部署契约 |
+| 三 | `mangosteen-core::plan` | 节点配置（本地 / 云端 / EngineLaunchConfig） |
+| 四 | `mangosteen-device` | 本地与云端共用的模型资产、引擎与运行时 |
+| 四 | `mangosteen-provider` | GPU 节点供应、厂商驱动、隧道与节点连接 |
+| 四 | `mangosteen-base` | 模型/部署台账、配置存储、文件访问控制 |
+| 五 | `mangosteen-core` / `mangosteen-platform` | 领域契约与平台适配 |
 
-**为什么 `gateway` 同时含第二层与第三层**：模型评估与节点选择是
-「编排核心」而非「协议转换」，逻辑上属第三层。但它们的输入输出
-（`Evaluated` / `Decision` / `DeploymentPreview`）与网关的编排入口
-耦合极紧，拆成独立 crate 会产生大量双向类型搬运，收益不抵风险。
-因此用**模块边界**区分层次，而不是物理拆分。
-
-这不影响约束的可执行性：`layering.rs` 的 C3 按**文件**扫描主链路
-（`gateway.rs` / `scheduler.rs` / `assess.rs`），与 crate 边界无关。
+**为什么 device 同时服务本地与云端**：云端部署也必须在目标机上完成
+「下载模型 → 准备引擎 → 启动 → 探活 → 停止」。把这些能力放在 provider 会
+让同一套模型/引擎语义出现两份实现。因此 device 持有执行语义，provider 只
+负责「把机器准备好、把连接建好」。
 
 ### 2.3 依赖方向
 
@@ -139,24 +132,27 @@
 
 ```
 core ←── platform ←── base ←── session
-  ↑         ↑         ↑    ←── local
-  │         │         │    ←── backend
-  │         │         │    ←── cloud（可依赖 backend）
-  └─────────┴─────────┴─────── gateway（+ session）
-                              cli（+ gateway + session）
+  ↑         ↑         ↑    ←── device
+  ↑         ↑         └────── provider（同层组合，复用 device 远端运行时）
+  ↑         └──────────────── orchestration（评估/调度/部署契约）
+  └─────────────────────────── gateway（唯一 HTTP 收口）
+                              cli / webui（第一层交互）
 ```
 
-**为什么 `local` / `cloud` 不依赖 `base`**：它们只负责"把方案变成运行中的
-服务"，不需要台账/配置能力。台账由网关层调用 `base` 完成。这样
-`local` / `cloud` 可以脱离存储独立测试。
+**为什么 `device` / `provider` 不依赖 `base`**：它们只负责"把方案变成运行中
+的服务"与"把节点准备好"，不需要台账/配置能力。台账由编排/网关调用 `base`
+完成，这样执行层可以脱离存储独立测试。
+
+**为什么 `provider` 可以依赖 `device`**：云端部署同样需要下载模型、安装并
+启动推理引擎。这些执行语义由 device 统一持有，provider 只负责创建 GPU 节点
+与建立连接；这是同层内的能力复用，不是反向依赖。
 
 **为什么 `session` 只依赖 `core` + `platform`**：会话层是第一层的状态载体，
 它**不感知算力来源**——不判断能不能部署、不启动引擎、不访问云厂商。
 这条由 `c6_session_layer_does_not_know_about_compute` 守护。
 
-**为什么 `backend` 只能被 `cloud` 依赖**：厂商驱动必须经驱动注册表统一加载，
-否则会绕过"配置驱动 + 统一能力声明"的约定。网关与 CLI 直接依赖 `backend`
-会被 `c5_backend_is_only_reachable_through_cloud_layer` 拦下。
+**为什么 `backend` 已不存在**：优云智算的专用协议驱动并入
+`mangosteen-provider::compshare`，避免同层出现两个平行的云厂商适配入口。
 
 ### 2.4 各层职责与禁止事项
 
@@ -164,15 +160,15 @@ core ←── platform ←── base ←── session
 |----|-------|--------|----------|
 | 一·会话 | `session` | 会话 CRUD、消息追加、操作记录、持久化 | 判断可部署性、启动引擎、访问云 API |
 | 一·交互 | `cli` / `webui` | 解析参数、格式化输出、调用 `/api` 与 `/v1` | 直连引擎、直连云厂商 API |
-| 二 | `gateway::server` | 鉴权、路由、协议转换、状态回传 | 写平台专属代码、自己实现推理 |
-| 三·评估 | `gateway::assess` | 采集硬件、估算显存/内存、判定可行性 | 决定用本地还是云端 |
-| 三·选点 | `gateway::scheduler` | 本地优先打分、云端候选排序 | 拉进程、调厂商 API |
+| 二 | `gateway` | 鉴权、路由、协议转换、状态回传 | 写平台专属代码、自己实现推理 |
+| 三·评估 | `orchestration::assess` | 采集硬件、估算显存/内存、判定可行性 | 决定用本地还是云端 |
+| 三·选点 | `orchestration::scheduler` | 本地优先打分、云端候选排序 | 拉进程、调厂商 API |
 | 三·配置 | `core::plan` | 生成本地参数 / 云端规格与隧道配置 | 执行部署 |
-| 三·引擎 | `local::plugin` | 引擎插件注册与分发 | 决定是否该用本地 |
-| 三·多云 | `cloud` / `backend` | 实例 CRUD、隧道、端口映射、存储映射、签名 | 决定选哪家、被 CLI 直连 |
+| 三·引擎 | `device::plugin` | 引擎插件注册与分发 | 决定是否该用本地 |
+| 四·节点 | `provider` | 实例 CRUD、隧道、端口映射、厂商签名 | 下载模型、启停推理服务、决定选哪家 |
 | 四·资产 | `base::download` / `quantize` | 下载、校验、缓存、量化 | 决定部署策略 |
-| 四·执行 | `local::engine` | 拉起进程、等待就绪、探活、终止 | 暴露 HTTP 给上层 |
-| 五 | `core` / `base` / `platform` | 类型、纯算法、台账、配置、系统调用 | 含业务调度逻辑 |
+| 四·执行 | `device::engine` / `device::remote` | 本地/远端拉起进程、探活、终止、模型准备 | 暴露 HTTP 给上层 |
+| 五 | `core` / `platform` | 类型、纯算法、平台能力 | 含业务调度逻辑 |
 
 ---
 

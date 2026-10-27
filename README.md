@@ -214,19 +214,19 @@ mangosteen ui --no-open  # 只起服务（SSH / 无桌面环境）
 └──────────┬────────────────────────┬─────────────────┘
            │                        │
 ┌──────────▼──────────┐  ┌──────────▼─────────────────┐
-│ 本地算力链路         │  │ 云端算力链路                │
+│ 设备执行（本地/云端共用）│  │ 节点供应                    │
 │ mangosteen-device    │  │ mangosteen-provider           │
-│  llama.cpp 引擎管理  │  │  节点选择器 / 多云适配 / 隧道│
+│  模型下载/引擎/运行时│  │  GPU 实例 CRUD / 节点连接    │
 └──────────┬──────────┘  └──────────┬─────────────────┘
            │                        │
 ┌──────────▼────────────────────────▼─────────────────┐
-│ 基础能力层    mangosteen-base                         │
+│ 基础支撑      mangosteen-base                         │
 │  模型管理 / 配置持久化 / 部署台账 / 文件访问控制        │
 ├─────────────────────────────────────────────────────┤
 │ 平台适配层    mangosteen-platform                     │
 │  硬件采集 / 路径规范 / 进程信号 / 原子写              │
 ├─────────────────────────────────────────────────────┤
-│ 领域层        mangosteen-core                         │
+│ 领域层        mangosteen-core / orchestration          │
 │  纯类型与算法：估算公式 / 状态机 / 打分 / 协议结构      │
 └─────────────────────────────────────────────────────┘
 ```
@@ -322,18 +322,8 @@ cache_dir = "~/Library/Caches/mangosteen"
 verify_hash = false                   # 登记时是否立即算 SHA-256（大文件很慢）
 allowed_read_roots = []               # 额外授权访问的目录
 
-[providers.autodl]
-driver = "autodl"
-enabled = true
-secret = { env = "AUTODL_API_TOKEN" } # 推荐：不把密钥写进文件
-priority = 1.0
-
-[providers.ucloud]
-driver = "ucloud"
-enabled = true
-secret = { env = "UCLOUD_API_KEY" }
-
-# 优云智算的正式接入方式（UCloud 开放接口形态）
+# 当前唯一内置、已验证的 GPU 供应商：优云智算（UCloud RPC 形态）
+# 其它厂商暂不内置（配置 profile 可动态接入，见下文「服务商 API 改版」）
 # 凭证两段：公钥放 options，私钥放 secret
 [providers.compshare]
 driver = "compshare"
@@ -370,7 +360,7 @@ secret = { inline = "xxx" }            # 直接内联（仅调试用）
 | 认证 | 请求头 Token | 参数 `PublicKey` + `Signature`（SHA1 签名） |
 | 成功判定 | HTTP 2xx | HTTP 2xx **且** `RetCode == 0` |
 
-签名无法用 profile 的字段映射表达，所以由 `mangosteen-backend` 提供专用驱动。
+签名无法用 profile 的字段映射表达，所以由 `mangosteen-provider/src/compshare` 提供专用驱动。
 驱动替你处理了厂商的三个硬限制：**创建前强制查库存**、**销毁前必须先关机**、
 **状态并发锁（10 分钟 TTL）**。上层调用方式与其他服务商完全一致。
 
@@ -379,19 +369,22 @@ secret = { inline = "xxx" }            # 直接内联（仅调试用）
 不用等新版本。在配置里覆盖 profile 即可：
 
 ```toml
-[providers.autodl]
-driver = "autodl"
+[providers.mycloud]
+driver = "mycloud"
 enabled = true
-secret = { env = "AUTODL_API_TOKEN" }
+secret = { env = "MYCLOUD_TOKEN" }
 
-[providers.autodl.profile]
-name = "autodl"
-display_name = "AutoDL"
-[providers.autodl.profile.endpoints]
-base_url = "https://api.autodl.com"
-list_specs = "/api/v2/machines"       # ← 厂商改了就改这里
+[providers.mycloud.profile]
+name = "mycloud"
+display_name = "我的算力平台"
+[providers.mycloud.profile.endpoints]
+base_url = "https://api.mycloud.example"
+list_specs = "/v1/gpu/specs"          # ← 厂商改了就改这里
 # ...
 ```
+
+这条配置路径**不需要改代码、不需要重新编译**；核对完成的厂商才会进入
+内置模板清单（当前为空，唯一受支持的 `compshare` 走专用驱动）。
 
 ---
 

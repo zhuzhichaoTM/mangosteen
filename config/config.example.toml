@@ -111,71 +111,45 @@ allowed_read_roots = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-# 云服务商
+# 云服务商（GPU 节点供应）
 # ─────────────────────────────────────────────────────────────
+# 当前唯一内置、已验证的 GPU 供应商是**优云智算**（driver = "compshare"）。
+# 其它厂商暂不内置：字段映射未逐一核对，直接放出会得到「看起来注册成功、
+# 实际调不通」的驱动。需要时用下方「自定义服务商」的 profile 段接入。
+#
 # 凭证三种写法（`mangosteen config show` 都只显示脱敏形式）：
 #   secret = { env = "VAR_NAME" }        ← 推荐
 #   secret = { file = "/path/to/secret" }
 #   secret = { inline = "actual-token" } ← 仅调试用
 
-[providers.autodl]
-driver = "autodl"
-enabled = true
-display_name = "AutoDL"
-secret = { env = "AUTODL_API_TOKEN" }
-priority = 1.0
-
-[providers.ucloud]
-driver = "ucloud"
-enabled = true
-display_name = "优云智算"
-secret = { env = "UCLOUD_API_KEY" }
-priority = 1.0
-
-# 优云智算（Compshare / UCloud 开放接口形态）——推荐用这一条
-#
-# 为什么与上面的 [providers.ucloud] 不同：
-#   优云智算的真实 API 是 UCloud RPC 形态（单一端点 + Action 参数 + SHA1 签名），
-#   无法用 profile 字段映射表达，因此由专门驱动实现（driver = "compshare"）。
-#   [providers.ucloud] 那条是通用 REST 形态的占位，二者按需保留其一即可。
+# 优云智算（Compshare / UCloud RPC 形态）
 #
 # 凭证分两段：
 #   公钥（AccessKey ID）→ options.public_key
 #   私钥（AccessKey Secret）→ secret（推荐 env 形式）
 # 密钥获取：https://console.compshare.cn/uaccount/api_manage
-#
-# [providers.compshare]
-# driver = "compshare"
-# enabled = true
-# display_name = "优云智算"
-# secret = { env = "COMPSHARE_PRIVATE_KEY" }
-# priority = 1.0
-#
-# [providers.compshare.options]
-# public_key = "your-accesskey-id"
-# region = "cn-wlcb"                        # 地域，可用 `mangosteen backend zones` 查
-# zone = "cn-wlcb-01"                       # 可用区，同一 region 下选一个
-# image_id = "compshareImage-xxxx"          # 必填，`mangosteen backend images` 查可用镜像
-# charge_type = "Postpay"                   # Month / Day / Postpay / Spot；个人场景用 Postpay（关机不收费）
-# disk_type = "CLOUD_SSD"                   # CLOUD_SSD / CLOUD_RSSD（RSSD 仅 A800）
-# disk_size_gb = "100"                      # 系统盘；SSD 系统盘 ≤100GB 部分免费
-# gpu_types = "4090,5090"                   # 允许的卡型号，留空表示不限制
-# max_gpu_count = "1"                       # 单实例卡数上限
-# min_memory_gb = "32"                      # 低于此内存的规格不列为候选
-# max_price_queries = "10"                  # 列举规格时最多查多少次价格（控制接口调用量）
-# operation_timeout_secs = "600"            # 启停/销毁的等待上限
-# poll_interval_secs = "5"                  # 状态轮询间隔（不得为 0）
-# release_data_disk = "true"                # 销毁时是否同时删数据盘
-
-# 阿里云为扩展兼容目标，默认停用（需要双凭证 + RPC 签名）
-[providers.aliyun]
-driver = "aliyun"
-enabled = false
-display_name = "阿里云"
-secret = { env = "ALIBABA_CLOUD_ACCESS_KEY_SECRET" }
+[providers.compshare]
+driver = "compshare"
+enabled = true
+display_name = "优云智算"
+secret = { env = "COMPSHARE_PRIVATE_KEY" }
 priority = 1.0
-[providers.aliyun.options]
-access_key_id = "LTAI********"
+
+[providers.compshare.options]
+public_key = "your-accesskey-id"
+region = "cn-wlcb"                        # 地域
+zone = "cn-wlcb-01"                       # 同一 region 下选一个可用区
+image_id = "compshareImage-xxxx"          # 必填，`mangosteen backend images` 查可用镜像
+charge_type = "Postpay"                   # Month / Day / Postpay / Spot；个人场景用 Postpay（关机不收费）
+disk_type = "CLOUD_SSD"                   # CLOUD_SSD / CLOUD_RSSD（RSSD 仅 A800）
+disk_size_gb = "100"                      # 系统盘；SSD 系统盘 ≤100GB 部分免费
+gpu_types = "4090,5090"                   # 允许的卡型号，留空表示不限制
+max_gpu_count = "1"                       # 单实例卡数上限
+min_memory_gb = "32"                      # 低于此内存的规格不列为候选
+max_price_queries = "10"                  # 列举规格时最多查多少次价格（控制接口调用量）
+operation_timeout_secs = "600"            # 启停/销毁的等待上限
+poll_interval_secs = "5"                  # 状态轮询间隔（不得为 0）
+release_data_disk = "true"                # 销毁时是否同时删数据盘
 
 # ─────────────────────────────────────────────────────────────
 # 自定义服务商示例：新增厂商只需写配置，无需改代码

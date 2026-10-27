@@ -37,3 +37,4 @@ pub mod remote;
 
 pub use engine::{EngineHandle, EngineStatus, LlamaCppEngine, OllamaEngine};
 pub use plugin::{EnginePlugin, EngineRegistry};
+pub use remote::DeviceRuntime;

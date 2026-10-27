@@ -76,11 +76,16 @@ fn example_config_is_valid_toml_and_loads() {
         "示例配置应至少包含一个服务商，让用户知道怎么写"
     );
 
-    // 三个内置服务商都应出现（含被停用的，作为示范）
+    // 优云智算（compshare）作为唯一内置、已验证的云服务商，应出现作为示范
+    assert!(
+        cfg.providers.contains_key("compshare"),
+        "示例配置应包含服务商 `compshare` 作为示范"
+    );
+    // 其余三个内置服务商（autodl/ucloud/aliyun）因未核对，应被跳过
     for name in ["autodl", "ucloud", "aliyun"] {
         assert!(
-            cfg.providers.contains_key(name),
-            "示例配置应包含服务商 `{name}` 作为示范"
+            !cfg.providers.contains_key(name),
+            "示例配置不应包含未核对的服务商 `{name}`"
         );
     }
 
