@@ -16,7 +16,13 @@
 //! |------|------|
 //! | [`assess`] | 模型规格解析后的资源评估 |
 //! | [`scheduler`] | 本地/云端模式决策与节点优选 |
+//! | [`orchestrator`] | 部署编排、运行生命周期、状态查询与云端操作 |
+//! | [`deployment`] | 部署产物与预览契约 |
 //! | [`progress`] | 部署阶段定义与进度上报契约 |
+//! | [`backend`] | 后端目标（BackendTarget） |
+//!
+//! 编排执行面按职责平铺为 `orchestrator*.rs` 文件（父模块用
+//! `#[path]` 声明），不额外建立同名目录——目录只用于真实子命名空间。
 
 pub mod assess;
 pub mod backend;

@@ -55,11 +55,17 @@ use crate::deployment::{
 };
 use crate::scheduler::{Decision, Scheduler};
 
+#[path = "orchestrator_cloud_ops.rs"]
 mod cloud_ops;
+#[path = "orchestrator_deploy.rs"]
 mod deploy;
+#[path = "orchestrator_engine_admin.rs"]
 mod engine_admin;
+#[path = "orchestrator_lifecycle.rs"]
 mod lifecycle;
+#[path = "orchestrator_preview.rs"]
 mod preview;
+#[path = "orchestrator_query.rs"]
 mod query;
 
 /// 引擎版本探测的时间预算。

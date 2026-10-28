@@ -560,12 +560,12 @@ crates/
 ├── webui                 第一层：单文件 Web 控制台资源
 ├── gateway               第二层：HTTP 服务、路由、OpenAI 协议（唯一收口）
 │   ├── http/             解析 / 路由 / handlers / 流式转发
-│   ├── gateway/          装配（GatewayBuilder）与编排核心的类型别名
+│   ├── gateway.rs        装配（GatewayBuilder）与编排核心的类型别名
 │   └── protocol.rs       协议规范化
 ├── orchestration         第三层：评估 / 决策 / 节点配置 / 部署编排 / 生命周期
 │   ├── assess.rs         资源评估
 │   ├── scheduler.rs      本地优先决策与云端候选打分
-│   ├── orchestrator/     部署编排、停止/恢复/回滚、状态查询、云端操作
+│   ├── orchestrator*.rs  部署编排、停止/恢复/回滚、状态查询、云端操作
 │   ├── deployment.rs     部署产物与预览契约
 │   ├── progress.rs       部署阶段进度契约
 │   └── backend.rs        后端目标（BackendTarget）

@@ -359,7 +359,7 @@ fn c3_engine_differences_are_pluginized() {
     }
 
     // 编排主链路必须确实经注册表取插件（防止「删掉了分支但也没接上插件」）。
-    // 编排逻辑分布在 orchestrator/ 的多个子模块（deploy / lifecycle /
+    // 编排逻辑分布在多个 `orchestrator*.rs` 平铺模块（deploy / lifecycle /
     // engine_admin 等），因此按整个 crate 汇总扫描，而不是只看单个文件。
     let orch: String = crate_sources("mangosteen-orchestration")
         .into_iter()
@@ -766,16 +766,24 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 3.5：部署编排与运行生命周期（第三层的执行面）
     for f in [
-        "crates/orchestration/src/orchestrator/mod.rs",
-        "crates/orchestration/src/orchestrator/deploy.rs",
-        "crates/orchestration/src/orchestrator/deploy/evaluate.rs",
-        "crates/orchestration/src/orchestrator/deploy/local.rs",
-        "crates/orchestration/src/orchestrator/deploy/cloud.rs",
-        "crates/orchestration/src/orchestrator/lifecycle.rs",
-        "crates/orchestration/src/orchestrator/query.rs",
+        "crates/orchestration/src/orchestrator.rs",
+        "crates/orchestration/src/orchestrator_deploy.rs",
+        "crates/orchestration/src/orchestrator_deploy_evaluate.rs",
+        "crates/orchestration/src/orchestrator_deploy_local.rs",
+        "crates/orchestration/src/orchestrator_deploy_cloud.rs",
+        "crates/orchestration/src/orchestrator_lifecycle.rs",
+        "crates/orchestration/src/orchestrator_query.rs",
     ] {
         assert!(file_exists(f), "第三层缺少「部署编排与生命周期」模块：{f}");
     }
+    // 模块目录只用于真实子命名空间：同名单模块必须平铺成 `<name>.rs`，
+    // 不得出现 `orchestration/src/orchestrator/` 这类重复层级。
+    assert!(
+        !file_exists("crates/orchestration/src/orchestrator/mod.rs")
+            && !file_exists("crates/gateway/src/gateway/mod.rs")
+            && !file_exists("crates/core/src/transport/mod.rs"),
+        "同名单模块必须使用平铺文件，不得再引入同层目录"
+    );
     assert!(
         crate_has("mangosteen-orchestration", "pub struct Orchestrator"),
         "部署编排核心缺少 Orchestrator"
