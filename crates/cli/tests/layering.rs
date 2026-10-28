@@ -351,14 +351,12 @@ fn c3_engine_differences_are_pluginized() {
     // 网关必须确实经注册表取插件（防止「删掉了分支但也没接上插件」）。
     // 扫描已经按层归位后的 orchestration 目录，避免新文件绕开规则。
     // `gateway.rs` 仍保留薄壳/公开转发，但引擎生命周期与插件分发不再归它。
-    let gw = crate_sources("mangosteen-gateway")
+    // 编排主链路可能分布在 gateway 模块目录的多个文件里（engine_admin /
+    // deploy / lifecycle 等），因此按整个 crate 汇总扫描，而不是只看单个文件。
+    let gw: String = crate_sources("mangosteen-gateway")
         .into_iter()
-        .find(|(p, _)| {
-            p.file_name().map(|f| f == "mod.rs").unwrap_or(false)
-                && p.to_string_lossy().contains("/gateway/")
-        })
         .map(|(_, s)| strip_comments_and_strings(&s))
-        .expect("gateway/mod.rs 必须存在");
+        .collect();
     assert!(
         gw.contains("engines_registry.get("),
         "C3 违反：网关未通过注册表取引擎插件"
