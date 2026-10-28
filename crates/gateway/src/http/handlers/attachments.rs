@@ -3,6 +3,7 @@
 //! 归属：第二层 API Server。处理器通过 `pub(crate)` 字段访问网关状态，
 //! 对外行为与拆分前完全一致。
 
+use crate::http::request::base64_decode;
 use crate::http::server::*;
 use mangosteen_core::openai::ErrorResponse;
 

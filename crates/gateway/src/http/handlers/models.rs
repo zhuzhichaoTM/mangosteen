@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::http::request::REMOTE_HEADER_BYTES;
 use crate::http::server::*;
 use mangosteen_core::openai::ErrorResponse;
 use mangosteen_core::MnError;

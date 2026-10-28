@@ -7,6 +7,7 @@ use mangosteen_core::openai::{ChatRequest, ErrorResponse};
 use mangosteen_core::{MnError, MnResult};
 
 use crate::http::server::*;
+use crate::http::upstream::{http_post_json, summarize_body};
 use crate::protocol::{self, BackendTarget};
 
 impl GatewayServer {

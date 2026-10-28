@@ -3981,10 +3981,10 @@ fn e2e_stream_request_is_relayed_not_buffered() {
     assert!(wait_port("127.0.0.1", port, Duration::from_secs(5)));
 
     // ---- 源码级：直通路径必须存在且被接线 ----
-    let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http/server.rs"),
-    )
-    .unwrap();
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http");
+    let server_src = std::fs::read_to_string(src_dir.join("server.rs")).unwrap();
+    let relay_src = std::fs::read_to_string(src_dir.join("relay.rs")).unwrap();
+    let src = format!("{server_src}\n{relay_src}");
     assert!(
         src.contains("fn relay_stream("),
         "缺少流式直通实现（relay_stream）"

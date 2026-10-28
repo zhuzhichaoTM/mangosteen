@@ -712,6 +712,22 @@ fn c6_five_layer_architecture_is_complete() {
     ] {
         assert!(file_exists(module), "第二层缺少 HTTP 模块边界：{module}");
     }
+    let server = crate_sources("mangosteen-gateway")
+        .into_iter()
+        .find(|(p, _)| p.ends_with("http/server.rs"))
+        .map(|(_, src)| src)
+        .expect("HTTP server implementation must exist");
+    assert!(
+        !server.contains("pub struct ParsedRequest")
+            && !server.contains("pub struct Response")
+            && !server.contains("pub fn parse_request"),
+        "HTTP request parsing and response DTOs must live in dedicated modules"
+    );
+    assert!(
+        file_exists("crates/gateway/src/http/router.rs"),
+        "第二层缺少独立 HTTP 路由模块"
+    );
+
     for route in ["\"/v1/chat/completions\"", "\"/api/deploy\""] {
         assert!(
             crate_has("mangosteen-gateway", route),
