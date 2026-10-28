@@ -10,6 +10,7 @@
 //! | [`sessions`] | `/api/sessions*` |
 //! | [`status`] | `/health`、`/api/status`、`/api/sysinfo`、`/api/doctor` |
 //! | [`models`] | `/api/models*`、`/v1/models` |
+//! | [`pull`] | `/api/models/pull`、`/api/models/jobs*` |
 //! | [`deployment`] | `/api/deploy`、`/api/deployments*`、`/api/preview`、`/api/assess` |
 //! | [`inference`] | `/v1/chat/completions`、`/v1/completions`、`/v1/embeddings` |
 //! | [`attachments`] | `/api/extract`、`/api/fetch-url` |
@@ -19,6 +20,7 @@ pub mod attachments;
 pub mod deployment;
 pub mod inference;
 pub mod models;
+pub mod pull;
 pub mod sessions;
 pub mod settings;
 pub mod status;
