@@ -3000,10 +3000,26 @@ fn e2e_chat_and_deploy_ux_contracts() {
     let (status, body) = http("GET", "127.0.0.1", port, "/", None);
     assert_eq!(status, 200);
 
-    // 【1】生成中按钮变「停止」，可立即打断
+    // 【1】发送/停止状态使用图标切换，仍可访问且可立即中断。
     assert!(
-        body.contains(r#"$("btn-send").textContent = "停止""#),
-        "生成中应把发送按钮改成「停止」"
+        body.contains("function setSendButtonState(isStreaming)"),
+        "缺少发送按钮状态切换函数"
+    );
+    assert!(
+        body.contains("class=\"sendbtn\" id=\"btn-send\""),
+        "缺少图标发送按钮"
+    );
+    assert!(
+        body.contains("停止生成") && body.contains("aria-label"),
+        "生成中停止图标需保留无障碍标签"
+    );
+    assert!(
+        body.contains("setSendButtonState(true)") && body.contains("setSendButtonState(false)"),
+        "发送开始/结束时必须切换按钮图标状态"
+    );
+    assert!(
+        body.contains("stopGeneration(); return;"),
+        "停止图标必须调用中断实现"
     );
     assert!(body.contains("function stopGeneration("), "缺少中断实现");
     assert!(body.contains("chatAbort.abort()"), "中断必须真的断开请求");
@@ -3011,19 +3027,9 @@ fn e2e_chat_and_deploy_ux_contracts() {
         body.contains("AbortError"),
         "中断不应被当成失败（需区分 AbortError）"
     );
-    // 生成中不得置灰按钮
     assert!(
-        !body.contains("streaming = true;\n    $(\"btn-send\").disabled = true;"),
-        "生成中不应禁用发送按钮——否则无法打断"
-    );
-    // 轮询（refresh）也不能因 streaming 而禁用按钮。
-    //
-    // 这条是真实踩过的坑：refresh 每 3 秒跑一次，把 send() 里设置的
-    // 「可点停止」覆盖成 disabled，表现为「按钮写着停止但灰着点不动」，
-    // 用户永远没法中断。只允许因「没有就绪模型」而禁用。
-    assert!(
-        !body.contains(r#"$("btn-send").disabled = !ready || streaming;"#),
-        "轮询不得因 streaming 禁用发送按钮，否则会覆盖「停止」的可点状态"
+        body.contains("btn.disabled = !isStreaming && !ready;"),
+        "停止状态必须始终可点击，空闲状态按模型就绪情况禁用"
     );
 
     // 【2】【4】说明收进「?」按钮，默认隐藏

@@ -350,6 +350,17 @@ tr.picked{background:var(--accent-soft)}
 .iconbtn:hover:not(:disabled){background:var(--panel3);border-color:var(--line2);color:var(--text)}
 .iconbtn.on{background:var(--accent-soft);color:var(--accent);border-color:var(--accent-line)}
 .iconbtn svg{width:16px;height:16px}
+.sendbtn{
+  width:34px;height:34px;padding:0;border:0;border-radius:10px;
+  display:grid;place-items:center;background:var(--accent);color:#fff;
+  box-shadow:0 2px 7px rgba(58,33,72,.18);transition:.16s;
+}
+.sendbtn:hover:not(:disabled){background:var(--accent2);border:0;color:#fff;transform:translateY(-1px);box-shadow:0 4px 10px rgba(58,33,72,.22)}
+.sendbtn:focus-visible{outline:2px solid var(--accent2);outline-offset:2px}
+.sendbtn:disabled{opacity:.42;background:var(--accent);color:#fff}
+.sendbtn.stop{background:var(--danger);box-shadow:0 2px 7px rgba(192,69,59,.2)}
+.sendbtn.stop:hover:not(:disabled){background:var(--danger);filter:brightness(.94)}
+.sendbtn svg{width:17px;height:17px;display:block}
 
 /* ================= PANE 通用 ================= */
 .pane{flex:1;overflow-y:auto;padding:22px 26px;min-height:0}
@@ -562,7 +573,13 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
             <select id="chat-model"><option value="">（加载中…）</option></select>
           </label>
           <span class="grow"></span>
-          <button class="primary sm" id="btn-send" disabled>发送</button>
+          <button class="sendbtn" id="btn-send" disabled
+                  aria-label="发送" title="发送消息">
+            <svg class="send-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4Z"/>
+            </svg>
+          </button>
         </div>
       </div>
     </div>
@@ -1176,6 +1193,25 @@ Tabs.register("chat", (() => {
     return text + extra;
   }
 
+  function setSendButtonState(isStreaming) {
+    const btn = $("btn-send");
+    if (!btn) return;
+    if (isStreaming) {
+      btn.classList.add("stop");
+      btn.setAttribute("aria-label", "停止生成");
+      btn.title = "停止生成";
+      btn.setAttribute("aria-busy", "true");
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+    } else {
+      btn.classList.remove("stop");
+      btn.setAttribute("aria-label", "发送");
+      btn.title = "发送消息";
+      btn.setAttribute("aria-busy", "false");
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4Z"/></svg>';
+    }
+    btn.disabled = !isStreaming && !ready;
+  }
+
   async function send() {
     // 正在生成时，这个按钮是「停止」——点它就是打断，而不是再发一条。
     if (streaming) { stopGeneration(); return; }
@@ -1204,11 +1240,8 @@ Tabs.register("chat", (() => {
 
     streaming = true;
     chatAbort = new AbortController();
-    // 按钮不置灰，改成可点的「停止」：长回答时用户随时能中断，
-    // 而不是干等到结束（本地 CPU 推理尤其慢）。
-    $("btn-send").disabled = false;
-    $("btn-send").textContent = "停止";
-    $("btn-send").title = "点击立即中断本次生成";
+    // 保持按钮可点，图标切换为停止方块；用户随时可中断长回答。
+    setSendButtonState(true);
 
     let acc = "";
     let meta = "";
@@ -1295,9 +1328,7 @@ Tabs.register("chat", (() => {
       m.bubble.classList.remove("cursor");
       streaming = false;
       chatAbort = null;
-      $("btn-send").textContent = "发送";
-      $("btn-send").title = "";
-      $("btn-send").disabled = !ready;
+      setSendButtonState(false);
       scrollDown();
     }
   }
@@ -1433,12 +1464,8 @@ Tabs.register("chat", (() => {
         // 算力来源属于「部署」页的职责，那里有「模型实例」卡片。
         $("ta").disabled = !ready;
 
-        // 注意：这里**不能**因为 `streaming` 就禁用发送按钮。
-        //
-        // 轮询每 3 秒跑一次，会把 send() 里设置的「可点停止」覆盖掉，
-        // 表现为「按钮写着停止但灰着，点不动」——用户永远没法中断。
-        // 生成中按钮必须是可点的「停止」，只有「没有就绪模型」才该禁用。
-        $("btn-send").disabled = !ready;
+        // 生成中按钮保持停止图标且可点击；空闲时按模型就绪状态禁用。
+        setSendButtonState(streaming);
       } catch (e) { /* 轮询失败静默 */ }
     },
   };
