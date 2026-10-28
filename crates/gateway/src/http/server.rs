@@ -150,7 +150,7 @@ impl Response {
 ///
 /// 只为「浏览器上传附件」这一条路径实现，不引入 base64 crate：
 /// 需求固定、无变体（不支持 URL-safe），几十行足够。
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
     fn val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
@@ -186,14 +186,14 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 /// 4 MiB 是实测折中：元数据段（KV 表）通常 30~60 KiB，大模型的词表元数据
 /// 可达数百 KiB；4 MiB 覆盖绝大多数情况，同时把首字节等待压在 2~3 秒。
 /// 再大收益递减，还会明显拖慢「点部署后第一眼看到结果」的体感。
-const REMOTE_HEADER_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const REMOTE_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 评估结果的单行摘要（含资源占用明细）。
 ///
 /// 与 `gateway::assessed_detail` 同样的信息，但在 server 侧构造——
 /// 那边是 `pub(crate)` 之外的私有函数，且这里要用在**持有任务表锁**的
 /// 闭包里（不能再进网关锁拿数据）。
-fn probe_assessed_detail(ev: &mangosteen_orchestration::assess::Evaluated) -> String {
+pub(crate) fn probe_assessed_detail(ev: &mangosteen_orchestration::assess::Evaluated) -> String {
     crate::gateway::assessed_detail(ev)
 }
 
@@ -202,7 +202,7 @@ fn probe_assessed_detail(ev: &mangosteen_orchestration::assess::Evaluated) -> St
 /// 去掉 `.gguf` 后缀与量化尾缀，得到如 `qwen2.5-0.5b-instruct`。
 /// 量化尾缀写法多样（`-q4_k_m` / `.Q4_K_M`），复用 `ModelRef` 自己的
 /// 解析器，避免两处规则分叉。
-fn model_name_for_estimate(model: &mangosteen_core::source::ModelRef) -> String {
+pub(crate) fn model_name_for_estimate(model: &mangosteen_core::source::ModelRef) -> String {
     let f = model.local_file_name();
     let stem = f.strip_suffix(".gguf").unwrap_or(&f).to_string();
     match model.quant_from_filename() {
@@ -226,7 +226,7 @@ fn model_name_for_estimate(model: &mangosteen_core::source::ModelRef) -> String 
 }
 
 /// 取错误信息第一行（弹窗/阶段说明里只放一句能读懂的话）。
-fn first_line(msg: &str) -> String {
+pub(crate) fn first_line(msg: &str) -> String {
     msg.lines()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("未知原因")
@@ -235,7 +235,7 @@ fn first_line(msg: &str) -> String {
 }
 
 /// 任务状态 → JSON。字段名是 UI 的契约，改名会让进度条白屏。
-fn job_json(j: &crate::pulljobs::PullJob) -> serde_json::Value {
+pub(crate) fn job_json(j: &crate::pulljobs::PullJob) -> serde_json::Value {
     // 步骤条：把「全部步骤」与「每步最新状态」一次给全。
     //
     // 为什么在后端算而不是前端拼：前端只拿到「当前阶段」时，无法区分
@@ -306,7 +306,7 @@ fn job_json(j: &crate::pulljobs::PullJob) -> serde_json::Value {
 /// 接受 `1` / `true` / `yes` / 空值（`?flag`）作为真，其余为假。
 /// 单独成函数是因为路由分支只拿得到 `ParsedRequest`，而 Query 解析
 /// 不应依赖整个请求对象。
-fn query_flag(query: &str, key: &str) -> bool {
+pub(crate) fn query_flag(query: &str, key: &str) -> bool {
     for part in query.split('&') {
         let (k, v) = match part.split_once('=') {
             Some((k, v)) => (k, v),
@@ -321,7 +321,7 @@ fn query_flag(query: &str, key: &str) -> bool {
 }
 
 /// 状态码短语。
-fn reason_phrase(code: u16) -> &'static str {
+pub(crate) fn reason_phrase(code: u16) -> &'static str {
     match code {
         200 => "OK",
         201 => "Created",
@@ -344,7 +344,7 @@ fn reason_phrase(code: u16) -> &'static str {
 const MAX_BODY: usize = 32 * 1024 * 1024;
 
 /// 十六进制字符 → 数值。
-fn hex_val(c: u8) -> Option<u8> {
+pub(crate) fn hex_val(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
         b'a'..=b'f' => Some(c - b'a' + 10),
@@ -371,7 +371,7 @@ fn hex_val(c: u8) -> Option<u8> {
 /// - **`%2F` 会被解成 `/`**，理论上会让路径多切一段。这里不做特判：
 ///   模型 ID 不含 `/`，且路径参数只用于查台账 key（不拼文件路径），
 ///   不存在穿越风险；解不开就是 404，与不解码时的结果一致。
-fn percent_decode_path(s: &str) -> String {
+pub(crate) fn percent_decode_path(s: &str) -> String {
     let b = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -468,25 +468,25 @@ pub fn parse_request<R: Read>(reader: &mut BufReader<R>) -> MnResult<Option<Pars
 
 /// 网关 HTTP 服务。
 pub struct GatewayServer {
-    gateway: Arc<Mutex<Gateway>>,
+    pub(crate) gateway: Arc<Mutex<Gateway>>,
     /// 是否要求 API Key
-    require_key: bool,
+    pub(crate) require_key: bool,
     /// 期望的 API Key
-    api_key: String,
+    pub(crate) api_key: String,
     /// 上游转发超时
-    upstream_timeout: Duration,
+    pub(crate) upstream_timeout: Duration,
     /// CPU 采样器（有状态：使用率需要两个时间点的差值）
-    sampler: mangosteen_platform::resmon::CpuSampler,
+    pub(crate) sampler: mangosteen_platform::resmon::CpuSampler,
     /// 模型下载任务表
-    pull_jobs: crate::pulljobs::PullJobs,
+    pub(crate) pull_jobs: crate::pulljobs::PullJobs,
     /// 云端监控缓存（后台线程填充，请求路径只读）
-    cloud_monitor: crate::cloudmon::CloudMonitor,
+    pub(crate) cloud_monitor: crate::cloudmon::CloudMonitor,
     /// 用户会话存储（第一层·用户会话管理）。
     ///
     /// 会话是**最上层**的状态：推理对话的上下文、部署任务的操作记录。
     /// 放在网关侧而不是浏览器内存，是为了跨进程可见——
     /// `mangosteen ui` 关掉再开，历史还在。
-    sessions: mangosteen_session::SessionStore,
+    pub(crate) sessions: mangosteen_session::SessionStore,
 }
 
 impl GatewayServer {
@@ -945,6 +945,7 @@ impl GatewayServer {
 
     // ---------------------------------------------------------------- 处理器
 
+    // ============================ handlers/status.rs ============================
     fn health(&self) -> Response {
         let mut gw = match self.gateway.lock() {
             Ok(g) => g,
@@ -1312,6 +1313,7 @@ impl GatewayServer {
     ///
     /// **只返回可安全展示的字段**。凭证永远不回显原文，只回显「是否已配置」，
     /// 否则一个局域网内的人打开页面就能看到你的云厂商密钥。
+    // ============================ handlers/settings.rs ============================
     fn get_settings(&self) -> Response {
         let cfg = {
             let gw = match self.gateway.lock() {
@@ -1576,6 +1578,7 @@ impl GatewayServer {
     ///
     /// 内容上传路径顺便更安全：不涉及服务端文件系统访问，也就没有越权读取
     /// 的风险。路径方式保留给 CLI，并继续受访问控制约束。
+    // ============================ handlers/attachments.rs ============================
     fn extract_attachment(&self, req: &ParsedRequest) -> Response {
         let parsed: serde_json::Value = match serde_json::from_str(&req.body_str()) {
             Ok(v) => v,
@@ -1730,6 +1733,7 @@ impl GatewayServer {
     ///
     /// 路径对用户有实际价值：模型动辄几 GB，用户需要知道它占在哪块盘、
     /// 好清理或备份，而不是只知道「有个模型叫这个名字」。
+    // ============================ handlers/models.rs ============================
     fn list_models(&self) -> Response {
         let gw = match self.gateway.lock() {
             Ok(g) => g,
@@ -2393,160 +2397,7 @@ impl GatewayServer {
 
     // ---------------------------------------------------------- 会话管理
 
-    /// 列出会话。`GET /api/sessions?kind=chat|deploy`
-    ///
-    /// 不带 `kind` 则返回全部。列表只给摘要（不含消息体），
-    /// 否则几十轮对话的会话会让列表接口膨胀到几百 KB。
-    fn list_sessions(&self, req: &ParsedRequest) -> Response {
-        let kind = req
-            .query_param("kind")
-            .and_then(|k| mangosteen_session::SessionKind::parse(&k));
-        let res = match kind {
-            Some(k) => self.sessions.list_by_kind(k),
-            None => self.sessions.list(),
-        };
-        match res {
-            Ok(list) => Response::json(200, &serde_json::json!({ "sessions": list })),
-            Err(e) => Response::error(&e),
-        }
-    }
-
-    /// 新建会话。`POST /api/sessions`
-    ///
-    /// 请求体：`{ "kind": "chat"|"deploy", "title": "...", "model": "..." }`
-    /// 三者都可省略——`kind` 默认 `chat`，`title` 留空则由首条用户消息自动生成。
-    fn create_session(&self, req: &ParsedRequest) -> Response {
-        let parsed: serde_json::Value = match serde_json::from_slice(&req.body) {
-            Ok(v) => v,
-            Err(e) => {
-                return Response::json(
-                    400,
-                    &ErrorResponse::bad_request(format!("请求体不是合法 JSON：{e}"), None),
-                )
-            }
-        };
-        let kind = match parsed.get("kind").and_then(|v| v.as_str()) {
-            Some(s) => match mangosteen_session::SessionKind::parse(s) {
-                Some(k) => k,
-                None => {
-                    return Response::json(
-                        400,
-                        &ErrorResponse::bad_request(
-                            format!("未知会话种类 `{s}`，可选 chat / deploy"),
-                            Some("kind"),
-                        ),
-                    )
-                }
-            },
-            None => mangosteen_session::SessionKind::Chat,
-        };
-        let title = parsed
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let model = parsed
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        match self.sessions.create(kind, title, model) {
-            Ok(s) => Response::json(201, &serde_json::json!({ "session": s })),
-            Err(e) => Response::error(&e),
-        }
-    }
-
-    /// 读取会话详情（含消息与操作记录）。`GET /api/sessions/{id}`
-    fn get_session(&self, id: &str) -> Response {
-        match self.sessions.get(id) {
-            Ok(Some(s)) => Response::json(200, &serde_json::json!({ "session": s })),
-            Ok(None) => Response::not_found(id),
-            Err(e) => Response::error(&e),
-        }
-    }
-
-    /// 删除会话。`DELETE /api/sessions/{id}`
-    fn delete_session(&self, id: &str) -> Response {
-        match self.sessions.delete(id) {
-            Ok(true) => Response::json(200, &serde_json::json!({ "ok": true, "id": id })),
-            Ok(false) => Response::not_found(id),
-            Err(e) => Response::error(&e),
-        }
-    }
-
-    /// 追加一条消息。`POST /api/sessions/{id}/messages`
-    ///
-    /// 请求体：`{ "role": "user"|"assistant"|"system", "content": "..." }`
-    fn append_session_message(&self, id: &str, req: &ParsedRequest) -> Response {
-        let parsed: serde_json::Value = match serde_json::from_slice(&req.body) {
-            Ok(v) => v,
-            Err(e) => {
-                return Response::json(
-                    400,
-                    &ErrorResponse::bad_request(format!("请求体不是合法 JSON：{e}"), None),
-                )
-            }
-        };
-        let Some(content) = parsed.get("content").and_then(|v| v.as_str()) else {
-            return Response::json(
-                400,
-                &ErrorResponse::bad_request("缺少 content 字段", Some("content")),
-            );
-        };
-        let role = parsed
-            .get("role")
-            .and_then(|v| v.as_str())
-            .unwrap_or("user");
-        if !matches!(role, "user" | "assistant" | "system") {
-            return Response::json(
-                400,
-                &ErrorResponse::bad_request(
-                    format!("未知角色 `{role}`，可选 user / assistant / system"),
-                    Some("role"),
-                ),
-            );
-        }
-        match self.sessions.append_message(id, role, content) {
-            Ok(Some(s)) => Response::json(200, &serde_json::json!({ "session": s })),
-            Ok(None) => Response::not_found(id),
-            Err(e) => Response::error(&e),
-        }
-    }
-
-    /// 记录一次操作。`POST /api/sessions/{id}/operations`
-    ///
-    /// 请求体：`{ "action": "deploy", "detail": "...", "ok": true }`
-    ///
-    /// 失败的操作也要记（`ok: false`）——操作记录的价值就在于
-    /// 「当时到底发生了什么」，只记成功等于自欺。
-    fn record_session_operation(&self, id: &str, req: &ParsedRequest) -> Response {
-        let parsed: serde_json::Value = match serde_json::from_slice(&req.body) {
-            Ok(v) => v,
-            Err(e) => {
-                return Response::json(
-                    400,
-                    &ErrorResponse::bad_request(format!("请求体不是合法 JSON：{e}"), None),
-                )
-            }
-        };
-        let Some(action) = parsed.get("action").and_then(|v| v.as_str()) else {
-            return Response::json(
-                400,
-                &ErrorResponse::bad_request("缺少 action 字段", Some("action")),
-            );
-        };
-        let detail = parsed
-            .get("detail")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
-        match self.sessions.record_operation(id, action, &detail, ok) {
-            Ok(Some(s)) => Response::json(200, &serde_json::json!({ "session": s })),
-            Ok(None) => Response::not_found(id),
-            Err(e) => Response::error(&e),
-        }
-    }
+    // 会话相关处理器已迁至 crate::http::handlers::sessions
 
     fn list_pull_jobs(&self, req: &ParsedRequest) -> Response {
         if let Some(id) = req.query_param("id") {
@@ -2629,6 +2480,7 @@ impl GatewayServer {
         }
     }
 
+    // ============================ handlers/deployment.rs ============================
     fn deployments(&self) -> Response {
         let gw = match self.gateway.lock() {
             Ok(g) => g,
@@ -2879,6 +2731,7 @@ impl GatewayServer {
 
     // ---------------------------------------------------------------- 推理转发
 
+    // ============================ handlers/inference.rs ============================
     fn chat(&self, req: &ParsedRequest) -> Response {
         let parsed: ChatRequest = match serde_json::from_slice(&req.body) {
             Ok(r) => r,
@@ -3029,7 +2882,7 @@ impl GatewayServer {
 /// 为什么必须单独识别：`Response.body` 是 `Vec<u8>`，天然是
 /// 「全部读完再返回」。流式请求若走那条路径，用户要等整段生成完
 /// 才看到第一个字——这正是「输出卡顿」的直接原因。
-fn is_stream_request(req: &ParsedRequest) -> bool {
+pub(crate) fn is_stream_request(req: &ParsedRequest) -> bool {
     if req.method != "POST" {
         return false;
     }
@@ -3050,7 +2903,7 @@ fn is_stream_request(req: &ParsedRequest) -> bool {
 /// flush 是流式的关键：不 flush 的话数据留在用户态缓冲里，
 /// 浏览器收不到，界面上就是「一直不动，最后一次性出现」。
 /// 返回 `false` 表示客户端已断开（用户点了「停止」或关了页面）。
-fn write_chunk(stream: &mut TcpStream, data: &[u8]) -> bool {
+pub(crate) fn write_chunk(stream: &mut TcpStream, data: &[u8]) -> bool {
     if data.is_empty() {
         return true;
     }
@@ -3140,7 +2993,7 @@ pub fn parse_http_response(raw: &[u8]) -> MnResult<(u16, String)> {
 }
 
 /// 解 chunked 编码。
-fn decode_chunked(input: &str) -> String {
+pub(crate) fn decode_chunked(input: &str) -> String {
     let mut out = String::new();
     let mut rest = input;
     loop {
@@ -3163,7 +3016,7 @@ fn decode_chunked(input: &str) -> String {
 }
 
 /// 拆分 `http://host:port/path`。
-fn split_url(url: &str) -> MnResult<(String, String)> {
+pub(crate) fn split_url(url: &str) -> MnResult<(String, String)> {
     let rest = url
         .strip_prefix("http://")
         .ok_or_else(|| MnError::bad_request(format!("只支持 http:// 上游，实际 {url}")))?;
@@ -3174,7 +3027,7 @@ fn split_url(url: &str) -> MnResult<(String, String)> {
 }
 
 /// 截取响应体摘要（错误消息用）。
-fn summarize_body(body: &str) -> String {
+pub(crate) fn summarize_body(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(m) = v
             .get("error")

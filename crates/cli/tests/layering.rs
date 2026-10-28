@@ -680,6 +680,13 @@ fn c6_five_layer_architecture_is_complete() {
         "crates/gateway/src/http/router.rs",
         "crates/gateway/src/http/upstream.rs",
         "crates/gateway/src/http/handlers/mod.rs",
+        "crates/gateway/src/http/handlers/status.rs",
+        "crates/gateway/src/http/handlers/models.rs",
+        "crates/gateway/src/http/handlers/deployment.rs",
+        "crates/gateway/src/http/handlers/sessions.rs",
+        "crates/gateway/src/http/handlers/inference.rs",
+        "crates/gateway/src/http/handlers/attachments.rs",
+        "crates/gateway/src/http/handlers/settings.rs",
     ] {
         assert!(file_exists(module), "第二层缺少 HTTP 模块边界：{module}");
     }
