@@ -21,12 +21,14 @@
 //! | [`progress`] | 部署阶段定义与进度上报契约 |
 //! | [`backend`] | 后端目标（BackendTarget） |
 //!
-//! 编排执行面按职责平铺为 `orchestrator*.rs` 文件（父模块用
-//! `#[path]` 声明），不额外建立同名目录——目录只用于真实子命名空间。
+//! 编排执行面按职责平铺为短名文件（`runtime` / `deploy` / `launch` /
+//! `provision` / `evaluate` / `lifecycle` / `query` / `preview` / `engine` /
+//! `cloud`），不额外建立同名目录——目录只用于真实子命名空间。
 
 pub mod assess;
 pub mod backend;
 pub mod deployment;
+#[path = "runtime.rs"]
 pub mod orchestrator;
 pub mod progress;
 pub mod scheduler;

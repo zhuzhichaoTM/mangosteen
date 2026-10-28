@@ -1,37 +1,8 @@
-//! 部署编排与运行生命周期：第三层编排调度核心的执行面。
+//! 部署编排核心运行时：承载 `Orchestrator` 状态与各职责模块装配。
 //!
-//! 归属：**第三层 · 编排调度核心**。
-//!
-//! ## 职责
-//!
-//! 「评估 → 本地/云端模式决策 → 节点选择 → 节点配置 → 部署编排 →
-//! 模型加载运行全生命周期管理」这一整条链路落在这里。它持有执行所需的
-//! 下层能力（评估器、调度器、引擎注册表、云端编排器、台账、模型库），
-//! 但**不实现 HTTP、路由或协议转换**——那是第二层 `mangosteen-gateway`
-//! 的职责。网关只把请求收口到本结构的方法上。
-//!
-//! ## 与 device / provider 的边界
-//!
-//! * 本地与云端的「模型下载、引擎准备、启动、探活、停止」都属于
-//!   `mangosteen-device`，本层只做决策与编排；
-//! * `mangosteen-provider` 只负责创建与连接 GPU 节点，本层调用它拿实例，
-//!   不解释任何厂商协议细节。
-//!
-//! ## 状态归属
-//!
-//! 运行中的本地引擎句柄（`engines`）、请求序号、引擎版本缓存都是**进程内
-//! 运行状态**，不是领域数据；它们归编排层持有，网关不再直接管理。
-//!
-//! ## 子模块
-//!
-//! | 模块 | 职责 |
-//! |------|------|
-//! | [`deploy`](self) | 评估 → 决策 → 配置 → 启动 / 云端降级 |
-//! | `lifecycle` | 停止服务、恢复服务、回滚中止、整体关停 |
-//! | `query` | 台账列表、活跃后端、云端监控、状态快照 |
-//! | `cloud_ops` | 云端选点、规格列举、裸实例创建与销毁 |
-//! | `preview` | 无副作用的部署预估与费用 |
-//! | `engine_admin` | 引擎版本探测与缓存 |
+//! 这是公开模块 `orchestration::orchestrator` 的物理实现文件。具体职责拆分在
+//! `deploy`、`lifecycle`、`query`、`preview`、`engine`、`cloud` 等同级短名文件；
+//! 本文件定义运行状态及共享领域结构，不实现 HTTP 或协议转换。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -55,17 +26,17 @@ use crate::deployment::{
 };
 use crate::scheduler::{Decision, Scheduler};
 
-#[path = "orchestrator_cloud_ops.rs"]
+#[path = "cloud.rs"]
 mod cloud_ops;
-#[path = "orchestrator_deploy.rs"]
+#[path = "deploy.rs"]
 mod deploy;
-#[path = "orchestrator_engine_admin.rs"]
+#[path = "engine.rs"]
 mod engine_admin;
-#[path = "orchestrator_lifecycle.rs"]
+#[path = "lifecycle.rs"]
 mod lifecycle;
-#[path = "orchestrator_preview.rs"]
+#[path = "preview.rs"]
 mod preview;
-#[path = "orchestrator_query.rs"]
+#[path = "query.rs"]
 mod query;
 
 /// 引擎版本探测的时间预算。

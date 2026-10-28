@@ -565,7 +565,16 @@ crates/
 ├── orchestration         第三层：评估 / 决策 / 节点配置 / 部署编排 / 生命周期
 │   ├── assess.rs         资源评估
 │   ├── scheduler.rs      本地优先决策与云端候选打分
-│   ├── orchestrator*.rs  部署编排、停止/恢复/回滚、状态查询、云端操作
+│   ├── runtime.rs         编排核心状态、Orchestrator 类型与子模块组装
+│   ├── deploy.rs          部署准备与阶段编排
+│   ├── evaluate.rs        本地 / 远端 / 粗估评估入口
+│   ├── launch.rs          本地引擎提交与失败降级
+│   ├── provision.rs       云端启动配置与实例创建
+│   ├── lifecycle.rs       停止 / 恢复 / 中止 / 关停
+│   ├── query.rs           状态、活跃后端与监控查询
+│   ├── preview.rs         无副作用部署预览
+│   ├── engine.rs          引擎版本探测与缓存
+│   └── cloud.rs           云端规格、选点与裸实例操作
 │   ├── deployment.rs     部署产物与预览契约
 │   ├── progress.rs       部署阶段进度契约
 │   └── backend.rs        后端目标（BackendTarget）

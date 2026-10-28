@@ -5,11 +5,11 @@
 
 use super::*;
 
-#[path = "orchestrator_deploy_cloud.rs"]
+#[path = "provision.rs"]
 mod cloud;
-#[path = "orchestrator_deploy_evaluate.rs"]
+#[path = "evaluate.rs"]
 mod evaluate;
-#[path = "orchestrator_deploy_local.rs"]
+#[path = "launch.rs"]
 mod local;
 
 impl Orchestrator {

@@ -766,13 +766,13 @@ fn c6_five_layer_architecture_is_complete() {
     );
     // 模块 3.5：部署编排与运行生命周期（第三层的执行面）
     for f in [
-        "crates/orchestration/src/orchestrator.rs",
-        "crates/orchestration/src/orchestrator_deploy.rs",
-        "crates/orchestration/src/orchestrator_deploy_evaluate.rs",
-        "crates/orchestration/src/orchestrator_deploy_local.rs",
-        "crates/orchestration/src/orchestrator_deploy_cloud.rs",
-        "crates/orchestration/src/orchestrator_lifecycle.rs",
-        "crates/orchestration/src/orchestrator_query.rs",
+        "crates/orchestration/src/runtime.rs",
+        "crates/orchestration/src/deploy.rs",
+        "crates/orchestration/src/evaluate.rs",
+        "crates/orchestration/src/launch.rs",
+        "crates/orchestration/src/provision.rs",
+        "crates/orchestration/src/lifecycle.rs",
+        "crates/orchestration/src/query.rs",
     ] {
         assert!(file_exists(f), "第三层缺少「部署编排与生命周期」模块：{f}");
     }
