@@ -334,32 +334,40 @@ fn c2_platform_code_is_centralized() {
 /// 某个引擎被特殊对待了。
 #[test]
 fn c3_engine_differences_are_pluginized() {
-    for name in ["mod.rs", "scheduler.rs", "assess.rs"] {
-        let found = crate_sources("mangosteen-gateway")
-            .into_iter()
-            .find(|(p, _)| p.file_name().map(|f| f == name).unwrap_or(false));
-        let Some((path, src)) = found else { continue };
-        let code = strip_comments_and_strings(&src);
-        assert!(
-            !code.contains("InferenceEngine::"),
-            "C3 违反：{} 出现引擎字面量。引擎差异必须收敛到插件，\
-             主链路只允许通过 EngineRegistry 分发。",
-            path.display()
-        );
+    // 编排主链路已按基线归位到 `mangosteen-orchestration`（第三层），
+    // 因此引擎字面量禁令扫**编排层**；网关只做装配与协议转换。
+    for crate_name in ["mangosteen-orchestration", "mangosteen-gateway"] {
+        for (path, src) in crate_sources(crate_name) {
+            // 设置页需要把可选引擎列成下拉项：那是**配置序列化**，不是
+            // 按引擎分支的执行逻辑，允许出现枚举名。判据是文件归属：
+            // 只有 `handlers/settings.rs` 这一处是配置读写。
+            if path
+                .file_name()
+                .map(|f| f == "settings.rs")
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let code = strip_comments_and_strings(&src);
+            assert!(
+                !code.contains("InferenceEngine::"),
+                "C3 违反：{} 出现引擎字面量。引擎差异必须收敛到插件，\
+                 主链路只允许通过 EngineRegistry 分发。",
+                path.display()
+            );
+        }
     }
 
-    // 网关必须确实经注册表取插件（防止「删掉了分支但也没接上插件」）。
-    // 扫描已经按层归位后的 orchestration 目录，避免新文件绕开规则。
-    // `gateway.rs` 仍保留薄壳/公开转发，但引擎生命周期与插件分发不再归它。
-    // 编排主链路可能分布在 gateway 模块目录的多个文件里（engine_admin /
-    // deploy / lifecycle 等），因此按整个 crate 汇总扫描，而不是只看单个文件。
-    let gw: String = crate_sources("mangosteen-gateway")
+    // 编排主链路必须确实经注册表取插件（防止「删掉了分支但也没接上插件」）。
+    // 编排逻辑分布在 orchestrator/ 的多个子模块（deploy / lifecycle /
+    // engine_admin 等），因此按整个 crate 汇总扫描，而不是只看单个文件。
+    let orch: String = crate_sources("mangosteen-orchestration")
         .into_iter()
         .map(|(_, s)| strip_comments_and_strings(&s))
         .collect();
     assert!(
-        gw.contains("engines_registry.get("),
-        "C3 违反：网关未通过注册表取引擎插件"
+        orch.contains("engines_registry.get("),
+        "C3 违反：编排层未通过注册表取引擎插件"
     );
 }
 
@@ -554,6 +562,19 @@ fn c5_dependency_direction_is_top_down() {
             ],
         ),
         (
+            // 第三层编排调度核心：持有评估、决策、部署编排与运行生命周期，
+            // 通过 device 与 provider 完成执行，通过 base 落台账。
+            "mangosteen-orchestration",
+            &[
+                "mangosteen-core",
+                "mangosteen-platform",
+                "mangosteen-base",
+                "mangosteen-session",
+                "mangosteen-device",
+                "mangosteen-provider",
+            ],
+        ),
+        (
             "mangosteen-gateway",
             &[
                 "mangosteen-core",
@@ -561,6 +582,8 @@ fn c5_dependency_direction_is_top_down() {
                 "mangosteen-base",
                 // 网关要为上层暴露会话接口 → 依赖会话层
                 "mangosteen-session",
+                // 部署编排与运行生命周期在第三层，网关只做收口
+                "mangosteen-orchestration",
                 "mangosteen-device",
                 "mangosteen-provider",
             ],
@@ -585,6 +608,7 @@ fn c5_dependency_direction_is_top_down() {
         "mangosteen-session",
         "mangosteen-device",
         "mangosteen-provider",
+        "mangosteen-orchestration",
         "mangosteen-gateway",
         "mangosteen-cli",
     ];
@@ -722,6 +746,19 @@ fn c6_five_layer_architecture_is_complete() {
     assert!(
         crate_has("mangosteen-orchestration", "pub fn decide"),
         "节点选择缺少决策入口（decide）"
+    );
+    // 模块 3.5：部署编排与运行生命周期（第三层的执行面）
+    for f in [
+        "crates/orchestration/src/orchestrator/mod.rs",
+        "crates/orchestration/src/orchestrator/deploy.rs",
+        "crates/orchestration/src/orchestrator/lifecycle.rs",
+        "crates/orchestration/src/orchestrator/query.rs",
+    ] {
+        assert!(file_exists(f), "第三层缺少「部署编排与生命周期」模块：{f}");
+    }
+    assert!(
+        crate_has("mangosteen-orchestration", "pub struct Orchestrator"),
+        "部署编排核心缺少 Orchestrator"
     );
     // 模块 4：节点配置（本地 / 云端两套配置生成）
     assert!(

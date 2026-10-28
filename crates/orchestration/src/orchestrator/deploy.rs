@@ -1,19 +1,19 @@
 //! 部署编排：「评估 → 选择 → 配置 → 执行」与本地失败后的云端降级。
 //!
-//! 归属：网关 crate 内部（第三层编排职责的第二层门面实现）。
-//! `Gateway` 的字段在 `super`（gateway 模块）中定义，子模块可直接访问。
+//! 归属：第三层 · 编排调度核心。
+//! `Orchestrator` 的字段在 `super` 中定义，子模块可直接访问。
 
 use super::*;
 
-impl Gateway {
+impl Orchestrator {
     /// 执行部署。这是系统的主入口（模型已在本地时用）。
     ///
     /// 完整流程见模块文档。返回的 `DeploymentPlan` 已落台账。
     ///
-    /// 若模型尚未下载，用 [`Gateway::prepare_with_progress`] +
-    /// [`Gateway::commit_local`] 把「下载」插在两段之间。
+    /// 若模型尚未下载，用 [`Orchestrator::prepare_with_progress`] +
+    /// [`Orchestrator::commit_local`] 把「下载」插在两段之间。
     pub fn deploy(&mut self, req: &DeploymentRequest) -> MnResult<DeploymentPlan> {
-        self.deploy_with_progress(req, &mangosteen_orchestration::progress::noop_sink)
+        self.deploy_with_progress(req, &crate::progress::noop_sink)
     }
     /// 「准备」阶段：评估 → 选择设备 → 生成配置，**不启动**。
     ///
@@ -21,9 +21,9 @@ impl Gateway {
     ///
     /// | 情形 | 获取方式 |
     /// |------|---------|
-    /// | 本地已有文件 | [`Gateway::evaluate`]（读盘，精确） |
-    /// | 远端未下载 | [`Gateway::evaluate_remote`]（HTTP `Range` 预取头部，精确） |
-    /// | 预取失败 | [`Gateway::evaluate_estimated`]（按体积粗估，标注为估算） |
+    /// | 本地已有文件 | [`Orchestrator::evaluate`]（读盘，精确） |
+    /// | 远端未下载 | [`Orchestrator::evaluate_remote`]（HTTP `Range` 预取头部，精确） |
+    /// | 预取失败 | [`Orchestrator::evaluate_estimated`]（按体积粗估，标注为估算） |
     ///
     /// ## 为什么必须拆成两段
     ///
@@ -31,7 +31,7 @@ impl Gateway {
     /// 先让用户看到「跑不跑得动、占多少内存」，再花时间下载。
     /// 下载若排在评估前，用户白等几 GB 才知道跑不动；启动若排在下载前，
     /// 引擎找不到文件必然失败。所以下载必须夹在 prepare 与 commit 之间，
-    /// 且由上层在**不持网关锁**的线程里执行（见 [`crate::pulljobs`]）。
+    /// 且由上层在**不持网关锁**的线程里执行（见 [`the pull job manager`]）。
     ///
     /// 本方法返回时已落台账（`provisioning`），因此下载失败会留下一条
     /// 失败记录——便于用户查「刚才那次为什么没成」。
@@ -39,13 +39,13 @@ impl Gateway {
         &mut self,
         evaluated: Evaluated,
         req: &DeploymentRequest,
-        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedDeployment> {
         let result = self.prepare_inner(evaluated, req, sink);
         if let Err(e) = &result {
             sink(
-                mangosteen_orchestration::progress::DeployStage::Failed,
-                mangosteen_orchestration::progress::StageOutcome::Failed,
+                crate::progress::DeployStage::Failed,
+                crate::progress::StageOutcome::Failed,
                 format!("{e}"),
             );
         }
@@ -59,13 +59,13 @@ impl Gateway {
     pub fn commit_local(
         &mut self,
         prepared: PreparedLocal,
-        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
         let result = self.commit_local_inner(prepared, sink);
         if let Err(e) = &result {
             sink(
-                mangosteen_orchestration::progress::DeployStage::Failed,
-                mangosteen_orchestration::progress::StageOutcome::Failed,
+                crate::progress::DeployStage::Failed,
+                crate::progress::StageOutcome::Failed,
                 format!("{e}"),
             );
         }
@@ -81,15 +81,15 @@ impl Gateway {
     pub fn deploy_with_progress(
         &mut self,
         req: &DeploymentRequest,
-        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
         let result = self.deploy_inner(req, sink);
         // 失败统一在这里上报：主体里有十几处 `return Err`，逐个埋点既
         // 啰嗦又容易漏——漏掉的那条会表现为「进度条永远卡在某一步」。
         if let Err(e) = &result {
             sink(
-                mangosteen_orchestration::progress::DeployStage::Failed,
-                mangosteen_orchestration::progress::StageOutcome::Failed,
+                crate::progress::DeployStage::Failed,
+                crate::progress::StageOutcome::Failed,
                 format!("{e}"),
             );
         }
@@ -101,9 +101,9 @@ impl Gateway {
     pub(crate) fn deploy_inner(
         &mut self,
         req: &DeploymentRequest,
-        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
-        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
+        use crate::progress::{DeployStage, StageOutcome};
 
         sink(
             DeployStage::Assessing,
@@ -137,9 +137,9 @@ impl Gateway {
         &mut self,
         evaluated: Evaluated,
         req: &DeploymentRequest,
-        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedDeployment> {
-        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
+        use crate::progress::{DeployStage, StageOutcome};
 
         // ---- 0. 同一模型只允许一个活跃实例 ----
         //
@@ -288,9 +288,9 @@ impl Gateway {
     pub(crate) fn commit_local_inner(
         &mut self,
         prepared: PreparedLocal,
-        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
-        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
+        use crate::progress::{DeployStage, StageOutcome};
 
         let PreparedLocal {
             id,
@@ -460,7 +460,7 @@ impl Gateway {
     }
     /// 为云端节点按部署时记录的引擎生成启动配置。
     ///
-    /// Gateway 作为第三层编排入口负责调用引擎 SPI；CloudOrchestrator 只执行
+    /// 编排层作为第三层入口负责调用引擎 SPI；CloudOrchestrator 只执行
     /// 收到的标准配置，不依赖 `mangosteen-device`，也不解释引擎 flags。
     pub(crate) fn cloud_launch_config(
         &self,
@@ -484,9 +484,9 @@ impl Gateway {
         cloud_plan: mangosteen_core::plan::CloudPlan,
         trail: Vec<String>,
         why_cloud: &str,
-        sink: mangosteen_orchestration::progress::ProgressSink<'_>,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
-        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
+        use crate::progress::{DeployStage, StageOutcome};
 
         if self.cloud.is_none() {
             return Err(MnError::NoViableCandidate {
@@ -625,7 +625,7 @@ impl Gateway {
     }
     /// 用远端预取的 GGUF 元数据评估（模型尚未下载到本地）。
     ///
-    /// 供 [`crate::pulljobs`] 的「评估 → 选设备 → 配置 → 下载 → 启动」
+    /// 供 [`the pull job manager`] 的「评估 → 选设备 → 配置 → 下载 → 启动」
     /// 链路在**下载前**调用。`info` 由 `mangosteen_base::probe_remote_metadata`
     /// 通过 HTTP `Range` 拿到文件头部后解析而来。
     pub fn evaluate_remote(
@@ -695,7 +695,7 @@ impl Gateway {
     ///
     /// 为什么需要：`pulljobs` 的部署钩子在 prepare 阶段要判断
     /// 「本地文件在不在，在就读盘精确评估」，而这个判断发生在闭包内、
-    /// 已经短暂持有网关锁。走 [`Gateway::evaluate`] 会绕一圈（它按 ID
+    /// 已经短暂持有网关锁。走 [`Orchestrator::evaluate`] 会绕一圈（它按 ID
     /// 查台账），而这里手上的就是确切路径，直接用评估器更准。
     pub fn assessor_public(&self) -> &Assessor {
         &self.assessor

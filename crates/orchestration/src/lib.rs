@@ -20,9 +20,19 @@
 
 pub mod assess;
 pub mod backend;
+pub mod deployment;
+pub mod orchestrator;
 pub mod progress;
 pub mod scheduler;
 
 pub use assess::{Assessor, ComputeTarget, DeploymentRequest, Evaluated, ModelDownloadSpec};
 pub use backend::BackendTarget;
+pub use deployment::{
+    CloudCandidateBrief, CloudPreview, DeploymentPreview, LocalPreview, PreparedDeployment,
+    PreparedLocal,
+};
+pub use orchestrator::{
+    scheduler_config_with_overrides, ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot,
+    GatewayStatus, Orchestrator,
+};
 pub use scheduler::{Decision, LocalLaunchOutcome, Scheduler, SchedulerOutcome};

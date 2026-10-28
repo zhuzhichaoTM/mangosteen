@@ -87,7 +87,8 @@
 │  ② 模式决策    orchestration::scheduler（本地优先）           │
 │  ③ 节点优选    orchestration::scheduler + core::policy       │
 │  ④ 节点配置    core::plan（本地/云端两套 + EngineLaunchConfig）│
-│  ⑤ 部署编排    gateway 门面 → orchestration 决策 → 执行       │
+│  ⑤ 部署编排    orchestration::orchestrator（评估→决策→执行）  │
+│  ⑥ 运行生命周期 停止服务 / 恢复服务 / 回滚 / 探活            │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
@@ -114,8 +115,8 @@
 | 一 | `mangosteen-session` | 会话领域模型 + 持久化 |
 | 一 | `mangosteen-cli` | 交互入口（参数解析、TUI） |
 | 一 | `mangosteen-webui` | 单文件 Web 控制台静态资源 |
-| 二 | `mangosteen-gateway` | HTTP 服务、路由、OpenAI 协议、唯一收口 |
-| 三 | `mangosteen-orchestration` | 模型评估、模式决策、节点优选、部署契约 |
+| 二 | `mangosteen-gateway` | HTTP 服务、路由、OpenAI 协议、唯一收口（薄门面） |
+| 三 | `mangosteen-orchestration` | 模型评估、模式决策、节点优选、部署编排、运行生命周期 |
 | 三 | `mangosteen-core::plan` | 节点配置（本地 / 云端 / EngineLaunchConfig） |
 | 四 | `mangosteen-device` | 本地与云端共用的模型资产、引擎与运行时 |
 | 四 | `mangosteen-provider` | GPU 节点供应、厂商驱动、隧道与节点连接 |
@@ -135,8 +136,8 @@
 core ←── platform ←── base ←── session
   ↑         ↑         ↑    ←── device
   ↑         ↑         └────── provider（同层组合，复用 device 远端运行时）
-  ↑         └──────────────── orchestration（评估/调度/部署契约）
-  └─────────────────────────── gateway（唯一 HTTP 收口）
+  ↑         └──────────────── orchestration（评估/调度/部署编排/生命周期）
+  └─────────────────────────── gateway（唯一 HTTP 收口，持有 Orchestrator）
                               cli / webui（第一层交互）
 ```
 
@@ -161,9 +162,10 @@ core ←── platform ←── base ←── session
 |----|-------|--------|----------|
 | 一·会话 | `session` | 会话 CRUD、消息追加、操作记录、持久化 | 判断可部署性、启动引擎、访问云 API |
 | 一·交互 | `cli` / `webui` | 解析参数、格式化输出、调用 `/api` 与 `/v1` | 直连引擎、直连云厂商 API |
-| 二 | `gateway` | 鉴权、路由、协议转换、状态回传 | 写平台专属代码、自己实现推理 |
+| 二 | `gateway` | 鉴权、路由、协议转换、状态回传 | 写平台专属代码、自己实现推理、持有运行状态 |
 | 三·评估 | `orchestration::assess` | 采集硬件、估算显存/内存、判定可行性 | 决定用本地还是云端 |
 | 三·选点 | `orchestration::scheduler` | 本地优先打分、云端候选排序 | 拉进程、调厂商 API |
+| 三·编排 | `orchestration::orchestrator` | 部署编排、生命周期、活跃后端判定 | 解析 HTTP、做协议转换 |
 | 三·配置 | `core::plan` | 生成本地参数 / 云端规格与隧道配置 | 执行部署 |
 | 三·引擎 | `device::plugin` | 引擎插件注册与分发 | 决定是否该用本地 |
 | 四·节点 | `provider` | 实例 CRUD、隧道、端口映射、厂商签名 | 下载模型、启停推理服务、决定选哪家 |

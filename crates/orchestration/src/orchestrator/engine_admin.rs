@@ -1,11 +1,11 @@
 //! 引擎管理与版本缓存（第三层·模块1 引擎管理的编排侧）。
 //!
-//! 归属：网关 crate 内部（第三层编排职责的第二层门面实现）。
-//! `Gateway` 的字段在 `super`（gateway 模块）中定义，子模块可直接访问。
+//! 归属：第三层 · 编排调度核心。
+//! `Orchestrator` 的字段在 `super` 中定义，子模块可直接访问。
 
 use super::*;
 
-impl Gateway {
+impl Orchestrator {
     /// 取**已缓存**的引擎版本。
     ///
     /// 只读缓存，绝不在请求路径上执行 `--version`。原因：该命令在部分安装
@@ -136,7 +136,7 @@ impl Gateway {
     }
     /// **同步**预热引擎版本缓存（等探测结果，不设上限）。
     ///
-    /// ## 与 [`crate::spawn_warm_up`] 的分工
+    /// ## 与 [`the gateway warm-up thread`] 的分工
     ///
     /// | | `spawn_warm_up` | 本方法 |
     /// |---|---|---|

@@ -1,11 +1,11 @@
 //! 部署生命周期：停止服务（保留节点）、恢复服务、中止回滚与整体关停。
 //!
-//! 归属：网关 crate 内部（第三层编排职责的第二层门面实现）。
-//! `Gateway` 的字段在 `super`（gateway 模块）中定义，子模块可直接访问。
+//! 归属：第三层 · 编排调度核心。
+//! `Orchestrator` 的字段在 `super` 中定义，子模块可直接访问。
 
 use super::*;
 
-impl Gateway {
+impl Orchestrator {
     /// 停止部署（释放本地进程 / 销毁云端实例）。
     pub fn stop(&mut self, id: &str) -> MnResult<()> {
         let record = self
@@ -44,7 +44,7 @@ impl Gateway {
     }
     /// **停止服务**（云端：停推理进程 + 关机实例；本地：停引擎进程）。
     ///
-    /// ## 与 [`Gateway::stop`] 的区别
+    /// ## 与 [`Orchestrator::stop`] 的区别
     ///
     /// | | `stop_service` | `stop` |
     /// |---|---|---|
@@ -170,7 +170,7 @@ impl Gateway {
     }
     /// 中止部署并**回滚**它产生的全部痕迹。
     ///
-    /// ## 与 [`Gateway::stop`] 的区别
+    /// ## 与 [`Orchestrator::stop`] 的区别
     ///
     /// | | `stop` | `abort_deployment` |
     /// |---|---|---|
@@ -190,7 +190,7 @@ impl Gateway {
     /// 传 `Some(path)` 才删，且**以传入路径为准**而不是台账里的
     /// `model_path`：远端部署的 prepare 发生在下载之前，台账里那条
     /// 记录写的是空路径（文件当时还不存在），照它删等于什么也没删。
-    /// 调用方（[`crate::pulljobs`] 的 abort 钩子）知道文件真正落在哪。
+    /// 调用方（[`the pull job manager`] 的 abort 钩子）知道文件真正落在哪。
     ///
     /// 只有**本次部署下载的**文件才该删。若模型原本就在本地
     /// （用户点的是「启动」而非「下载并启动」），删掉它等于卸载用户

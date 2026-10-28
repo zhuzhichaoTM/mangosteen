@@ -1,11 +1,11 @@
 //! 运行状态查询：台账列表、活跃后端、云端监控与整体状态快照。
 //!
-//! 归属：网关 crate 内部（第三层编排职责的第二层门面实现）。
-//! `Gateway` 的字段在 `super`（gateway 模块）中定义，子模块可直接访问。
+//! 归属：第三层 · 编排调度核心。
+//! `Orchestrator` 的字段在 `super` 中定义，子模块可直接访问。
 
 use super::*;
 
-impl Gateway {
+impl Orchestrator {
     /// 列出全部部署。
     pub fn list_deployments(&self) -> MnResult<Vec<DeploymentRecord>> {
         self.state.list()
@@ -240,7 +240,7 @@ impl Gateway {
     /// 查询某云端实例的实时监控（**会发起网络请求**）。
     ///
     /// 调用方必须确保**不在持有网关锁时调用**它——单次往返约 0.5 秒，
-    /// 持锁会拖慢所有其它 API。后台采集线程（[`crate::cloudmon`]）
+    /// 持锁会拖慢所有其它 API。后台采集线程（[`the gateway cloud monitor`]）
     /// 的做法是「持锁取元信息 → 放锁 → 再持锁调用本方法」，看似持锁，
     /// 但它运行在独立线程且频率被压到 5 秒一次，实际影响可接受；
     /// HTTP 请求路径**绝不**调用本方法，只读缓存。

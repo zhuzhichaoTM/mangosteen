@@ -181,7 +181,7 @@ pub(crate) const REMOTE_HEADER_BYTES: u64 = 8 * 1024 * 1024;
 /// 那边是 `pub(crate)` 之外的私有函数，且这里要用在**持有任务表锁**的
 /// 闭包里（不能再进网关锁拿数据）。
 pub(crate) fn probe_assessed_detail(ev: &mangosteen_orchestration::assess::Evaluated) -> String {
-    crate::gateway::assessed_detail(ev)
+    mangosteen_orchestration::deployment::assessed_detail(ev)
 }
 
 /// 从模型引用推一个人类可读的名字（用于粗估兜底）。
