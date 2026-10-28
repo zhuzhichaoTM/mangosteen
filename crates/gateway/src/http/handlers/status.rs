@@ -62,6 +62,15 @@ impl GatewayServer {
                         "id": a.id,
                         "model": a.model,
                         "origin": a.origin.label(),
+                        "origin_kind": if a.origin.is_local() { "local" } else { "cloud" },
+                        "node_ip": match &a.origin {
+                            mangosteen_core::plan::ComputeOrigin::Local => Some("127.0.0.1".to_string()),
+                            mangosteen_core::plan::ComputeOrigin::Cloud { .. } => gw
+                                .get_deployment(&a.id)
+                                .ok()
+                                .flatten()
+                                .and_then(|r| r.plan.cloud.and_then(|c| c.node_ip)),
+                        },
                         "status": a.status.as_str(),
                         "port": a.port,
                         "ready": a.ready,

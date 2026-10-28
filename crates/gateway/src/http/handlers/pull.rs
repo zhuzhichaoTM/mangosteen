@@ -76,9 +76,12 @@ impl GatewayServer {
             // ModelStore 是 Clone 的（内部只有路径 + 策略），
             // 克隆一份进闭包即可，不需要共享可变状态。
             let models = gw.models().clone();
-            let reg: crate::pulljobs::RegisterHook = Arc::new(move |path: &std::path::Path| {
-                models.register_local(path, None).map(|r| r.entry.id)
-            });
+            let reg: crate::pulljobs::RegisterHook =
+                Arc::new(move |path: &std::path::Path, source| {
+                    models
+                        .register_local_with_source(path, None, source)
+                        .map(|r| r.entry.id)
+                });
             // 部署闭包要用它，但**在这里不能持锁**——只捕获 Arc，
             // 真正执行时才短暂加锁（见下面闭包体）。
             (cfg, reg, Arc::clone(&self.gateway))
@@ -376,7 +379,7 @@ impl GatewayServer {
 
         if already {
             // 走一遍登记（可能只是台账丢了，文件还在）
-            let model_id = match register(&final_path) {
+            let model_id = match register(&final_path, Some(source.name.as_str())) {
                 Ok(id) => id,
                 Err(e) => {
                     self.pull_jobs

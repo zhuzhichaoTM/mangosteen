@@ -82,12 +82,24 @@ impl GatewayServer {
                             ),
                             "quant": r.plan.model.quant.to_string(),
                             "origin": r.plan.origin.label(),
+                            // 稳定机器可读类型：UI 用它渲染本地/云端符号，
+                            // 不依赖本地化文案做判断。
+                            "origin_kind": if r.plan.origin.is_local() { "local" } else { "cloud" },
+                            // 云端节点公网 IP（本地部署为 127.0.0.1）。
+                            "node_ip": match &r.plan.origin {
+                                mangosteen_core::plan::ComputeOrigin::Local => Some("127.0.0.1".to_string()),
+                                mangosteen_core::plan::ComputeOrigin::Cloud { .. } => {
+                                    r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone())
+                                }
+                            },
                             "status": r.status.as_str(),
                             "port": r.plan.local_access_port(),
                             // 进程 PID：用户想用 top / kill 直接操作引擎进程时
                             // 必须有它，否则只能按端口反查。
                             "pid": r.pid,
                             "error": r.error,
+                            // 最近更新时间：UI 用它判断哪个部署记录是「最新方案」
+                            "updated_at": r.updated_at,
                             "fallback_trail": r.plan.fallback_trail,
                         })
                     })
@@ -134,7 +146,31 @@ impl GatewayServer {
             Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
         }
     }
-    /// 启动服务：云端开机并重新拉起推理进程，不需要重新传模型。
+    /// 启动本地模型：使用台账里保存的部署方案，不重新评估资源。
+    pub(crate) fn start_model(&self, id: &str) -> Response {
+        let mut gw = match self.gateway.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::text(500, "网关状态锁中毒"),
+        };
+        match gw.start_local_deployment(id) {
+            Ok(plan) => Response::json(
+                200,
+                &serde_json::json!({
+                    "ok": true,
+                    "id": plan.id,
+                    "status": "ready",
+                    "model_id": mangosteen_core::model::ModelEntry::derive_id(
+                        &plan.model.name, plan.model.quant
+                    ),
+                }),
+            ),
+            Err(e) => Response::error(&e),
+        }
+    }
+
+    /// 启动服务：云端开机并重新拉起推理进程。
+    ///
+    /// 本地模型应走 [`Self::start_model`]，不能重新走部署评估。
     pub(crate) fn start_service(&self, id: &str) -> Response {
         let mut gw = match self.gateway.lock() {
             Ok(g) => g,

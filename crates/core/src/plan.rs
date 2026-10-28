@@ -200,6 +200,13 @@ pub struct CloudPlan {
     /// （Ollama 用 blob 存储，不认任意路径）。两者语义不同，不能合并。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_model: Option<String>,
+    /// 云端节点公网地址（SSH host / 公网 IP）。
+    ///
+    /// 实例创建成功后由编排层回填并写入台账，供 UI 展示「这个模型跑在哪台
+    /// 机器上」。旧台账没有该字段时为 `None`，展示端必须显示占位符而不是
+    /// 猜测地址。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ip: Option<String>,
 }
 
 // 云端运行参数由引擎插件生成；CloudPlan 只保留节点配置数据。
@@ -349,6 +356,7 @@ mod tests {
             download_url: None,
             download_bytes: None,
             remote_model: None,
+            node_ip: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -403,6 +411,7 @@ mod tests {
             download_url: None,
             download_bytes: None,
             remote_model: None,
+            node_ip: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,

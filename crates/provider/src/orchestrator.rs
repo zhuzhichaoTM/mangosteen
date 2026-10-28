@@ -1334,6 +1334,7 @@ mod tests {
             download_url: None,
             download_bytes: None,
             remote_model: None,
+            node_ip: None,
             provider: "fake".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,

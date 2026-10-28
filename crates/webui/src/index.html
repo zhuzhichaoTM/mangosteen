@@ -171,14 +171,12 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel3);
 .composer textarea:focus{outline:0;box-shadow:none}
 .composer .bar{display:flex;align-items:center;gap:7px}
 .composer .bar .grow{flex:1}
-/* 底部工具行：文件 / 联网 / 模型信息 同一行。
+/* 底部工具行：文件 / 联网 / 模型选择同一行。
    模型选择放在这里而不是页顶，是因为它的作用是「发送前确认用哪个模型」，
-   紧贴发送按钮更符合操作顺序；页顶留给状态与清空这类全局动作。 */
+   紧贴发送按钮更符合操作顺序；页顶留给状态与清空这类全局动作。
+   不再显示「模型信息」文字标签，来源靠选项前的 ⌂ / ☁ 符号表达。 */
 .bar .bar-sep{width:1px;height:16px;background:var(--line2);margin:0 2px;flex:0 0 auto}
 .model-pick{display:flex;align-items:center;gap:5px;min-width:0;flex:0 1 auto}
-.model-pick .mp-label{
-  font-size:11px;color:var(--faint);white-space:nowrap;flex:0 0 auto;
-}
 .model-pick select{
   max-width:190px;min-width:88px;height:26px;padding:0 22px 0 8px;
   font-size:11.5px;border:1px solid var(--line2);border-radius:6px;
@@ -569,8 +567,9 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           </button>
           <span class="bar-sep"></span>
           <label class="model-pick" title="选择用于对话的模型">
-            <span class="mp-label">模型信息</span>
-            <select id="chat-model"><option value="">（加载中…）</option></select>
+            <select id="chat-model" aria-label="选择用于对话的模型">
+              <option value="">（加载中…）</option>
+            </select>
           </label>
           <span class="grow"></span>
           <button class="sendbtn" id="btn-send" disabled
@@ -595,7 +594,6 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
         <div class="card">
           <h3>部署模型</h3>
           <div class="row">
-            <select id="dp-source" style="width:148px;flex:0 0 auto"></select>
             <input type="text" id="dp-repo" class="grow"
                    placeholder="输入关键字（如 qwen2.5 gguf），或完整仓库名 owner/repo">
             <button class="primary sm" id="dp-search">搜索</button>
@@ -650,10 +648,6 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           <div id="dp-models"><div class="empty">加载中…</div></div>
         </div>
 
-        <div class="card">
-          <h3>模型实例</h3>
-          <div id="dp-deps"><div class="empty">加载中…</div></div>
-        </div>
       </div>
     </div>
   </div>
@@ -1258,7 +1252,7 @@ Tabs.register("chat", (() => {
         signal: chatAbort ? chatAbort.signal : undefined,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          // 传下拉选中的具体模型，让「模型信息」的选择真正生效。
+          // 传下拉选中的具体模型，让模型选择真正生效。
           // 网关按此 ID 路由；该模型若已停止会明确报错，
           // 而不是悄悄换一个模型回答（那样最难排查）。
           model: $("chat-model").value || "auto",
@@ -1425,7 +1419,7 @@ Tabs.register("chat", (() => {
     async refresh() {
       try {
         const st = await api("/api/status");
-        // 「模型信息」只列**运行中且就绪**的实例，与部署页「模型实例」同源。
+        // 模型选择器只列**运行中且就绪**的实例。
         //
         // 为什么不能读 `/v1/models`：那个接口返回的是**已下载**的全部模型，
         // 包括根本没启动的。列出来会让用户以为可以选，选中却聊不了——
@@ -1448,20 +1442,22 @@ Tabs.register("chat", (() => {
         } else {
           sel.disabled = false;
           sel.title = "选择用于对话的模型";
-          active.forEach((a) => sel.appendChild(new Option(a.model, a.model)));
+          active.forEach((a) => {
+            // 差异符号：本地 ⌂ / 云端 ☁。文字仍保留完整模型 ID，
+            // 避免仅靠符号或颜色区分。
+            const mark = a.origin_kind === "cloud" ? "☁ " : "⌂ ";
+            const opt = new Option(mark + a.model, a.model);
+            opt.title = (a.origin_kind === "cloud" ? "云端算力" : "本地算力") + " · " + a.model;
+            sel.appendChild(opt);
+          });
           // 尽量保留用户原选择；原选择已失效则回到第一个
           if (prev && active.some((a) => a.model === prev)) sel.value = prev;
           else sel.value = active[0].model;
           $("ta").placeholder = "输入消息… Enter 发送，Shift+Enter 换行";
         }
 
-        // 对话页不显示「算力来源」也不显示「已连接/未就绪」。
-        //
-        // 理由（用户原话）：对话不关心跑在本地还是云端，只要能用即可。
-        // 显示「本地算力 / 云端算力」只会引入无关信息；
-        // 而「未就绪」这类状态词对使用者没有行动价值——
-        // 真不可用时输入框自动置灰，这个反馈本身已经足够。
-        // 算力来源属于「部署」页的职责，那里有「模型实例」卡片。
+        // 模型来源符号已经放在下拉选项前：⌂ 本地 / ☁ 云端。
+        // 这里不额外显示长文案，避免聊天工具行被撑开。
         $("ta").disabled = !ready;
 
         // 生成中按钮保持停止图标且可点击；空闲时按模型就绪状态禁用。
@@ -1618,10 +1614,6 @@ Tabs.register("deploy", (() => {
   let mounted = false;
   let timer = null;
   let jobTimer = null;
-  // 上一轮「模型实例」的指纹（活跃实例 ID + 状态）。
-  // 只有指纹变了才重画「模型列表」——那张表要读模型台账（磁盘 IO），
-  // 每 3 秒无条件重画既浪费又会让鼠标悬停在按钮上时闪一下。
-  let depSig = "";
 
   // 搜索结果里被勾选的文件。键是 "源|仓库|文件名"，
   // 用键而不是对象引用，是因为重新搜索会重建 DOM。
@@ -1629,33 +1621,13 @@ Tabs.register("deploy", (() => {
   // 当前搜索结果（按仓库分组或单仓库文件）
   let lastRepo = "";
 
-  // 部署页只列「能搜索」的源。
+  // 搜索固定使用 HuggingFace 生态的可搜索镜像接口。
   //
-  // ModelScope 被排除：它没有公开检索接口，选它按关键字搜索只会失败。
-  // 与其让用户在「搜不到」和「网络坏了」之间猜，不如不提供这个选项——
-  // 需要 ModelScope 的用户仍可用命令行 `models pull modelscope:owner/repo/file`。
-  const SEARCHABLE = ["hf-mirror", "hf"];
+  // 下载时不再让用户选 hf-mirror / huggingface.co：worker 会实测两个
+  // 站点的可达性与延迟，自动选更快的那个。这里只保留搜索所需的 API 端点。
+  const SEARCH_SOURCE = "hf-mirror";
 
-  async function loadSources() {
-    try {
-      const s = await api("/api/settings");
-      const sel = $("dp-source");
-      const prev = sel.value;
-      sel.innerHTML = "";
-      const custom = (s.model_sources || []).filter((n) => !SEARCHABLE.includes(n));
-      const names = SEARCHABLE.concat(custom);
-      [...new Set(names)].forEach((n) => sel.appendChild(new Option(sourceLabel(n), n)));
-      sel.value = (prev && [...sel.options].some((o) => o.value === prev))
-        ? prev
-        : "hf-mirror";
-    } catch (e) { /* ignore */ }
-  }
-
-  function sourceLabel(n) {
-    if (n === "hf-mirror") return "hf-mirror";
-    if (n === "hf") return "HuggingFace";
-    return n;
-  }
+  async function loadSources() { /* 源选择已移除：下载链路自动择优 */ }
 
   function pickedKey(source, repo, file) {
     return source + "|" + repo + "|" + file;
@@ -1673,7 +1645,7 @@ Tabs.register("deploy", (() => {
     try {
       const r = await api("/api/models/search", {
         method: "POST",
-        body: JSON.stringify({ query: q, source: $("dp-source").value }),
+        body: JSON.stringify({ query: q, source: SEARCH_SOURCE }),
       });
       box.innerHTML = "";
       // 每次新搜索都重置分页与结果集，避免残留上一次的页码
@@ -2294,14 +2266,9 @@ Tabs.register("deploy", (() => {
     return renderJob(jobs[0]);
   }
 
-  /// 同时刷新「模型列表」与「模型实例」两张卡片，并同步指纹。
-  ///
-  /// 两处按钮状态同源（活跃实例），分头刷新会出现「实例已跑、按钮还写启动」
-  /// 这种自相矛盾的中间态。指纹也要一起更新，否则下一轮轮询会误判成
-  /// 「实例集合变了」再白刷一次。
+  /// 刷新模型列表（活跃部署索引用于按钮状态）。
   async function refreshModelCards() {
-    const [sig] = await Promise.all([loadDeps(), loadModels()]);
-    depSig = sig;
+    await loadModels();
   }
 
   /// 启动进度轮询：1 秒一刷，任务终结后自动停。
@@ -2346,14 +2313,6 @@ Tabs.register("deploy", (() => {
     // 部署确认弹窗的取消按钮（弹窗逻辑沿用原有实现）
     const cancel = $("dlg-cancel");
     if (cancel) cancel.onclick = () => $("ov-deploy").classList.remove("show");
-    $("dp-source").onchange = () => {
-      // 换源后旧结果不再有效（不同源的仓库名不通用）
-      $("dp-result").innerHTML = "";
-      repoAll = [];
-      repoPage = 1;
-      hidePager();
-      clearSelection();
-    };
   }
 
   /// 清空搜索条件、结果与勾选。
@@ -2377,21 +2336,11 @@ Tabs.register("deploy", (() => {
       if (!mounted) { bindOnce(); mounted = true; }
       await loadSources();
       await loadModels();
-      depSig = await loadDeps();
       renderPicked();
-      // 部署状态 3s 一刷。
-      //
-      // 实例集合一旦变化（启动了 / 停止了 / 部署完成了），必须**连带**刷
-      // 「模型列表」：那张表的按钮是「启动 ⇄ 停止」二态，数据源就是这里的
-      // 活跃实例。只刷「模型实例」的话，用户点完启动会看到实例已在跑、
-      // 按钮却还写着「启动」，只能手动刷新页面才对齐——这就是反馈的体验问题。
+      // 活跃部署状态 3s 一刷：模型列表的「启动 ⇄ 停止」按钮由它决定。
+      // 部署页不再单独展示「模型实例」卡片，实例查询仍可通过 CLI 完成。
       timer = setInterval(async () => {
-        const sig = await loadDeps();
-        if (sig !== depSig) {
-          depSig = sig;
-          // 按钮态变了要重画；模型台账本身没变，但重画成本很低（读一次 JSON）
-          await loadModels();
-        }
+        await loadModels();
       }, 3000);
       // 部署进度：先渲染一次（页面刷新后要能接上正在跑的任务），
       // 有进行中的任务才继续轮询。
@@ -2414,11 +2363,24 @@ Tabs.register("deploy", (() => {
       ]);
       const items = r.models || [];
 
-      // 活跃部署索引：模型 ID → 部署记录
+      // 两个索引：
+      //  · liveByModel：正在运行的实例 → 按钮显示「停止」
+      //  · lastByModel：每个模型最近一次部署记录 → 未运行时可直接启动
+      //    （复用已保存的方案，不再重新做资源评估）
       const liveByModel = {};
+      const lastByModel = {};
       (d.deployments || []).forEach((x) => {
+        const mid = x.model_id || x.model;
         if (x.status === "ready" || x.status === "provisioning") {
-          liveByModel[x.model_id || x.model] = x;
+          liveByModel[mid] = x;
+        }
+        // 已销毁（destroyed）的记录不能直接重启：状态机不允许
+        // destroyed → provisioning，且资源已回收。跳过它，让 UI 走
+        // 「评估 → 部署」的正路，而不是点了启动必然失败。
+        if (x.status === "destroyed") return;
+        const prev = lastByModel[mid];
+        if (!prev || (x.updated_at || 0) >= (prev.updated_at || 0)) {
+          lastByModel[mid] = x;
         }
       });
 
@@ -2432,8 +2394,12 @@ Tabs.register("deploy", (() => {
       // 两列即可：模型 ID 与大小合并在同一格（大小作为紧随其后的淡色注记）。
       // 分成两列时，表格 100% 宽会把 ID 列拉得很长、大小飘到右侧，
       // 中间留出大片空白——这才是「太分开」的根源。
+      // 列宽按内容重要性分配：模型 ID 占主要宽度，来源与节点 IP 紧随其后，
+      // 操作列贴右。早先用 width:1% 让中间列全挤到右侧，视觉上像悬空。
       t.innerHTML = "<thead><tr><th>模型 ID</th>" +
-        "<th style='width:1%;white-space:nowrap;text-align:right'>操作</th></tr></thead>";
+        "<th style='width:15%;white-space:nowrap'>来源</th>" +
+        "<th style='width:17%;white-space:nowrap'>节点 IP</th>" +
+        "<th style='width:20%;white-space:nowrap;text-align:right'>操作</th></tr></thead>";
       const tb = el("tbody");
       items.forEach((m) => {
         const tr = el("tr");
@@ -2453,6 +2419,36 @@ Tabs.register("deploy", (() => {
           tdId.appendChild(sz);
         }
         tr.appendChild(tdId);
+
+        // ---- 来源（算力来源）----
+        // 用户关心的是「这个模型属于本地还是云端」，不是下载站点。
+        // 下载来源（modelscope / hf-mirror）作为淡色后缀附在后面，便于排障。
+        const isCloud = m.origin_kind === "cloud";
+        const tdSrc = el("td");
+        tdSrc.style.cssText = "font-size:11.5px;white-space:nowrap";
+        const originSpan = el("span", "", isCloud ? "云端算力" : "本地算力");
+        if (isCloud) originSpan.style.color = "var(--info)";
+        tdSrc.appendChild(originSpan);
+        if (m.source) {
+          const srcSpan = el("span", "");
+          srcSpan.style.cssText = "margin-left:6px;font-size:10.5px;color:var(--faint);" +
+            "font-family:var(--mono)";
+          srcSpan.textContent = "· " + m.source;
+          srcSpan.title = "下载时使用的模型源";
+          tdSrc.appendChild(srcSpan);
+        }
+        tr.appendChild(tdSrc);
+
+        // ---- 节点 IP ----
+        // 本地实例固定 127.0.0.1；云端实例显示创建时回填的公网地址；
+        // 未运行/旧台账无地址时显示占位符，绝不猜测。
+        const tdIp = el("td", "mono");
+        tdIp.style.cssText = "font-size:11.5px;white-space:nowrap";
+        tdIp.textContent = m.node_ip || "—";
+        tdIp.title = m.node_ip
+          ? (m.origin_kind === "cloud" ? "云端节点公网 IP" : "本地回环地址")
+          : "没有活跃实例或旧台账未记录节点地址";
+        tr.appendChild(tdIp);
 
         // ---- 操作 ----
         const td = el("td");
@@ -2489,16 +2485,33 @@ Tabs.register("deploy", (() => {
           bs.onclick = () => stopFromList(m.id, live.id);
           td.appendChild(bs);
         } else {
-          // 未运行：可启动才高亮，否则置灰并说明原因
-          const canStart = !missing && m.deployable;
-          td.appendChild(mk(
-            "启动",
-            missing ? "模型文件缺失，无法启动"
-              : m.deployable ? "评估资源并启动该模型"
-              : (m.deploy_blocked_reason || "当前不可启动"),
-            canStart,
-            () => openDeployDialog(m.id)
-          ));
+          // 未运行：区分「已部署过」与「首次部署」。
+          //
+          //  · 有历史部署记录 → 直接按保存的方案启动，**不再评估资源**
+          //    （评估只在部署前做一次，模型已下载到本地后启动是确定动作）
+          //  · 首次部署 → 仍走评估弹窗（用户要据此决定本地/云端与费用）
+          const last = lastByModel[m.id];
+          if (last && !missing) {
+            const cloudRec = last.origin_kind === "cloud";
+            td.appendChild(mk(
+              "启动",
+              cloudRec
+                ? "按已保存的云端方案重新开机"
+                : "直接启动已保存的部署方案（不重新评估）",
+              true,
+              () => startFromList(m.id, last)
+            ));
+          } else {
+            const canStart = !missing && m.deployable;
+            td.appendChild(mk(
+              "启动",
+              missing ? "模型文件缺失，无法启动"
+                : m.deployable ? "评估资源并启动该模型"
+                : (m.deploy_blocked_reason || "当前不可启动"),
+              canStart,
+              () => openDeployDialog(m.id)
+            ));
+          }
         }
 
         // 卸载：运行中不允许直接卸载（先停止再卸载），避免留下孤儿进程
@@ -2528,12 +2541,36 @@ Tabs.register("deploy", (() => {
     }
   }
 
+  /// 从模型列表启动一个已有部署记录的模型。
+  ///
+  /// 本地：调用 `/start-model`，直接复用台账里的本地方案（不评估资源）。
+  /// 云端：复用 `/start-service`（开机 + 起推理进程 + 重建隧道）。
+  async function startFromList(modelId, dep) {
+    const cloud = dep.origin_kind === "cloud";
+    toast(cloud ? "正在启动云端实例…" : "正在启动 " + modelId + "…", "ok");
+    // 注意：本地启动按钮只在「有历史部署记录且未运行」时出现，
+    // 记录可能处于 stopped / failed —— 两者都允许重新启动。
+    try {
+      await api("/api/deployments/" + encodeURIComponent(dep.id) +
+                (cloud ? "/start-service" : "/start-model"), { method: "POST" });
+      toast("已启动 " + modelId, "ok");
+      await refreshModelCards();
+    } catch (e) {
+      toast("启动失败：" + e.message, "err");
+    }
+  }
+
   /// 从模型列表直接停止该实例（部署/停止按钮合一后的入口）。
+  ///
+  /// 用 `stop-service` 而不是 `DELETE`：前者保留部署方案（状态 stopped），
+  /// 之后再点「启动」可以按原方案直接拉起；DELETE 会销毁记录，
+  /// 用户想再用就只能重新部署。真正回收资源仍可用 CLI 或卸载。
   async function stopFromList(modelId, depId) {
     if (!confirm("停止模型 " + modelId + " 的实例？\n\n" +
                  "本地会释放端口与内存；云端实例会立即停止计费。")) return;
     try {
-      await api("/api/deployments/" + encodeURIComponent(depId), { method: "DELETE" });
+      await api("/api/deployments/" + encodeURIComponent(depId) + "/stop-service",
+                { method: "POST" });
       toast("已停止 " + modelId, "ok");
       await refreshModelCards();
     } catch (e) { toast("停止失败：" + e.message, "err"); }
@@ -2561,56 +2598,6 @@ Tabs.register("deploy", (() => {
       await loadModels();
     } catch (e) {
       toast("删除失败：" + e.message, "err");
-    }
-  }
-
-  /// 刷「模型实例」卡片，返回本轮活跃实例的指纹。
-  ///
-  /// 指纹给调用方判断「实例集合变了没」：变了就要连带重画「模型列表」，
-  /// 因为那张表的按钮是「启动 ⇄ 停止」二态，取决于同一份活跃实例数据。
-  async function loadDeps() {
-    const box = $("dp-deps");
-    try {
-      const r = await api("/api/deployments");
-      const live = (r.deployments || []).filter(
-        (d) => d.status === "ready" || d.status === "provisioning");
-      const sig = live
-        .map((d) => (d.model_id || d.model) + "|" + d.id + "|" + d.status)
-        .sort()
-        .join(",");
-      if (!live.length) {
-        box.innerHTML = '<div class="empty">暂无运行中的模型实例</div>';
-        return sig;
-      }
-      box.innerHTML = "";
-      const t = el("table", "t");
-      // 这里只做「看」，操作统一在「模型列表」里（启动/停止二合一按钮）。
-      // 两处都能停会让人犹豫点哪个。
-      t.innerHTML = "<thead><tr><th>模型 ID</th><th>来源</th><th>状态</th>" +
-        "<th>端口</th><th>进程 PID</th></tr></thead>";
-      const tb = el("tbody");
-      live.forEach((d) => {
-        const tr = el("tr");
-        const cls = d.status === "ready" ? "pill ok" : "pill warn";
-        const mid = d.model_id || d.model;
-        tr.innerHTML =
-          '<td class="mono" style="font-size:11.5px" title="' + esc(mid) + '">' +
-            esc(mid) + "</td>" +
-          "<td>" + esc(d.origin) + "</td>" +
-          '<td><span class="' + cls + '">' + esc(d.status) + "</span></td>" +
-          '<td class="mono">' + (d.port || "—") + "</td>" +
-          // PID 用等宽字体并允许整段选中，方便直接复制去 kill / top
-          '<td class="mono" style="font-size:11.5px;user-select:all">' +
-            (d.pid != null ? d.pid : "—") + "</td>";
-        tb.appendChild(tr);
-      });
-      t.appendChild(tb);
-      box.appendChild(t);
-      return sig;
-    } catch (e) {
-      box.innerHTML = '<div class="banner err">' + esc(e.message) + "</div>";
-      // 拿不到数据时返回哨兵值，避免调用方误判「和上次一样」而跳过刷新
-      return "?error";
     }
   }
 
@@ -2822,9 +2809,7 @@ Tabs.register("deploy", (() => {
       });
       $("ov-deploy").classList.remove("show");
       toast("部署完成：" + (r.id || modelId), "ok");
-      // 两张卡片都要刷：「模型列表」的按钮要从「启动」变「停止」，
-      // 「模型实例」要出现新的一行。只刷后者的话，用户会看到
-      // 实例已在跑、按钮却还写着「启动」——只能手动刷页面才正确。
+      // 刷新模型列表：按钮要从「启动」变「停止」。
       await refreshModelCards();
     } catch (e) {
       $("dlg-hint").textContent = "";

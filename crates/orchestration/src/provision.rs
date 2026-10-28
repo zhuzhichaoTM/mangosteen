@@ -136,6 +136,9 @@ impl Orchestrator {
                         p.instance.spec.gpu.vram_bytes,
                     );
                     c.local_port = p.local_port.unwrap_or(c.local_port);
+                    // 节点公网地址：实例创建成功后即可得（SSH host）。
+                    // 写入台账后，UI 的模型列表无需再打厂商接口就能显示节点 IP。
+                    c.node_ip = p.instance.network.ssh_host.clone();
                 }
                 plan.origin = ComputeOrigin::Cloud {
                     provider: p.instance.provider.clone(),

@@ -87,6 +87,11 @@ impl GatewayServer {
                 let id = &p["/api/deployments/".len()..p.len() - "/stop-service".len()];
                 self.stop_service(id)
             }
+            // 启动已保存的本地部署方案：不重新评估资源。
+            ("POST", p) if p.starts_with("/api/deployments/") && p.ends_with("/start-model") => {
+                let id = &p["/api/deployments/".len()..p.len() - "/start-model".len()];
+                self.start_model(id)
+            }
             ("POST", p) if p.starts_with("/api/deployments/") && p.ends_with("/start-service") => {
                 let id = &p["/api/deployments/".len()..p.len() - "/start-service".len()];
                 self.start_service(id)

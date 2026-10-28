@@ -27,6 +27,23 @@ use crate::pulljobs::{JobState, PullJobs};
 /// 下载线程**不能持网关锁**：下载要几分钟，持锁会让整个 API 卡死
 /// （这个坑在引擎版本预热上踩过）。所以两个钩子都由调用方构造，
 /// 内部各自短暂加锁。
+/// 候选下载地址的单次测速超时（秒）。
+///
+/// 只发 HEAD，2 秒足够区分「可达」与「不可达」；拖太久会让下载任务
+/// 在真正开始前就卡住，得不偿失。
+const PROBE_TIMEOUT_SECS: u64 = 2;
+
+/// 把实际选中的地址主机归一化为 UI/台账可读来源。
+fn source_name_for_url(url: &str) -> String {
+    if url.contains("hf-mirror.com") {
+        "hf-mirror".to_string()
+    } else if url.contains("huggingface.co") {
+        "huggingface".to_string()
+    } else {
+        url.split("/").nth(2).unwrap_or("custom").to_string()
+    }
+}
+
 pub struct DeployHooks {
     /// 下载**前**调用：评估 → 选设备 → 配置，返回待启动的本地计划。
     ///
@@ -45,7 +62,8 @@ pub struct DeployHooks {
 }
 
 /// 模型登记回调：下载落地路径 → 模型 ID。
-pub type RegisterHook = Arc<dyn Fn(&std::path::Path) -> MnResult<String> + Send + Sync>;
+pub type RegisterHook =
+    Arc<dyn Fn(&std::path::Path, Option<&str>) -> MnResult<String> + Send + Sync>;
 
 /// 回滚钩子：`(部署 ID, 要删除的文件路径)` → 结果。
 pub type AbortHook =
@@ -183,6 +201,30 @@ pub fn spawn(
                 );
             }
 
+            // ---- 自动选择 HuggingFace 下载站点 ----
+            //
+            // UI 不再让用户在 hf-mirror / huggingface.co 之间选。这里在
+            // 下载线程内测两者的可达性与往返耗时，选更快的那个；全部失败
+            // 则保留原地址，让正式下载给出真实错误。
+            //
+            // 为什么放在线程里：测速是网络操作，绝不能在 HTTP handler 或
+            // 网关锁内执行。
+            // 只对内置的两个 HuggingFace 站点做自动择优；用户自定义的
+            // HF 形态源（自建镜像）必须原样使用，不能被替换掉。
+            let is_builtin_hf = matches!(source.name.as_str(), "hf-mirror" | "hf");
+            if is_builtin_hf && source.kind == mangosteen_core::source::SourceKind::HuggingFace {
+                let candidates = mangosteen_base::download::huggingface_candidates(&model);
+                let ranked = mangosteen_base::download::ranked_candidates(
+                    &candidates,
+                    &opts.curl_bin,
+                    PROBE_TIMEOUT_SECS,
+                );
+                if let Some((_, first)) = ranked.first() {
+                    opts.url_override = Some(first.clone());
+                    opts.fallback_urls = ranked.into_iter().skip(1).map(|(_, url)| url).collect();
+                }
+            }
+
             match mangosteen_base::download_model(&source, &model, &opts, false) {
                 Ok(dl) => {
                     if let Some(sha) = &dl.sha256 {
@@ -209,7 +251,8 @@ pub fn spawn(
                     // 传输完全正常，只是它本来就不是模型。
                     // 这里标记为 done + warning，如实告诉用户文件在哪、
                     // 为什么用不了。
-                    match register(&dl.path) {
+                    let actual_source = source_name_for_url(&dl.url);
+                    match register(&dl.path, Some(actual_source.as_str())) {
                         Ok(model_id) => {
                             let already = jobs
                                 .get(&job_id)

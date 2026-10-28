@@ -362,6 +362,11 @@ pub struct ModelEntry {
     pub spec: ModelSpec,
     /// 物理位置
     pub location: ModelLocation,
+    /// 模型来源（如 `modelscope`、`hf-mirror`、`huggingface`）。
+    ///
+    /// 旧台账没有该字段时保持 `None`，不根据文件名猜测来源。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// SHA-256 摘要（十六进制小写）。`None` 表示尚未计算。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,

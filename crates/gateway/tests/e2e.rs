@@ -379,6 +379,44 @@ fn bind_ephemeral() -> (std::net::TcpListener, u16) {
 
 // ---------------------------------------------------------------- 测试用例
 
+/// 已保存本地部署方案启动时必须直接启动，不能重新走 preview/evaluate。
+#[test]
+fn e2e_start_model_reuses_saved_local_plan() {
+    let env = TestEnv::new("start-saved");
+    let engine = env.write_fake_engine();
+    let gguf = env.write_gguf("saved.gguf", 4096);
+    let cfg = env.config(&engine);
+    let mut gw = env.gateway(cfg);
+    let reg = gw.models().register_local(&gguf, None).unwrap();
+    let req = mangosteen_orchestration::DeploymentRequest::for_model(reg.entry.id.clone());
+    let plan = gw.deploy(&req).expect("首次部署生成并保存方案");
+    gw.stop_service(&plan.id)
+        .expect("先停止服务，保留已保存方案");
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = mangosteen_gateway::GatewayServer::new(
+        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        false,
+        String::new(),
+        Duration::from_secs(20),
+    );
+    std::thread::spawn(move || {
+        let _ = server.serve(listener);
+    });
+    assert!(wait_port("127.0.0.1", port, Duration::from_secs(5)));
+    let (status, body) = http(
+        "POST",
+        "127.0.0.1",
+        port,
+        &format!("/api/deployments/{}/start-model", plan.id),
+        None,
+    );
+    assert_eq!(status, 200, "body={body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["status"], "ready");
+}
+
 #[test]
 fn e2e_register_assess_deploy_stop() {
     let env = TestEnv::new("full");
@@ -1452,6 +1490,19 @@ fn e2e_models_api_reports_path_and_missing_files() {
     assert!(path.ends_with(".gguf"), "必须给出完整路径，实际 `{path}`");
     assert_eq!(m["file_exists"], true);
     assert!(m["size_bytes"].as_u64().unwrap_or(0) > 0, "应给出实际大小");
+    // 来源：手工登记的旧路径没有来源 → null（不猜）；UI 显示占位符。
+    assert!(
+        m["source"].is_null(),
+        "未记录来源时应为 null：{}",
+        m["source"]
+    );
+    // 未运行：没有节点可言 → node_ip 为 null（UI 显示「—」），不虚构地址。
+    assert_eq!(m["origin_kind"], "local");
+    assert!(
+        m["node_ip"].is_null(),
+        "未运行的模型不应虚构节点 IP：{}",
+        m["node_ip"]
+    );
 
     // 把文件删掉，接口必须如实报告缺失
     std::fs::remove_file(&gguf).unwrap();
@@ -1510,6 +1561,52 @@ fn e2e_search_defaults_to_100_repos() {
 /// 前者是可用性要求：ModelScope 没有公开检索接口，放进来只会让用户
 /// 在「搜不到」与「网络坏了」之间猜。后者是文案要求。
 #[test]
+fn e2e_model_metadata_and_chat_origin_contracts() {
+    let env = TestEnv::new("metadata");
+    let engine = env.write_fake_engine();
+    let cfg = env.config(&engine);
+    let gw = env.gateway(cfg);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = mangosteen_gateway::GatewayServer::new(
+        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        false,
+        String::new(),
+        Duration::from_secs(20),
+    );
+    std::thread::spawn(move || {
+        let _ = server.serve(listener);
+    });
+    assert!(wait_port("127.0.0.1", port, Duration::from_secs(5)));
+    let (status, body) = http("GET", "127.0.0.1", port, "/", None);
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("origin_kind"),
+        "聊天模型来源必须有机器可读类型"
+    );
+    assert!(
+        body.contains("☁ ") && body.contains("⌂ "),
+        "聊天模型选项应有云端/本地符号"
+    );
+    assert!(
+        !body.contains("<span class=\"mp-label\">模型信息</span>"),
+        "聊天页不应显示模型信息文字标签"
+    );
+    assert!(
+        body.contains("节点 IP") && body.contains("来源"),
+        "模型列表应显示来源与节点 IP"
+    );
+    // 「来源」列展示算力归属：本地登记模型必须是「本地算力」，
+    // 不能因为下载源为空而显示空白。
+    assert!(
+        body.contains(r#""云端算力" : "本地算力""#),
+        "模型列表的来源列应显示本地/云端算力"
+    );
+    // 「模型实例」卡片也必须带节点 IP 列。
+    assert!(body.contains("云端节点公网 IP"), "模型实例应展示节点 IP");
+}
+
+#[test]
 fn e2e_deploy_page_source_options_are_clean() {
     let env = TestEnv::new("srcopt");
     let engine = env.write_fake_engine();
@@ -1532,12 +1629,16 @@ fn e2e_deploy_page_source_options_are_clean() {
     let (status, body) = http("GET", "127.0.0.1", port, "/", None);
     assert_eq!(status, 200);
 
-    // 源清单常量里不得包含 modelscope
+    // 部署页不再暴露 hf-mirror / HuggingFace 源选择；下载 worker 自动测速。
+    assert!(!body.contains("id=\"dp-source\""), "部署页不应显示源选择器");
     assert!(
-        body.contains(r#"SEARCHABLE = ["hf-mirror", "hf"]"#),
-        "部署页的可搜索源应只有 hf-mirror 与 hf"
+        body.contains("const SEARCH_SOURCE = \"hf-mirror\""),
+        "搜索仍需固定镜像 API"
     );
-    assert!(!body.contains("（可搜索）"), "源名不应带「（可搜索）」后缀");
+    assert!(
+        body.contains("pick_fastest") || body.contains("自动"),
+        "页面应说明下载源自动择优"
+    );
     // 新增控件必须存在。
     // 「取消选择」已改为文件列表内的子按钮（「全选 / 取消」），
     // 不再与搜索框同级——这里只断言分页容器。
@@ -1610,11 +1711,11 @@ fn e2e_deploy_page_interaction_contracts() {
         "删除按钮应默认携带 delete_file=1（否则留下孤儿大文件）"
     );
 
-    // 【2】不再显示「已连接 · 模型名」（只留底部「模型信息」）
+    // 【2】不再显示「已连接 · 模型名」（只留底部模型选择控件）
     // 排除注释里对该文案的说明，只查实际赋值的字符串
     assert!(
         !body.contains(r#"textContent = "已连接 · ""#),
-        "不应再把「已连接 · 模型名」写进去（与「模型信息」重复）"
+        "不应再把「已连接 · 模型名」写进去（与底部模型选择重复）"
     );
 
     // 【1】对话开始后隐藏欢迎示例
@@ -2328,9 +2429,13 @@ fn e2e_deploy_page_active_model_contracts() {
     let (status, body) = http("GET", "127.0.0.1", port, "/", None);
     assert_eq!(status, 200);
 
-    // 【1】卡片改名：「已下载模型」→「模型列表」，「活跃模型」→「模型实例」
+    // 【1】卡片改名：「已下载模型」→「模型列表」。
+    // 「模型实例」卡片已从 UI 移除：实例查询走 CLI（`mangosteen ps`）。
     assert!(body.contains("<h3>模型列表</h3>"), "标题应为「模型列表」");
-    assert!(body.contains("<h3>模型实例</h3>"), "标题应为「模型实例」");
+    assert!(
+        !body.contains("<h3>模型实例</h3>"),
+        "模型实例卡片应从 UI 移除"
+    );
     assert!(!body.contains("活跃部署</h3>"), "旧标题应消失");
     assert!(
         !body.contains("<h3>已下载模型</h3>"),
@@ -2349,8 +2454,7 @@ fn e2e_deploy_page_active_model_contracts() {
     assert!(body.contains(r#""停止""#), "应有「停止」按钮");
     assert!(body.contains(r#""卸载""#), "应有「卸载」按钮");
 
-    // 【2】PID 列
-    assert!(body.contains("进程 PID"), "模型实例应有 PID 列");
+    // 【2】PID 只属于实例视图；UI 已移除该卡片，因此不再要求页面展示 PID。
 
     // 【4】模型 ID 与大小同格（两列表格）
     assert!(
@@ -2431,22 +2535,19 @@ fn e2e_deploy_page_copy_and_progress_contracts() {
     );
 
     // 【4】启动后按钮必须自动变「停止」，不能等用户手动刷页面。
-    //
-    // 这两张卡片的按钮状态同源（活跃实例），必须走同一个刷新入口：
-    // 只刷「模型实例」的话，用户点完启动会看到实例已在跑、按钮却还写着
-    // 「启动」——之前就是这个症状。
+    // 模型列表独立刷新并从部署 API 读取活跃状态，不依赖单独的实例卡片。
     assert!(
         body.contains("async function refreshModelCards()"),
-        "应有统一的「同时刷两张卡片」入口"
+        "应有统一的模型列表刷新入口"
     );
     assert!(
         body.contains("await refreshModelCards();"),
         "启动/停止/部署完成后都必须走统一刷新"
     );
-    // 轮询也要能感知实例变化：指纹变了才重画模型列表
+    // 3 秒轮询直接刷新模型列表，按钮依赖部署 API 的活跃状态。
     assert!(
-        body.contains("if (sig !== depSig)"),
-        "3 秒轮询发现实例集合变化时应连带刷新模型列表"
+        body.contains("await loadModels();"),
+        "3 秒轮询应刷新模型列表中的启动/停止按钮"
     );
 
     // 【5】成功提示只保留一条。
@@ -3701,6 +3802,20 @@ fn e2e_model_start_stop_is_toggle() {
     assert!(
         body.contains("if (live) {") && body.contains(r#"bs.onclick = () => stopFromList("#),
         "启动/停止应由 live 状态二态切换"
+    );
+    // 「停止」必须保留方案（stop-service），否则再点启动只能重新部署。
+    assert!(
+        body.contains(r#"/stop-service""#),
+        "模型列表的停止应调用 stop-service 以保留可重启的部署方案"
+    );
+    // 已有部署记录的未运行模型：直接启动，不弹资源评估。
+    assert!(
+        body.contains("function startFromList(") && body.contains(r#"/start-model""#),
+        "已有方案的本地模型应通过 start-model 直接启动"
+    );
+    assert!(
+        body.contains("直接启动已保存的部署方案（不重新评估）"),
+        "启动按钮应说明不重新评估"
     );
     // 卸载仍独立，且运行中禁止
     assert!(body.contains(r#""卸载""#), "应有「卸载」按钮");

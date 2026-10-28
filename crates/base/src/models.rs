@@ -121,6 +121,19 @@ impl ModelStore {
     /// 重复注册同一 `name+quant` 会**更新**已有条目（幂等），
     /// 便于「同一模型换了文件位置」这类操作。
     pub fn register_local(&self, path: &Path, version: Option<&str>) -> MnResult<Registration> {
+        self.register_local_with_source(path, version, None)
+    }
+
+    /// 注册本地 GGUF 文件，并记录**实际使用的下载来源**。
+    ///
+    /// 来源由下载线程在测速后给出（如 `hf-mirror` / `huggingface` /
+    /// `modelscope`）。它与文件位置无关，因此不能从路径反推。
+    pub fn register_local_with_source(
+        &self,
+        path: &Path,
+        version: Option<&str>,
+        source: Option<&str>,
+    ) -> MnResult<Registration> {
         // 1. 访问控制（含 .gguf 扩展名与体积上限）
         let real = self.guard.check_model_file(path)?;
 
@@ -147,6 +160,7 @@ impl ModelStore {
             id: id.clone(),
             spec,
             location: ModelLocation::Local { path: real },
+            source: source.map(|s| s.to_string()),
             sha256,
             version: version.map(|s| s.to_string()),
             verified_at: Some(now),
@@ -155,7 +169,12 @@ impl ModelStore {
         // 5. 写入台账
         let mut index = self.load_index()?;
         let replaced = if let Some(slot) = index.models.iter_mut().find(|m| m.id == id) {
-            *slot = entry.clone();
+            // 兼容 CLI/旧调用方：未提供新来源时，不抹掉历史上已记录的来源。
+            let mut updated = entry.clone();
+            if updated.source.is_none() {
+                updated.source = slot.source.clone();
+            }
+            *slot = updated.clone();
             true
         } else {
             index.models.push(entry.clone());
@@ -187,6 +206,7 @@ impl ModelStore {
                 instance_id: instance_id.to_string(),
                 path: remote_path.to_string(),
             },
+            source: None,
             sha256: None,
             version: None,
             verified_at: Some(mangosteen_core::time::now_unix()),

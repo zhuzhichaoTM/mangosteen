@@ -17,6 +17,30 @@ impl GatewayServer {
             Err(e) => return Response::error(&e),
         };
 
+        // 活跃部署索引：模型 ID → (origin_kind, node_ip)。
+        //
+        // 只读台账（`list_active` 不触发厂商网络），因此模型列表仍然
+        // 是毫秒级接口。云端 node_ip 在实例创建时已回填进 CloudPlan。
+        let mut live: std::collections::HashMap<String, (&'static str, Option<String>)> =
+            std::collections::HashMap::new();
+        if let Ok(recs) = gw.state().list_active() {
+            for r in recs {
+                let id = mangosteen_core::model::ModelEntry::derive_id(
+                    &r.plan.model.name,
+                    r.plan.model.quant,
+                );
+                let (kind, ip) = if r.plan.origin.is_local() {
+                    ("local", None)
+                } else {
+                    (
+                        "cloud",
+                        r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone()),
+                    )
+                };
+                live.insert(id, (kind, ip));
+            }
+        }
+
         let items: Vec<serde_json::Value> = list
             .iter()
             .map(|m| {
@@ -61,9 +85,27 @@ impl GatewayServer {
                     }
                 };
 
+                // 只有「正在运行的实例」才有节点地址：
+                //   本地运行 → 127.0.0.1
+                //   云端运行 → 创建时回填的公网地址
+                //   未运行/旧台账无地址 → null（UI 显示占位符，不猜测）
+                let (origin_kind, node_ip) = match live.get(&m.id) {
+                    Some(("cloud", ip)) => ("cloud", ip.clone()),
+                    Some(_) => ("local", Some("127.0.0.1".to_string())),
+                    None => {
+                        let kind = if m.is_local() { "local" } else { "cloud" };
+                        (kind, None)
+                    }
+                };
+
                 serde_json::json!({
                     "id": m.id,
                     "name": m.spec.name,
+                    // 模型来源（下载时的实际源）。旧台账没有该字段 → null，
+                    // 由 UI 显示占位符，不猜具体来源。
+                    "source": m.source,
+                    "origin_kind": origin_kind,
+                    "node_ip": node_ip,
                     "quant": m.spec.quant.to_string(),
                     "size_bytes": size.or(Some(m.spec.file_size_bytes)).filter(|v| *v > 0),
                     "path": path,

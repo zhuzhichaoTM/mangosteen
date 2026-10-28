@@ -32,6 +32,8 @@ pub struct Downloaded {
     pub sha256: Option<String>,
     /// 是否复用了断点续传
     pub resumed: bool,
+    /// 实际使用的下载地址（可能来自备用候选）
+    pub url: String,
 }
 
 /// 进度回调的包装。
@@ -79,6 +81,17 @@ pub struct DownloadOptions {
     /// 回调在轮询线程里执行，因此必须是 `Send + Sync`。
     /// 不在这里返回 `FnMut` 是因为要跨线程共享。
     pub on_progress: Option<ProgressSink>,
+    /// 覆盖下载 URL。
+    ///
+    /// HuggingFace 模型存在多个镜像时，调用方先测速，把最快的地址放进来。
+    /// `None` 时使用 `ModelSource::download_url`。
+    pub url_override: Option<String>,
+    /// 备用下载地址（按推荐顺序）。
+    ///
+    /// 主地址永久失败（如 404 / 连接被拒）时依次尝试。用于「hf-mirror 与
+    /// huggingface.co 自动择优 + 失败回退」——测速只决定先试谁，真正能否
+    /// 下载由实际请求决定。
+    pub fallback_urls: Vec<String>,
     /// 取消检查：返回 `true` 时中止下载并杀掉 curl。
     ///
     /// ## 为什么需要它
@@ -129,6 +142,8 @@ impl DownloadOptions {
             expected_sha256: None,
             expected_bytes: None,
             on_progress: None,
+            url_override: None,
+            fallback_urls: Vec::new(),
             should_cancel: None,
         }
     }
@@ -373,7 +388,10 @@ pub fn download_model(
     opts: &DownloadOptions,
     show_progress: bool,
 ) -> MnResult<Downloaded> {
-    let url = source.download_url(model)?;
+    let url = match &opts.url_override {
+        Some(u) => u.clone(),
+        None => source.download_url(model)?,
+    };
 
     std::fs::create_dir_all(&opts.dest_dir)
         .map_err(|e| MnError::io(format!("创建模型目录 {}", opts.dest_dir.display()), &e))?;
@@ -397,6 +415,7 @@ pub fn download_model(
                         bytes: meta.len(),
                         sha256: sha,
                         resumed: false,
+                        url,
                     });
                 }
             }
@@ -419,34 +438,54 @@ pub fn download_model(
         }
     }
 
+    // 候选地址：主地址优先，其余按顺序回退。
+    //
+    // 测速失败可能只是 HEAD 被拒绝，GET 仍然可用，所以这里不因「没测到延迟」
+    // 就排除候选；只有实际下载失败才换下一个。
+    let mut urls = vec![url.clone()];
+    for u in &opts.fallback_urls {
+        if !urls.iter().any(|x| x == u) {
+            urls.push(u.clone());
+        }
+    }
+
     let mut last_err: Option<MnError> = None;
-    for attempt in 0..=opts.retries {
-        match run_curl(&url, &part_path, opts, expected_total, show_progress) {
-            Ok(()) => {
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                // 用户主动取消：立即返回，绝不重试。
-                // 重试会把用户刚停掉的下载又拉起来——「点了停止反而更忙」。
-                if e.is_cancelled() {
-                    return Err(e);
+    let mut used_url = url.clone();
+    let mut ok = false;
+    'candidates: for candidate in &urls {
+        used_url = candidate.clone();
+        for attempt in 0..=opts.retries {
+            match run_curl(candidate, &part_path, opts, expected_total, show_progress) {
+                Ok(()) => {
+                    last_err = None;
+                    ok = true;
+                    break 'candidates;
                 }
-                // 404 / 403 这类确定性失败不重试
-                if is_permanent(&e) {
-                    cleanup_failed(&part_path);
-                    return Err(e);
-                }
-                last_err = Some(e);
-                if attempt < opts.retries {
-                    std::thread::sleep(Duration::from_millis(500u64 * (attempt as u64 + 1)));
+                Err(e) => {
+                    // 用户主动取消：立即返回，绝不重试，也不换备用地址。
+                    // 重试会把用户刚停掉的下载又拉起来——「点了停止反而更忙」。
+                    if e.is_cancelled() {
+                        return Err(e);
+                    }
+                    // 404 / 403 这类确定性失败：换下一个候选，不再原地重试
+                    if is_permanent(&e) {
+                        last_err = Some(e);
+                        break;
+                    }
+                    last_err = Some(e);
+                    if attempt < opts.retries {
+                        std::thread::sleep(Duration::from_millis(500u64 * (attempt as u64 + 1)));
+                    }
                 }
             }
         }
     }
-    if let Some(e) = last_err {
+    if !ok {
         // 保留 .part 以便续传，不删除
-        return Err(e);
+        return Err(last_err.unwrap_or_else(|| MnError::Network {
+            stage: "下载模型".to_string(),
+            reason: "没有可用的下载地址".to_string(),
+        }));
     }
 
     // ---- 校验 ----
@@ -506,6 +545,7 @@ pub fn download_model(
         bytes: size,
         sha256: actual_sha.or(opts.expected_sha256.clone()),
         resumed: resume_from > 0,
+        url: used_url,
     })
 }
 
@@ -751,6 +791,113 @@ fn run_curl(
 }
 
 /// 字节数转人类可读。
+/// HuggingFace 候选下载地址：国内镜像与官方站点。
+///
+/// UI 不再让用户在两者之间选；下载前由 [`pick_fastest`] 实测并选择更快且
+/// 可达的那个。两者 API 与文件路径规则完全一致，因此可以互换。
+pub fn huggingface_candidates(model: &ModelRef) -> Vec<(String, String)> {
+    let mirror = ModelSource::hf_mirror();
+    let official = ModelSource::huggingface();
+    let mut out = Vec::new();
+    if let Ok(u) = mirror.download_url(model) {
+        out.push((mirror.name.clone(), u));
+    }
+    if let Ok(u) = official.download_url(model) {
+        out.push((official.name.clone(), u));
+    }
+    out
+}
+
+/// 按延迟升序排列候选；探测失败的候选排在最后。
+///
+/// 入参是 `(源名, 地址, 延迟毫秒)`；`None` 表示探测失败（不可达/超时）。
+/// 纯函数，便于在单测里覆盖各种失败与并列情况。
+///
+/// 为什么保留失败候选：测速失败可能只是 HEAD 被拒绝，GET 仍然可用。
+/// 因此排序只决定「先试谁」，而不是「谁能用」——真正能否下载由下载结果决定。
+pub fn rank_candidates(measured: &[(String, String, Option<f64>)]) -> Vec<(String, String)> {
+    let mut order: Vec<&(String, String, Option<f64>)> = measured.iter().collect();
+    order.sort_by(|a, b| match (a.2, b.2) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    order
+        .into_iter()
+        .map(|(name, url, _)| (name.clone(), url.clone()))
+        .collect()
+}
+
+/// 从测量结果中选出最快的可用候选。
+pub fn fastest_of(measured: &[(String, String, Option<f64>)]) -> Option<(String, String)> {
+    measured
+        .iter()
+        .filter_map(|(name, url, ms)| ms.map(|m| (m, name.clone(), url.clone())))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, name, url)| (name, url))
+}
+
+/// 测速并按「先快后慢、失败最后」返回候选顺序。
+pub fn ranked_candidates(
+    candidates: &[(String, String)],
+    curl_bin: &str,
+    timeout_secs: u64,
+) -> Vec<(String, String)> {
+    let measured: Vec<(String, String, Option<f64>)> = candidates
+        .iter()
+        .map(|(name, url)| {
+            (
+                name.clone(),
+                url.clone(),
+                measure_url_ms(curl_bin, url, timeout_secs),
+            )
+        })
+        .collect();
+    rank_candidates(&measured)
+}
+
+/// 测一次 URL 的往返耗时（毫秒）。
+///
+/// 只发 HEAD（`-I`）并丢弃响应体，不会把模型文件拉下来。失败（HTTP 错误、
+/// 超时）返回 `None`，由 [`fastest_of`] 跳过。
+pub fn measure_url_ms(curl_bin: &str, url: &str, timeout_secs: u64) -> Option<f64> {
+    // 让响应头与 `--write-out` 都走 stdout：头在前、耗时数值在最后一行。
+    // 不依赖 `/dev/null`（Windows 上没有该路径），也不需要平台分支。
+    let out = Command::new(curl_bin)
+        .arg("--head")
+        .arg("--fail")
+        .arg("--location")
+        .arg("--silent")
+        .arg("--max-time")
+        .arg(timeout_secs.to_string())
+        .arg("--write-out")
+        .arg("\n%{time_total}")
+        .arg(url)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let secs: f64 = text
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().parse::<f64>().ok())?;
+    Some(secs * 1000.0)
+}
+
+/// 对候选地址测速并选出最快的一个；全部失败时返回 `None`。
+pub fn pick_fastest(
+    candidates: &[(String, String)],
+    curl_bin: &str,
+    timeout_secs: u64,
+) -> Option<(String, String)> {
+    ranked_candidates(candidates, curl_bin, timeout_secs)
+        .into_iter()
+        .next()
+}
+
 pub fn human_bytes(b: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = b as f64;
@@ -1409,6 +1556,25 @@ mod tests {
         assert_eq!(read_sha_sidecar(&model), Some(sha));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fastest_of_skips_failures_and_picks_lowest_latency() {
+        let measured = vec![
+            ("hf-mirror".to_string(), "mirror".to_string(), Some(120.0)),
+            ("hf".to_string(), "official".to_string(), None),
+            ("hf".to_string(), "official-2".to_string(), Some(80.0)),
+        ];
+        assert_eq!(
+            fastest_of(&measured),
+            Some(("hf".to_string(), "official-2".to_string()))
+        );
+    }
+
+    #[test]
+    fn fastest_of_returns_none_when_all_candidates_fail() {
+        let measured = vec![("hf-mirror".to_string(), "mirror".to_string(), None)];
+        assert_eq!(fastest_of(&measured), None);
     }
 
     #[test]

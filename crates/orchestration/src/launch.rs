@@ -5,6 +5,58 @@
 use super::*;
 
 impl Orchestrator {
+    /// 启动一个已准备过的本地部署，直接复用台账中的方案。
+    ///
+    /// 此入口仅供「已下载模型 → 启动」使用：部署前的资源评估、模式决策和
+    /// 节点配置已由首次部署完成并持久化，这里不调用 `evaluate` / `Scheduler`，
+    /// 也不重新计算资源。缺少本地部署方案时明确要求用户重新部署。
+    pub fn start_local_deployment(&mut self, id: &str) -> MnResult<DeploymentPlan> {
+        let record = self
+            .state
+            .get(id)?
+            .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
+        if record.status.is_active() {
+            return Err(MnError::bad_request(format!(
+                "部署 `{id}` 当前状态为 {}，无需重复启动",
+                record.status.as_str()
+            )));
+        }
+        if !matches!(record.plan.origin, ComputeOrigin::Local) {
+            return Err(MnError::bad_request(
+                "该部署不是本地方案，请使用云端启动服务入口".to_string(),
+            ));
+        }
+
+        let plan = record.plan.clone();
+        let local = plan.local.as_ref().ok_or_else(|| {
+            MnError::bad_request("部署记录缺少本地启动方案，请重新部署该模型以生成方案")
+        })?;
+        let path = PathBuf::from(&local.model_path);
+        if !path.is_file() {
+            return Err(MnError::ModelNotFound { path });
+        }
+
+        self.state
+            .set_status(id, DeploymentStatus::Provisioning, None)?;
+        match self.launch_local(id, plan.local.as_ref().expect("validated above")) {
+            Ok(handle) => {
+                let pid = handle.pid();
+                self.engines.insert(id.to_string(), handle);
+                self.state.set_pid(id, pid)?;
+                self.state.set_status(id, DeploymentStatus::Ready, None)?;
+                self.state
+                    .get(id)?
+                    .map(|r| r.plan)
+                    .ok_or_else(|| MnError::bad_request("台账记录丢失"))
+            }
+            Err(e) => {
+                self.state
+                    .set_status(id, DeploymentStatus::Failed, Some(e.to_string()))?;
+                Err(e)
+            }
+        }
+    }
+
     /// 「提交」阶段：启动本地引擎并等待健康检查。
     ///
     /// 调用方需保证**模型文件此刻已在磁盘上**（无论原本就有还是刚下载完）。

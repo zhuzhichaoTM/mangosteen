@@ -443,6 +443,7 @@ impl Scheduler {
             download_url: req.model_download.as_ref().map(|d| d.url.clone()),
             download_bytes: req.model_download.as_ref().and_then(|d| d.expected_bytes),
             remote_model: None,
+            node_ip: None,
         })
     }
 
@@ -924,6 +925,7 @@ mod tests {
             download_url: None,
             download_bytes: None,
             remote_model: None,
+            node_ip: None,
             local_port: 11500,
             engine: LocalPlan {
                 model_path: "/m".into(),
