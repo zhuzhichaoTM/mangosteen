@@ -37,6 +37,7 @@ pub mod gateway;
 pub mod http;
 
 pub mod protocol;
+mod pull_worker;
 pub mod pulljobs;
 pub mod server;
 
