@@ -768,6 +768,9 @@ fn c6_five_layer_architecture_is_complete() {
     for f in [
         "crates/orchestration/src/orchestrator/mod.rs",
         "crates/orchestration/src/orchestrator/deploy.rs",
+        "crates/orchestration/src/orchestrator/deploy/evaluate.rs",
+        "crates/orchestration/src/orchestrator/deploy/local.rs",
+        "crates/orchestration/src/orchestrator/deploy/cloud.rs",
         "crates/orchestration/src/orchestrator/lifecycle.rs",
         "crates/orchestration/src/orchestrator/query.rs",
     ] {

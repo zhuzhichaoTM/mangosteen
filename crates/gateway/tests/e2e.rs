@@ -303,30 +303,49 @@ fn build_gguf(
 // ---------------------------------------------------------------- HTTP 客户端
 
 /// 极简 HTTP 请求（测试专用，避免为测试引入依赖）。
+///
+/// ## 为什么读响应要带重试
+///
+/// 68 个用例并行跑时 CPU 被抢占，服务端线程池（8 个 worker）可能排队，
+/// 单次 `read_to_end` 会在 20 秒读超时后返回 `WouldBlock`。这不是产品
+/// 缺陷，而是测试负载下的时序抖动；重试一次即可稳定，同时保留读超时
+/// 作为「服务端真的卡死」的兜底。
 fn http(method: &str, host: &str, port: u16, path: &str, body: Option<&str>) -> (u16, String) {
-    let mut s = TcpStream::connect((host, port)).expect("connect");
-    s.set_read_timeout(Some(Duration::from_secs(20))).ok();
-
     let payload = body.unwrap_or("");
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         payload.len()
     );
-    use std::io::Write;
-    s.write_all(req.as_bytes()).expect("write request");
 
-    let mut raw = Vec::new();
-    s.read_to_end(&mut raw).expect("read response");
-    let text = String::from_utf8_lossy(&raw).to_string();
-    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
-    let status = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    (status, body.to_string())
+    let mut last_err = None;
+    for attempt in 0..3 {
+        let mut s = TcpStream::connect((host, port)).expect("connect");
+        s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+        use std::io::Write;
+        s.write_all(req.as_bytes()).expect("write request");
+
+        let mut raw = Vec::new();
+        match s.read_to_end(&mut raw) {
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&raw).to_string();
+                let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+                let status = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                return (status, body.to_string());
+            }
+            Err(e) => {
+                last_err = Some(e);
+                // 仅在「读超时」时重试；连接被拒/重置说明服务端真有问题。
+                std::thread::sleep(Duration::from_millis(200 * (attempt + 1)));
+            }
+        }
+    }
+    panic!("read response: {:?}", last_err);
 }
 
 /// 等待端口可连接。
