@@ -28,45 +28,41 @@ use mangosteen_core::{MnError, MnResult};
 use serde::{Deserialize, Serialize};
 /// 用户指定的算力落位。
 ///
-/// 为什么需要它：默认策略是「本地优先、不足才降级云端」，这是产品基线。
-/// 但用户有时明确知道自己要什么——例如手边机器在跑别的任务、想全部放到
-/// 云端；或反过来，想把数据留在本地、绝不上云。
-///
-/// 因此提供一个**显式覆盖**，同时保留默认的自动策略：
-/// - `Auto`（默认）：本地优先，不足才降级
-/// - `Local`：只用本地，不足就报错，绝不静默上云（避免意外计费）
-/// - `Cloud`：只用云端，跳过本地尝试
+/// Mangosteen 只把模型部署到远端 GPU 节点（云端实例 + 已保存 SSH 设备），
+/// 本地推理交由 Ollama 承担。因此 `Local` 已不再被支持——请求它会在
+/// 决策阶段被明确拒绝（绝不静默降级产生计费）；`Auto` 与 `Cloud` 都走云端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComputeTarget {
-    /// 自动：本地优先，不足降级云端（产品默认）
+    /// 自动：纯云端（产品已不再支持本地部署）
     #[default]
     Auto,
-    /// 强制本地：资源全部在本地，不足则失败
+    /// 本地：已不再支持，请求会被拒绝
     Local,
-    /// 强制云端：资源全部在云端，跳过本地
+    /// 强制云端：资源全部在远端 GPU 节点
     Cloud,
 }
 
 impl ComputeTarget {
-    /// 从字符串解析（HTTP 入参）。
+    /// 从字符串解析（HTTP 入参）。`auto`/`cloud`/`local` 都能解析，
+    /// 但 `local` 在决策阶段会被拒绝（见 [`crate::Scheduler::decide`]）。
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Auto),
-            "local" => Some(Self::Local),
             "cloud" => Some(Self::Cloud),
+            "local" => Some(Self::Local),
             _ => None,
         }
     }
 
-    /// 是否强制本地。
+    /// 是否强制本地（已不再支持，仅用于拒绝）。
     pub fn forces_local(self) -> bool {
         matches!(self, Self::Local)
     }
 
-    /// 是否强制云端。
+    /// 是否强制云端（含 `Auto`：产品已纯云端）。
     pub fn forces_cloud(self) -> bool {
-        matches!(self, Self::Cloud)
+        matches!(self, Self::Auto | Self::Cloud)
     }
 }
 
@@ -105,6 +101,17 @@ pub struct DeploymentRequest {
     /// `None` 的情形：本地文件路径直接部署（`models add` 的产物）、或调用方
     /// 是 CLI/e2e 且没走下载流程。此时云端只能走「上传本地文件」的备选链路。
     pub model_download: Option<ModelDownloadSpec>,
+    /// 用户显式选定的云端规格 ID（如 `V100S/1x10c/64g`）。
+    ///
+    /// UI 在云端确认弹窗里让用户挑 GPU 型号；选定后由此传给编排层，
+    /// 编排层优先创建该规格。`None` 表示按调度策略自动选。
+    pub cloud_spec: Option<String>,
+    /// 用户选定的**已保存设备**（设置页「设备列表」里的 SSH 节点）。
+    ///
+    /// 有值时**不创建云实例**：直接连上这台机器部署。它优先于
+    /// [`Self::cloud_spec`]——用户明确指了机器，就不该再开一台新的
+    /// 计费实例。
+    pub device_id: Option<String>,
 }
 
 /// 模型文件的远端下载信息。
@@ -129,6 +136,8 @@ impl Default for DeploymentRequest {
             batch_size: 512,
             target: ComputeTarget::Auto,
             model_download: None,
+            cloud_spec: None,
+            device_id: None,
         }
     }
 }
@@ -178,7 +187,10 @@ pub struct Evaluated {
 }
 
 impl Evaluated {
-    /// 本地是否可承载。
+    /// 该模型是否能在**本机**直接承载（纯评估查询，不影响部署决策）。
+    ///
+    /// 注意：Mangosteen 只把模型部署到远端节点，本地推理交由 Ollama 承担，
+    /// 因此该查询仅用于 `assess` 命令展示硬件能力，不参与「部署落位」决策。
     pub fn is_local_viable(&self) -> bool {
         self.assessment.placement.is_local_satisfiable()
     }
@@ -498,6 +510,8 @@ mod tests {
             target: ComputeTarget::Auto,
             // 测试只验证「请求翻译到纯算法层」，不涉及远端下载信息
             model_download: None,
+            cloud_spec: None,
+            device_id: None,
         };
         let ar = r.to_assess_request();
         assert_eq!(ar.context_len, Some(16384));

@@ -184,11 +184,9 @@ fn print_deploy_result(
             "发生算力降级：{}",
             plan.fallback_trail.join(" → ")
         ));
-        if let mangosteen_core::plan::ComputeOrigin::Cloud { .. } = plan.origin {
-            output::print_info(
-                "云上实例正在计费，用完请执行 `mangosteen stop <部署ID>` 或 `mangosteen stop --all`",
-            );
-        }
+        output::print_info(
+            "云上实例正在计费，用完请执行 `mangosteen stop <部署ID>` 或 `mangosteen stop --all`",
+        );
     }
 }
 

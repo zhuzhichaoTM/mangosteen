@@ -36,6 +36,13 @@ impl GatewayServer {
         if let Some(p) = parsed.get("max_price_per_hour").and_then(|v| v.as_f64()) {
             dreq.max_price_per_hour = Some(p);
         }
+        // 用户在确认弹窗里选定的 GPU 规格。空字符串 / null 表示自动选点。
+        if let Some(spec) = parsed.get("cloud_spec").and_then(|v| v.as_str()) {
+            let spec = spec.trim();
+            if !spec.is_empty() {
+                dreq.cloud_spec = Some(spec.to_string());
+            }
+        }
         // 设备选择：local / cloud / auto（缺省 auto = 本地优先）
         if let Some(t) = parsed.get("target").and_then(|v| v.as_str()) {
             match mangosteen_orchestration::assess::ComputeTarget::parse(t) {
@@ -84,14 +91,21 @@ impl GatewayServer {
                             "origin": r.plan.origin.label(),
                             // 稳定机器可读类型：UI 用它渲染本地/云端符号，
                             // 不依赖本地化文案做判断。
-                            "origin_kind": if r.plan.origin.is_local() { "local" } else { "cloud" },
-                            // 云端节点公网 IP（本地部署为 127.0.0.1）。
-                            "node_ip": match &r.plan.origin {
-                                mangosteen_core::plan::ComputeOrigin::Local => Some("127.0.0.1".to_string()),
-                                mangosteen_core::plan::ComputeOrigin::Cloud { .. } => {
-                                    r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone())
-                                }
-                            },
+                            "origin_kind": "cloud",
+                            // 云端节点公网 IP。
+                            "node_ssh_port": r.plan.cloud.as_ref().and_then(|c| c.node_ssh_port),
+                            "node_ssh_user": r.plan.cloud.as_ref().and_then(|c| c.node_ssh_user.clone()),
+                            "gpu_model": r.plan.cloud.as_ref().map(|c| c.gpu_model.clone()),
+                            "requested_spec_id": r
+                                .plan
+                                .cloud
+                                .as_ref()
+                                .and_then(|c| c.requested_spec_id.clone()),
+                            "node_ip": r
+                                .plan
+                                .cloud
+                                .as_ref()
+                                .and_then(|c| c.node_ip.clone()),
                             "status": r.status.as_str(),
                             "port": r.plan.local_access_port(),
                             // 进程 PID：用户想用 top / kill 直接操作引擎进程时
@@ -146,31 +160,7 @@ impl GatewayServer {
             Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
         }
     }
-    /// 启动本地模型：使用台账里保存的部署方案，不重新评估资源。
-    pub(crate) fn start_model(&self, id: &str) -> Response {
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
-        match gw.start_local_deployment(id) {
-            Ok(plan) => Response::json(
-                200,
-                &serde_json::json!({
-                    "ok": true,
-                    "id": plan.id,
-                    "status": "ready",
-                    "model_id": mangosteen_core::model::ModelEntry::derive_id(
-                        &plan.model.name, plan.model.quant
-                    ),
-                }),
-            ),
-            Err(e) => Response::error(&e),
-        }
-    }
-
     /// 启动服务：云端开机并重新拉起推理进程。
-    ///
-    /// 本地模型应走 [`Self::start_model`]，不能重新走部署评估。
     pub(crate) fn start_service(&self, id: &str) -> Response {
         let mut gw = match self.gateway.lock() {
             Ok(g) => g,
@@ -225,15 +215,18 @@ impl GatewayServer {
         if let Some(a) = parsed.get("allow_cloud").and_then(|v| v.as_bool()) {
             dreq.allow_cloud = a;
         }
+        if let Some(id) = parsed.get("device_id").and_then(|v| v.as_str()) {
+            dreq.device_id = Some(id.to_string());
+        }
         // 算力来源（部署页签的「本地 / 云端」选择）。
         //
-        // 与 `allow_cloud` 是两件事：
-        // * `allow_cloud=false` = 禁止降级（本地可行时仍用本地）；
-        // * `target=cloud`      = 用户明确要为云端付费，跳过本地；
-        // * `target=local`      = 本地不足时**停止部署**，绝不静默上云。
+        // Mangosteen 当前为纯云端部署：模型一律部署到远端 GPU 节点
+        // （云厂商实例或已保存的 SSH 设备），本地推理由 Ollama 承担。
+        // 因此：
+        // * `target=auto` / `target=cloud` = 走云端部署；
+        // * `target=local`                = 明确拒绝（本地已不再部署）。
         //
-        // 未知值直接报错而不是回退默认：静默忽略会让用户以为选择生效了，
-        // 结果在「以为用本地」的情况下开出计费实例。
+        // 未知值直接报错而不是回退默认：静默忽略会让用户以为选择生效了。
         if let Some(t) = parsed.get("target") {
             let raw = t.as_str().unwrap_or("");
             match mangosteen_orchestration::assess::ComputeTarget::parse(raw) {
@@ -275,16 +268,30 @@ impl GatewayServer {
         };
         match gw.deploy(&dreq) {
             Ok(plan) => {
+                let cloud = plan.cloud.as_ref();
                 let payload = serde_json::json!({
                     "id": plan.id,
                     "model": plan.model.name,
                     "origin": plan.origin.label(),
+                    "origin_kind": "cloud",
                     "port": plan.local_access_port(),
                     "fallback_trail": plan.fallback_trail,
                     "openai_base_url": format!(
                         "http://127.0.0.1:{}/v1",
                         gw.config().gateway.port
                     ),
+                    // 设备配置（云端）：让用户在部署完成后立刻看到
+                    // 「哪台机器、怎么登录、推理进程在哪」。
+                    "provider": cloud.map(|c| c.provider.clone()),
+                    "instance_id": match &plan.origin {
+                        mangosteen_core::plan::ComputeOrigin::Cloud { instance_id, .. } =>
+                            Some(instance_id.clone()),
+                    },
+                    "gpu_model": cloud.map(|c| c.gpu_model.clone()),
+                    "node_ip": cloud.and_then(|c| c.node_ip.clone()),
+                    "node_ssh_port": cloud.and_then(|c| c.node_ssh_port),
+                    "node_ssh_user": cloud.and_then(|c| c.node_ssh_user.clone()),
+                    "requested_spec_id": cloud.and_then(|c| c.requested_spec_id.clone()),
                 });
                 Response::json(201, &payload)
             }

@@ -64,6 +64,10 @@ pub struct Provisioned {
     pub base_url: String,
     /// 实际使用的本地映射端口（`None` 表示服务商直接提供了公网入口）
     pub local_port: Option<u16>,
+    /// 远端连接信息（设备配置阶段拿到，启动阶段复用）。
+    pub ssh: mangosteen_device::remote::SshTarget,
+    /// 远端工作目录
+    pub workdir: String,
 }
 
 impl Provisioned {
@@ -213,6 +217,11 @@ impl CloudOrchestrator {
         Ok((candidates, latencies))
     }
 
+    /// 列出所有可用规格（跨服务商），不执行排序或创建。
+    pub fn collect_all_available_specs(&self) -> MnResult<Vec<(String, AvailableSpec)>> {
+        self.collect_candidates().map(|(candidates, _)| candidates)
+    }
+
     /// 按打分排序（不创建资源）。供 CLI 的 `cloud pick` 使用。
     pub fn rank(
         &self,
@@ -324,8 +333,22 @@ impl CloudOrchestrator {
         plan: &CloudPlan,
         launch: &EngineLaunchConfig,
     ) -> MnResult<Provisioned> {
+        self.provision_with_progress(constraints, plan, launch, None)
+    }
+
+    /// 与 [`Self::provision`] 相同，但支持上报**远端下载**进度。
+    ///
+    /// 回调参数：`(已下载字节, 期望总字节)`。轮询线程里调用，所以要求
+    /// `Send + Sync`；只做内存写入，不做 IO。
+    pub fn provision_with_progress(
+        &mut self,
+        constraints: &SelectionConstraints,
+        plan: &CloudPlan,
+        launch: &EngineLaunchConfig,
+        on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    ) -> MnResult<Provisioned> {
         let (_best, ranked, _all) = self.pick(constraints)?;
-        let ordered: Vec<CreateCandidate> = ranked
+        let mut ordered: Vec<CreateCandidate> = ranked
             .iter()
             .map(|c| CreateCandidate {
                 provider: c.provider.clone(),
@@ -333,6 +356,8 @@ impl CloudOrchestrator {
                 price: c.price_per_hour,
             })
             .collect();
+
+        prefer_requested_spec(&mut ordered, plan.requested_spec_id.as_deref());
 
         let (provider, instance) = self.create_first_running(
             &ordered,
@@ -348,6 +373,7 @@ impl CloudOrchestrator {
             launch,
             &mut self.tunnels,
             &self.config,
+            on_progress,
         )
     }
 
@@ -649,6 +675,7 @@ impl CloudOrchestrator {
                 plan.engine_port,
             )],
             control_master: true,
+            allow_unready_remote: false,
             password: instance
                 .network
                 .ssh_password
@@ -727,12 +754,179 @@ impl CloudOrchestrator {
     }
 }
 
-/// 实例已 Running 之后的收尾：设密码 → 建隧道 → 等推理服务 → 装模型。
+/// 从实例信息构造可用的 SSH 目标（必要时先设密码并等 sshd 接受）。
 ///
-/// 写成**自由函数**而不是方法：调用方此时正持有 `registry` 的不可变借用
-/// （`driver`），方法签名里的 `&mut self` 会与之冲突。传分离的字段
-/// （`tunnels` / `config`）既避开借用冲突，也让「这段逻辑不依赖编排器
-/// 其它状态」这件事显式化。
+/// ## 顺序为什么不能反
+///
+/// 先设密码再连 ssh：反过来会用一个实例还不知道的密码去认证，ssh 直接
+/// `Permission denied`，而错误信息看起来像「网络不通」。厂商已经下发了
+/// 密码就不用再设——AutoDL 直接给 `root_password`，再调一次「重置密码」
+/// 反而会把密码改成一个我们并不知道的值。
+fn vendor_ssh_target(
+    driver: &dyn mangosteen_core::cloud::ProviderDriver,
+    instance: &Instance,
+    config: &OrchestratorConfig,
+) -> MnResult<mangosteen_device::remote::SshTarget> {
+    let host = instance
+        .network
+        .ssh_host
+        .clone()
+        .ok_or_else(|| MnError::Network {
+            stage: "读取 SSH 信息".to_string(),
+            reason: format!(
+                "服务商 {} 未返回实例 {} 的 SSH 地址，无法建立隧道",
+                instance.provider, instance.id
+            ),
+        })?;
+    let port = instance.network.ssh_port.unwrap_or(22);
+    let password = instance
+        .network
+        .ssh_password
+        .clone()
+        .or_else(|| config.ssh_password.clone());
+
+    if instance.network.ssh_password.is_none() {
+        if let Some(pw) = config.ssh_password.as_deref() {
+            driver.reset_root_password(&instance.id, pw)?;
+            // 厂商改密码是异步下发到实例内的，sshd 生效有延迟。
+            // 等端口能连上再建隧道，比让 ssh 反复重试要稳。
+            wait_tcp(&host, port, config.start_timeout, config.poll_interval)?;
+        }
+    }
+
+    Ok(mangosteen_device::remote::SshTarget {
+        host,
+        port,
+        user: "root".to_string(),
+        password,
+    })
+}
+
+/// 由远端连接信息构造隧道参数（云实例与自建设备共用）。
+pub fn tunnel_spec_for(
+    ssh: &mangosteen_device::remote::SshTarget,
+    remote_port: u16,
+    allow_unready_remote: bool,
+) -> TunnelSpec {
+    TunnelSpec {
+        ssh_host: ssh.host.clone(),
+        ssh_port: ssh.port,
+        ssh_user: ssh.user.clone(),
+        identity_file: None,
+        forwards: vec![mangosteen_core::net::PortForward::loopback(0, remote_port)],
+        control_master: true,
+        // 两段式部署：设备配置阶段就建隧道，此时引擎还没起，
+        // 不能要求转发目标立刻可达。
+        allow_unready_remote,
+        password: ssh.password.clone(),
+    }
+}
+
+/// 设备配置阶段的产物：实例（可能为空）、远端连接信息、隧道端口。
+#[derive(Debug, Clone)]
+pub struct ProvisionedResources {
+    /// 厂商实例。用户自建设备时为 `None`。
+    pub instance: Option<Instance>,
+    /// 远端连接信息
+    pub ssh: mangosteen_device::remote::SshTarget,
+    /// 远端工作目录
+    pub workdir: String,
+    /// 隧道映射到本机的端口
+    pub local_port: u16,
+}
+
+impl CloudOrchestrator {
+    /// **设备配置阶段**：建实例（若需要）→ 准备远端资源 → 建隧道。
+    ///
+    /// 只做到「机器可用、权重就位、隧道通了」，**不启动引擎**。
+    /// 启动留给 [`Self::start_engine`]，对应产品要求的两段式：
+    /// 设备配置完成后再启动模型。
+    ///
+    /// 失败时按现有不变量回滚：厂商实例会被销毁，绝不留计费中的机器。
+    pub fn provision_resources(
+        &mut self,
+        constraints: &SelectionConstraints,
+        plan: &CloudPlan,
+        on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    ) -> MnResult<ProvisionedResources> {
+        let (_best, ranked, _all) = self.pick(constraints)?;
+        let mut ordered: Vec<CreateCandidate> = ranked
+            .iter()
+            .map(|c| CreateCandidate {
+                provider: c.provider.clone(),
+                spec_id: c.spec_id.clone(),
+                price: c.price_per_hour,
+            })
+            .collect();
+        prefer_requested_spec(&mut ordered, plan.requested_spec_id.as_deref());
+
+        let (provider, instance) = self.create_first_running(
+            &ordered,
+            Some(&format!("mangosteen-{}", plan.engine_port)),
+            Some(plan.engine_port),
+        )?;
+        let driver = self.registry.get(&provider)?;
+
+        let result = (|| -> MnResult<ProvisionedResources> {
+            let ssh = vendor_ssh_target(driver, &instance, &self.config)?;
+            prepare_node(
+                &ssh,
+                &self.config.remote_workdir,
+                plan,
+                &self.config.llama_server_url,
+                on_progress,
+            )?;
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
+            let local_port = self.tunnels.establish(&spec, self.config.tunnel_timeout)?.local_port;
+            Ok(ProvisionedResources {
+                instance: Some(instance.clone()),
+                ssh,
+                workdir: self.config.remote_workdir.trim_end_matches('/').to_string(),
+                local_port,
+            })
+        })();
+
+        match result {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                let cleanup = destroy_with_retry(driver, &instance.id);
+                Err(augment_with_cleanup(e, &instance, cleanup))
+            }
+        }
+    }
+
+    /// **启动模型阶段**：在已准备好的节点上拉起 `llama-server`。
+    ///
+    /// 只拉起进程，不等 `/health`——探活由调用方经隧道完成，避免两处
+    /// 超时逻辑各写一套。
+    pub fn start_engine(
+        &self,
+        ssh: &mangosteen_device::remote::SshTarget,
+        workdir: &str,
+        launch: &EngineLaunchConfig,
+    ) -> MnResult<()> {
+        start_node_engine(ssh, workdir, launch)
+    }
+
+    /// 为自建节点建隧道（不经过厂商实例）。
+    pub fn establish_tunnel_to(
+        &mut self,
+        ssh: &mangosteen_device::remote::SshTarget,
+        remote_port: u16,
+    ) -> MnResult<u16> {
+        let spec = tunnel_spec_for(ssh, remote_port, true);
+        Ok(self
+            .tunnels
+            .establish(&spec, self.config.tunnel_timeout)?
+            .local_port)
+    }
+}
+
+/// 实例已 Running 之后的**一站式**收尾（保留给 CLI / 兼容调用）。
+///
+/// 产品部署链路已改为 [`CloudOrchestrator::provision_resources`] +
+/// [`CloudOrchestrator::start_engine`] 两段式；这里只是把两段背靠背串起来，
+/// 行为与改造前一致。
 fn finish_provision(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
     instance: Instance,
@@ -740,98 +934,35 @@ fn finish_provision(
     launch: &EngineLaunchConfig,
     tunnels: &mut TunnelManager,
     config: &OrchestratorConfig,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> MnResult<Provisioned> {
-    // ---- 3. 建立隧道 ----
-    // 缺 SSH 信息时必须先销毁实例再返回错误，否则会产生无谓计费
-    let ssh_host = match instance.network.ssh_host.clone() {
-        Some(h) => h,
-        None => {
-            let cleanup = driver.destroy(&instance.id);
-            let base = MnError::Network {
-                stage: "读取 SSH 信息".to_string(),
-                reason: format!(
-                    "服务商 {} 未返回实例 {} 的 SSH 地址，无法建立隧道",
-                    instance.provider, instance.id
-                ),
-            };
-            return Err(augment_with_cleanup(base, &instance, cleanup));
-        }
-    };
-    let tunnel_spec = TunnelSpec {
-        ssh_host,
-        ssh_port: instance.network.ssh_port.unwrap_or(22),
-        ssh_user: "root".to_string(),
-        identity_file: None,
-        forwards: vec![mangosteen_core::net::PortForward::loopback(
-            0, // 由 TunnelManager 分配
-            plan.engine_port,
-        )],
-        control_master: true,
-        // 优先用厂商下发的密码（AutoDL 直接给 root_password），
-        // 其次才是我们主动设的统一密码（优云需要）
-        password: instance
-            .network
-            .ssh_password
-            .clone()
-            .or_else(|| config.ssh_password.clone()),
-    };
-
-    // ---- 3.5 把密码设到实例上，并等 sshd 接受它 ----
-    //
-    // 顺序很重要：先设密码再建隧道。反过来会用一个实例还不知道的密码
-    // 去认证，ssh 直接 Permission denied，而错误信息看起来像「网络不通」。
-    // 厂商已经给了密码就不用再设：优云的接口没有 key 注入，必须由我们设；
-    // AutoDL 直接下发 root_password，再调一次「重置密码」反而会让
-    // 厂商把密码改成一个我们并不知道的值。
-    let need_set = instance.network.ssh_password.is_none();
-    if let (true, Some(pw)) = (need_set, config.ssh_password.as_deref()) {
-        if let Err(e) = driver.reset_root_password(&instance.id, pw) {
+    let target = match vendor_ssh_target(driver, &instance, config) {
+        Ok(t) => t,
+        Err(e) => {
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
-        // 厂商改密码是异步下发到实例内的，sshd 生效有延迟。
-        // 等端口能连上再建隧道，比让 ssh 反复重试要稳。
-        if let Err(e) = wait_tcp(
-            &tunnel_spec.ssh_host,
-            tunnel_spec.ssh_port,
-            config.start_timeout,
-            config.poll_interval,
-        ) {
-            let cleanup = driver.destroy(&instance.id);
-            return Err(augment_with_cleanup(e, &instance, cleanup));
-        }
-    }
-
-    // ---- 4. 先把推理服务拉起来（**必须早于建隧道**）----
-    //
-    // ## 顺序为什么不能反
-    //
-    // 隧道带 `ExitOnForwardFailure=yes`：只要远端目标端口还没人监听，
-    // ssh 就立即退出。而 llama.cpp 是**我们自己拉起的子进程**——在服务
-    // 起来之前，`plan.engine_port` 上什么都没有，隧道必然失败。
-    //
-    // 实测踩到：先建隧道时 ssh 连上就被关，报 "Connection closed by
-    // remote host"，看起来像密码/安全组问题，实际是转发目标没人听。
-    // （早期用 Ollama 镜像时 11434 是常驻服务，所以没暴露这个顺序问题。）
-    //
-    // 顺带好处：下载几 GB 权重期间不需要隧道，少一条会断的链路。
-    let target = mangosteen_device::remote::SshTarget {
-        host: tunnel_spec.ssh_host.clone(),
-        port: tunnel_spec.ssh_port,
-        user: tunnel_spec.ssh_user.clone(),
-        password: tunnel_spec.password.clone(),
     };
+    let workdir = config.remote_workdir.trim_end_matches('/').to_string();
 
     if plan.remote_model.is_none() {
         // 权重准备 + 起 llama-server，全部走 ssh（不依赖隧道）
-        if let Err(e) = bootstrap_llama(&target, plan, launch, config) {
+        if let Err(e) = prepare_node(
+            &target,
+            &workdir,
+            plan,
+            &config.llama_server_url,
+            on_progress,
+        )
+        .and_then(|_| start_node_engine(&target, &workdir, launch))
+        {
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
     }
 
-    // ---- 5. 服务已在监听，现在建隧道 ----
-    let local_port = match tunnels.establish(&tunnel_spec, config.tunnel_timeout) {
+    let spec = tunnel_spec_for(&target, plan.engine_port, false);
+    let local_port = match tunnels.establish(&spec, config.tunnel_timeout) {
         Ok(t) => t.local_port,
         Err(e) => {
             let cleanup = driver.destroy(&instance.id);
@@ -840,36 +971,30 @@ fn finish_provision(
     };
     let base = format!("http://127.0.0.1:{local_port}");
 
-    // ---- 6. 端到端确认：经隧道探活 ----
-    //
-    // 少了这一步，台账会标 Ready 而对话直接 502——「部署成功但用不了」
-    // 是最难排查的症状。所以宁可在这里多等几十秒，也不返回假就绪的实例。
     if plan.remote_model.is_none() {
-        // llama.cpp：等模型加载完（大模型可能要几分钟）
         if let Err(e) = mangosteen_device::remote::wait_http_ready(
             &format!("{base}/health"),
             config.start_timeout,
             config.poll_interval,
         ) {
-            let _ = tunnels.close(&tunnel_spec);
+            let _ = tunnels.close(&spec);
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
     } else if let Some(model) = plan.remote_model.as_deref() {
-        // Ollama：服务常驻，探 /api/version 确认隧道通，再确保模型在
         if let Err(e) = mangosteen_device::remote::wait_http_ready(
             &format!("{base}/api/version"),
             config.start_timeout,
             config.poll_interval,
         ) {
-            let _ = tunnels.close(&tunnel_spec);
+            let _ = tunnels.close(&spec);
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
         if let Err(e) =
             mangosteen_device::remote::ensure_ollama_model(&base, model, config.start_timeout)
         {
-            let _ = tunnels.close(&tunnel_spec);
+            let _ = tunnels.close(&spec);
             let cleanup = driver.destroy(&instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
@@ -880,31 +1005,28 @@ fn finish_provision(
         tunnel_established: true,
         base_url: format!("{base}/v1"),
         local_port: Some(local_port),
+        ssh: target,
+        workdir,
     })
 }
 
-/// 云端 llama.cpp 引导：确保权重在远端、备好二进制、后台起服务。
-///
-/// 整体抽成一个函数，是为了让 `finish_provision` 里「失败就回滚」的路径
-/// 只有一处——每一步单独写 try/catch 很容易漏掉某一步的清理，
-/// 漏掉就意味着实例继续计费。
+/// 远端资源准备：确保权重就位、llama-server 二进制存在（**不启动**）。
 ///
 /// ## 权重来源（**没有本地上传这条路**）
 ///
 /// 1. **远端已有且大小吻合** → 跳过（同一台机器反复部署是常态）
 /// 2. **远端直连下载**（`plan.download_url`）→ 唯一的获取方式
-/// 3. 失败 → **直接报错并回滚实例**
+/// 3. 失败 → 直接报错（由调用方决定是否回滚实例）
 ///
 /// 刻意不做「本地上传兜底」：部署位置决定下载位置，选了云端就在云端下。
-/// 偷偷改成「本地下载几个 GB 再传上去」会让用户以为模型落在云上，
-/// 实际磁盘与带宽被本地吃掉——那不是用户选的东西。
-fn bootstrap_llama(
+pub fn prepare_node(
     target: &mangosteen_device::remote::SshTarget,
+    workdir: &str,
     plan: &CloudPlan,
-    launch: &EngineLaunchConfig,
-    config: &OrchestratorConfig,
+    llama_server_url: &str,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> MnResult<()> {
-    let workdir = config.remote_workdir.trim_end_matches('/').to_string();
+    let workdir = workdir.trim_end_matches('/').to_string();
     let remote_model = &plan.model_path;
 
     // ---- 1. 远端是否已就位 ----
@@ -913,14 +1035,10 @@ fn bootstrap_llama(
     let want = plan.download_bytes;
 
     let ready = match (remote_size, want) {
-        // 大小已知：必须吻合才算就位
         (got, Some(exp)) if exp > 0 => got == exp,
-        // 大小未知：非空即认为可用。宁可让 llama-server 加载时自己报错，
-        // 也不要在这里盲目重下几 GB
         (got, _) => got > 0,
     };
     if !ready {
-        // ---- 2. 远端直连下载（唯一获取方式）----
         let url = plan
             .download_url
             .as_deref()
@@ -928,21 +1046,64 @@ fn bootstrap_llama(
                 stage: "准备云端模型".to_string(),
                 reason: format!(
                     "没有可用的下载地址，无法在云端获取模型 {}。\n\
-                 云端部署要求模型来自可下载的源（ModelScope / HuggingFace）。\
-                 若是本地自有文件，请把它放到镜像里或改用本地部署。",
+                     云端部署要求模型来自可下载的源（ModelScope / HuggingFace）。\
+                     若是本地自有文件，请把它放到镜像里或改用本地部署。",
                     plan.model_path
                 ),
             })?;
         eprintln!("[cloud] 远端开始下载模型：{url}");
-        let n = mangosteen_device::remote::download_model_remote(target, url, remote_model, want)?;
+        let n = mangosteen_device::remote::download_model_remote_with_progress(
+            target,
+            url,
+            remote_model,
+            want,
+            on_progress,
+        )?;
         eprintln!("[cloud] ✓ 远端已下载模型（{n} 字节）");
     }
 
-    // ---- 3. 备好 llama-server 并起服务 ----
-    let bin =
-        mangosteen_device::remote::ensure_llama_server(target, &workdir, &config.llama_server_url)?;
-    mangosteen_device::remote::start_llama_server(target, &bin, &launch.args, &workdir)?;
+    // ---- 2. 备好 llama-server（不启动）----
+    mangosteen_device::remote::ensure_llama_server(target, &workdir, llama_server_url)?;
     Ok(())
+}
+
+/// 启动阶段的远端引擎拉起。
+pub fn start_node_engine(
+    target: &mangosteen_device::remote::SshTarget,
+    workdir: &str,
+    launch: &EngineLaunchConfig,
+) -> MnResult<()> {
+    let workdir = workdir.trim_end_matches('/').to_string();
+    let bin = format!("{workdir}/bin/llama-server");
+    // 二进制可能被用户清理掉：先探测，找不到就给出可操作结论
+    let probe = mangosteen_device::remote::ssh_exec(
+        target,
+        &format!("if [ -x {bin} ]; then echo ok; elif command -v llama-server >/dev/null 2>&1; then command -v llama-server; else echo missing; fi"),
+        60,
+    )?;
+    let probe = probe.trim();
+    let bin = if probe == "ok" {
+        bin
+    } else if probe == "missing" || probe.is_empty() {
+        return Err(MnError::Network {
+            stage: "启动云端推理服务".to_string(),
+            reason: format!(
+                "远端找不到 llama-server（{bin}）。请重新执行部署以重新准备引擎。"
+            ),
+        });
+    } else {
+        probe.to_string()
+    };
+    mangosteen_device::remote::start_llama_server(target, &bin, &launch.args, &workdir)
+}
+
+/// 把用户显式选定的规格排到最前。失败时保留原排序，由创建阶段尝试其它候选。
+fn prefer_requested_spec(ordered: &mut Vec<CreateCandidate>, requested: Option<&str>) {
+    let Some(want) = requested else { return };
+    if let Some(hit) = ordered.iter().position(|c| c.spec_id == want) {
+        let chosen = ordered.remove(hit);
+        ordered.insert(0, chosen);
+    }
 }
 
 /// 实例建出来但起不来，是否值得换下一个候选。
@@ -1335,6 +1496,10 @@ mod tests {
             download_bytes: None,
             remote_model: None,
             node_ip: None,
+            requested_spec_id: None,
+            node_ssh_port: None,
+            node_ssh_user: None,
+            device_id: None,
             provider: "fake".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,

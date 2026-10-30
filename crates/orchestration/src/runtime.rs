@@ -4,25 +4,24 @@
 //! `deploy`、`lifecycle`、`query`、`preview`、`engine`、`cloud` 等同级短名文件；
 //! 本文件定义运行状态及共享领域结构，不实现 HTTP 或协议转换。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use mangosteen_base::state::{DeploymentRecord, DeploymentStatus, StateStore};
 use mangosteen_base::{ConfigStore, ModelStore};
-use mangosteen_core::config::{Config, LocalConfig, SchedulerConfig};
-use mangosteen_core::plan::{ComputeOrigin, DeploymentPlan};
+use mangosteen_core::config::{Config, SchedulerConfig};
+use mangosteen_core::plan::ComputeOrigin;
 use mangosteen_core::policy::SelectionConstraints;
 use mangosteen_core::{MnError, MnResult};
-use mangosteen_device::engine::{EngineHandle, LlamaCppEngine};
+use mangosteen_device::engine::LlamaCppEngine;
 use mangosteen_provider::orchestrator::CloudOrchestrator;
+use mangosteen_provider::TunnelManager;
 
 use crate::assess::{Assessor, DeploymentRequest, Evaluated};
 use crate::backend::BackendTarget;
 use crate::deployment::{
-    assessed_detail, configured_detail, default_estimate_hours, first_line, sanitize, short,
-    CloudCandidateBrief, CloudPreview, DeploymentPreview, LocalPreview, PreparedDeployment,
-    PreparedLocal,
+    assessed_detail, default_estimate_hours, sanitize, CloudPreview,
+    DeploymentPreview, DeviceBrief, PreparedCloud, PreparedDeployment,
 };
 use crate::scheduler::{Decision, Scheduler};
 
@@ -38,13 +37,6 @@ mod lifecycle;
 mod preview;
 #[path = "query.rs"]
 mod query;
-
-/// 引擎版本探测的时间预算。
-///
-/// 为什么是 2 秒：正常引擎（假引擎、修好的引擎）毫秒级返回；2 秒足够
-/// 覆盖冷启动抖动，又不会让 HTTP 请求明显卡顿。真正慢的引擎（加载全部
-/// 动态库要 20~30 秒）会走「未知」分支，由调用方保守处理。
-const ENGINE_PROBE_BUDGET: Duration = Duration::from_secs(2);
 
 /// 网关整体状态快照（供 CLI / TUI / HTTP 展示）。
 #[derive(Debug, Clone, PartialEq)]
@@ -130,10 +122,13 @@ pub struct Orchestrator {
     /// 本层一行不动（基线「推理引擎插件化原则」）。
     engines_registry: mangosteen_device::EngineRegistry,
     cloud: Option<CloudOrchestrator>,
+    /// 自建节点（设置页「设备列表」）的 SSH 隧道。
+    ///
+    /// 与云端实例分开管理：自建设备不经过厂商接口，即使一个云服务商都
+    /// 没配置（`cloud == None`），设备部署也要能用。
+    device_tunnels: TunnelManager,
     state: StateStore,
     models: ModelStore,
-    /// 本地运行中的引擎：部署 ID → 句柄
-    engines: HashMap<String, EngineHandle>,
     /// 请求 ID 序号
     req_seq: std::sync::atomic::AtomicU64,
     /// 引擎版本缓存：`(路径, 版本)`。
@@ -181,6 +176,15 @@ impl Orchestrator {
             }
         }
 
+        let device_tunnels = TunnelManager::new(
+            config.local.port_range_start,
+            config.local.port_range_end,
+            "ssh",
+            None,
+        )?;
+        // 隧道本地端口与引擎端口共用同一段区间，但两者不会同时占用
+        // 同一个端口：分配器在真正绑定前会做可绑定性检查。
+
         Ok(Self {
             config,
             assessor,
@@ -193,9 +197,9 @@ impl Orchestrator {
             ),
             local_engine,
             cloud,
+            device_tunnels,
             state,
             models,
-            engines: HashMap::new(),
             req_seq: std::sync::atomic::AtomicU64::new(0),
             engine_version_cache: std::sync::Mutex::new(None),
             config_store: None,
@@ -276,44 +280,6 @@ pub fn scheduler_config_with_overrides(
     c
 }
 
-/// 通过 HTTP 探活一个本地部署（**经引擎插件分发**）。
-///
-/// 为什么不在这里判断引擎类型：探活端点与端口选择都是引擎专属知识
-/// （llama.cpp 用 `plan` 端口 + `/health`；Ollama 用固定 11434 +
-/// `/api/version`）。把这些写进编排层，每接一个框架就要改本函数。
-/// 现在统一交给 [`mangosteen_device::EnginePlugin::probe`]。
-fn probe_local_health(registry: &mangosteen_device::EngineRegistry, plan: &DeploymentPlan) -> bool {
-    let Some(local) = plan.local.as_ref() else {
-        return false;
-    };
-    // 用部署时记录的引擎，而不是当前配置：用户中途切换引擎时，
-    // 已在跑的实例仍应按它**启动时**的引擎探活，否则会瞬间全判失败。
-    let engine = local.engine;
-    match registry.get(engine) {
-        Some(plugin) => plugin.probe(local),
-        // 插件不存在（引擎已被移除）→ 无法探活，如实返回 false
-        None => false,
-    }
-}
-
-/// 引擎类型相关的小工具：端口冲突判定与端口回绕。
-///
-/// 保留在此是因为「端口被占用就换一个再试一次」是编排策略，不是 HTTP 细节。
-fn next_port(current: u16, cfg: &LocalConfig) -> u16 {
-    if current >= cfg.port_range_end {
-        cfg.port_range_start
-    } else {
-        current + 1
-    }
-}
-
-fn is_port_conflict(e: &MnError) -> bool {
-    match e {
-        MnError::EngineLaunch { reason, .. } => reason.contains("已被占用"),
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,31 +293,5 @@ mod tests {
         // 未指定时保持原值
         let c2 = scheduler_config_with_overrides(&base, None);
         assert_eq!(c2.max_price_per_hour, base.max_price_per_hour);
-    }
-
-    #[test]
-    fn next_port_wraps_within_range() {
-        let cfg = LocalConfig {
-            port_range_start: 11500,
-            port_range_end: 11502,
-            ..Default::default()
-        };
-        assert_eq!(next_port(11500, &cfg), 11501);
-        assert_eq!(next_port(11502, &cfg), 11500);
-    }
-
-    #[test]
-    fn port_conflict_detection() {
-        let e = MnError::EngineLaunch {
-            binary: PathBuf::from("llama-server"),
-            reason: "端口 11435 已被占用。若之前有残留...".into(),
-        };
-        assert!(is_port_conflict(&e));
-
-        let other = MnError::EngineLaunch {
-            binary: PathBuf::from("llama-server"),
-            reason: "未找到 llama-server".into(),
-        };
-        assert!(!is_port_conflict(&other));
     }
 }

@@ -1,24 +1,23 @@
-//! 部署编排：「评估 → 选择 → 配置 → 执行」与本地失败后的云端降级。
+//! 部署编排：「评估 → 选择 → 配置 → 执行」，统一部署到远端 GPU 节点。
 //!
 //! 归属：第三层 · 编排调度核心。
 //! `Orchestrator` 的字段在 `super` 中定义，子模块可直接访问。
 
 use super::*;
+use mangosteen_core::plan::DeploymentPlan;
 
 #[path = "provision.rs"]
 mod cloud;
 #[path = "evaluate.rs"]
 mod evaluate;
-#[path = "launch.rs"]
-mod local;
+
+/// 本地部署移除后的固定说明（评估与拒绝路径共用，避免文案漂移）。
+const LOCAL_REMOVED: &str = "本地推理已交由 Ollama 承担，Mangosteen 只部署到远端节点";
 
 impl Orchestrator {
     /// 执行部署。这是系统的主入口（模型已在本地时用）。
     ///
     /// 完整流程见模块文档。返回的 `DeploymentPlan` 已落台账。
-    ///
-    /// 若模型尚未下载，用 [`Orchestrator::prepare_with_progress`] +
-    /// [`Orchestrator::commit_local`] 把「下载」插在两段之间。
     pub fn deploy(&mut self, req: &DeploymentRequest) -> MnResult<DeploymentPlan> {
         self.deploy_with_progress(req, &crate::progress::noop_sink)
     }
@@ -105,18 +104,7 @@ impl Orchestrator {
         );
 
         match self.prepare_with_progress(evaluated, req, sink)? {
-            PreparedDeployment::Done(plan) => Ok(*plan),
-            PreparedDeployment::Local(prepared) => {
-                let prepared = *prepared;
-                // 模型已在本地（evaluate 走的是读盘路径或台账规格），
-                // 因此下载阶段如实标「跳过」而不是假装下过。
-                sink(
-                    DeployStage::Downloading,
-                    StageOutcome::Skipped,
-                    "模型已在本地，无需下载".to_string(),
-                );
-                self.commit_local(prepared, sink)
-            }
+            PreparedDeployment::Cloud(prepared) => self.commit_cloud(*prepared, sink),
         }
     }
     /// 「准备」阶段主体：唯一性检查 → 引擎检查 → 选择设备 → 落台账。
@@ -127,6 +115,34 @@ impl Orchestrator {
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedDeployment> {
         use crate::progress::{DeployStage, StageOutcome};
+
+        // ---- 云端部署必须有远端下载地址 ----
+        //
+        // UI 的「部署」对已下载到本地的模型走 `/api/deploy`，这条路径没有
+        // 下载流程，`req.model_download` 是空的。云端部署要求「远端自己下」，
+        // 所以这里从模型台账回填登记时保存的直连地址；台账里也没有时，
+        // 保持为空并由 `deploy_cloud` 给出明确错误（不偷偷上传本地文件）。
+        let mut req_owned;
+        let req = if req.model_download.is_none() && req.target.forces_cloud() {
+            let from_index = self
+                .models
+                .get(&req.model)
+                .ok()
+                .flatten()
+                .and_then(|m| m.remote_url.map(|url| (url, m.spec.file_size_bytes)));
+            if let Some((url, size)) = from_index {
+                req_owned = req.clone();
+                req_owned.model_download = Some(crate::assess::ModelDownloadSpec {
+                    url,
+                    expected_bytes: Some(size).filter(|s| *s > 0),
+                });
+                &req_owned
+            } else {
+                req
+            }
+        } else {
+            req
+        };
 
         // ---- 0. 同一模型只允许一个活跃实例 ----
         //
@@ -180,93 +196,41 @@ impl Orchestrator {
             )));
         }
 
-        // ---- 2. 决策（本地优先）----
+        // ---- 2. 决策：远端节点（云端/已保存设备）----
+        //
+        // 产品层面仅部署到远端节点（本地推理交给 Ollama）。
         sink(
             DeployStage::Selecting,
             StageOutcome::Running,
-            "正在按本地优先策略选择算力设备".to_string(),
+            "正在选择部署节点（已保存设备优先）".to_string(),
         );
-        let mut trail: Vec<String> = Vec::new();
-        let decision = self.scheduler.decide(&evaluated, req)?;
 
-        match decision {
-            Decision::Reject { reason } => {
-                sink(DeployStage::Selecting, StageOutcome::Failed, reason.clone());
-                Err(MnError::InsufficientLocalResource { detail: reason })
+        let trail: Vec<String> = Vec::new();
+        let reason = LOCAL_REMOVED.to_string();
+        let cloud_plan = match self.scheduler.build_cloud_plan(&evaluated, req, &reason) {
+            Ok(p) => p,
+            Err(e) => {
+                sink(DeployStage::Selecting, StageOutcome::Failed, e.to_string());
+                return Err(e);
             }
-            Decision::Local { plan } => {
-                // ---- 3a. 准备本地（不启动）----
-                sink(
-                    DeployStage::Selecting,
-                    StageOutcome::Done,
-                    format!(
-                        "已选择本地算力 · {} 线程 · 上下文 {}",
-                        plan.threads, plan.context_size
-                    ),
-                );
-                let id = self.new_deployment_id(&evaluated);
-                // 节点配置的最终裁量权在这里：
-                //  · engine：记录**部署时**的引擎，后续探活/停止按它分发插件
-                //  · use_mlock：由配置 `local.mlock` 决定（默认关闭，
-                //    因为锁定物理内存会挤压系统，个人机上反而更慢）
-                let mut plan = plan;
-                plan.engine = self.config.local.engine;
-                plan.use_mlock = self.config.local.mlock;
-                let mut full = self.scheduler.assemble_plan(
-                    id.clone(),
-                    &evaluated,
-                    &Decision::Local { plan: plan.clone() },
-                    trail.clone(),
-                )?;
-                if let Some(l) = full.local.as_mut() {
-                    l.engine = plan.engine;
-                    l.use_mlock = plan.use_mlock;
-                }
-                self.state
-                    .upsert(DeploymentRecord::from_plan(full.clone()))?;
-                self.state
-                    .set_status(&id, DeploymentStatus::Provisioning, None)?;
-                sink(
-                    DeployStage::Configuring,
-                    StageOutcome::Done,
-                    configured_detail(&plan),
-                );
-
-                Ok(PreparedDeployment::Local(Box::new(PreparedLocal {
-                    id,
-                    evaluated,
-                    plan,
-                    req: req.clone(),
-                })))
-            }
-            Decision::Cloud {
-                plan: cloud_plan,
-                reason,
-            } => {
-                trail.push(format!("cloud:{}", short(&reason)));
-                let why = self.scheduler.explain_local_failure(&evaluated);
-                sink(
-                    DeployStage::Selecting,
-                    StageOutcome::Done,
-                    format!("已选择云端算力：{reason}"),
-                );
-                // 云端不需要本地文件，直接走完；下载/量化阶段如实标注，
-                // 免得用户以为本地做了这些事。
-                sink(
-                    DeployStage::Downloading,
-                    StageOutcome::Skipped,
-                    "云端部署：模型由实例侧准备，本地不下载".to_string(),
-                );
-                sink(
-                    DeployStage::Quantizing,
-                    StageOutcome::Skipped,
-                    "云端部署无需本地量化".to_string(),
-                );
-                let plan = self.deploy_cloud(&evaluated, *cloud_plan, trail, &why, sink)?;
-                Ok(PreparedDeployment::Done(Box::new(plan)))
-            }
-        }
+        };
+        let device = self.resolve_device(req);
+        let why = self.scheduler.explain_local_failure(&evaluated);
+        // 远端不需要本地文件：下载/量化阶段如实标注，
+        // 免得用户以为本地做了这些事。
+        sink(
+            DeployStage::Downloading,
+            StageOutcome::Skipped,
+            "远端部署：模型由节点侧下载，本地不下载".to_string(),
+        );
+        sink(
+            DeployStage::Quantizing,
+            StageOutcome::Skipped,
+            "远端部署无需本地量化".to_string(),
+        );
+        self.prepare_cloud(&evaluated, cloud_plan, trail, &why, device, sink)
     }
+
     /// 生成部署 ID。
     pub(crate) fn new_deployment_id(&self, evaluated: &Evaluated) -> String {
         let seq = self.next_seq();

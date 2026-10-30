@@ -3,10 +3,94 @@
 //! 归属：第二层 API Server。处理器通过 `pub(crate)` 字段访问网关状态，
 //! 对外行为与拆分前完全一致。
 
+use crate::http::request::percent_decode_path;
 use crate::http::server::*;
 use mangosteen_core::openai::ErrorResponse;
 
 impl GatewayServer {
+    pub(crate) fn get_devices(&self) -> Response {
+        let gw = match self.gateway.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::text(500, "网关状态锁中毒"),
+        };
+        let devices: Vec<serde_json::Value> = gw
+            .config()
+            .remote_devices
+            .iter()
+            .map(|d| serde_json::json!({
+                "id": d.id,
+                "host": d.host,
+                "port": d.port,
+                "user": d.user,
+                "workdir": d.workdir,
+                "password_configured": !matches!(d.password, mangosteen_core::config::SecretRef::None),
+            }))
+            .collect();
+        Response::json(200, &serde_json::json!({ "devices": devices }))
+    }
+
+    pub(crate) fn add_device(&self, req: &ParsedRequest) -> Response {
+        let body: serde_json::Value = match serde_json::from_str(&req.body_str()) {
+            Ok(v) => v,
+            Err(e) => return Response::json(400, &ErrorResponse::bad_request(format!("请求体不是合法 JSON：{e}"), None)),
+        };
+        let mut body = body;
+        let password = body
+            .as_object_mut()
+            .and_then(|o| o.remove("password"))
+            .and_then(|v| v.as_str().map(str::to_string));
+        let mut device: mangosteen_core::config::RemoteDevice = match serde_json::from_value(body) {
+            Ok(v) => v,
+            Err(e) => return Response::json(400, &ErrorResponse::bad_request(format!("设备参数无效：{e}"), None)),
+        };
+        if let Some(password) = password.filter(|v| !v.is_empty()) {
+            device.password = mangosteen_core::config::SecretRef::Inline(password);
+        }
+        if device.created_at == 0 {
+            device.created_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+        }
+        let device = match device.normalized() {
+            Ok(v) => v,
+            Err(e) => return Response::error(&e),
+        };
+        let (mut cfg, store) = {
+            let gw = match self.gateway.lock() { Ok(g) => g, Err(_) => return Response::text(500, "网关状态锁中毒") };
+            (gw.config().clone(), gw.config_store())
+        };
+        if let Some(slot) = cfg.remote_devices.iter_mut().find(|d| d.id == device.id) {
+            *slot = device.clone();
+        } else {
+            cfg.remote_devices.push(device.clone());
+        }
+        if let Err(e) = cfg.validate() { return Response::error(&e); }
+        match store.save(&cfg) {
+            Ok(path) => {
+                if let Ok(mut gw) = self.gateway.lock() { gw.replace_config(cfg); }
+                Response::json(200, &serde_json::json!({ "ok": true, "id": device.id, "host": device.host, "port": device.port, "user": device.user, "path": path.display().to_string() }))
+            }
+            Err(e) => Response::error(&e),
+        }
+    }
+
+    pub(crate) fn remove_device(&self, id: &str) -> Response {
+        let id = percent_decode_path(id);
+        let (mut cfg, store) = {
+            let gw = match self.gateway.lock() { Ok(g) => g, Err(_) => return Response::text(500, "网关状态锁中毒") };
+            (gw.config().clone(), gw.config_store())
+        };
+        let before = cfg.remote_devices.len();
+        cfg.remote_devices.retain(|d| d.id != id);
+        if before == cfg.remote_devices.len() { return Response::json(404, &ErrorResponse::bad_request("设备不存在", Some("id"))); }
+        if let Err(e) = cfg.validate() { return Response::error(&e); }
+        match store.save(&cfg) {
+            Ok(_) => { if let Ok(mut gw) = self.gateway.lock() { gw.replace_config(cfg); } Response::json(200, &serde_json::json!({"ok": true, "id": id})) }
+            Err(e) => Response::error(&e),
+        }
+    }
+
     pub(crate) fn get_settings(&self) -> Response {
         let cfg = {
             let gw = match self.gateway.lock() {
@@ -50,7 +134,7 @@ impl GatewayServer {
                     "require_api_key": cfg.gateway.require_api_key,
                 },
                 "scheduler": {
-                    "local_first": cfg.scheduler.local_first,
+                    "local_first": false,
                     "max_fallbacks": cfg.scheduler.max_fallbacks,
                     "launch_timeout_secs": cfg.scheduler.launch_timeout_secs,
                     "max_price_per_hour": cfg.scheduler.max_price_per_hour,

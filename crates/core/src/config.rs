@@ -213,6 +213,103 @@ impl CloudConfig {
     }
 }
 
+/// 用户手工登记的远端设备（设置页「设备列表」）。
+///
+/// ## 为什么是配置的一部分
+///
+/// 「有哪些机器可用」属于**配置驱动原则**覆盖的范畴：用户换一台机器、
+/// 改一个端口，不该需要重新编译。放进配置后，设置页写入即生效，
+/// CLI 也能直接读取。
+///
+/// ## 密码为什么不回显
+///
+/// 本结构用 [`SecretRef`] 表达密码，与 `cloud.ssh_password` 一致：
+/// 支持内联 / 环境变量 / 文件三种来源。`GET /api/devices` 只回显
+/// 「是否已配置」，绝不回传原文——配置文件本身是 0600，但接口可能被
+/// 浏览器缓存或截图。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteDevice {
+    /// 稳定 ID（由 `host:port` 派生）。留空时由接口层补齐。
+    #[serde(default)]
+    pub id: String,
+    /// 主机名或 IP
+    pub host: String,
+    /// SSH 端口
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    /// 登录用户
+    #[serde(default = "default_ssh_user")]
+    pub user: String,
+    /// 登录密码（引用形式，避免明文直接写进配置）
+    #[serde(default)]
+    pub password: SecretRef,
+    /// 远端工作目录（模型、llama-server、日志）
+    #[serde(default = "default_remote_workdir")]
+    pub workdir: String,
+    /// 登记时间（Unix 秒）
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_ssh_user() -> String {
+    "root".to_string()
+}
+
+impl RemoteDevice {
+    /// 由主机与端口派生稳定 ID。
+    ///
+    /// 同一台机器重复登记时应当**更新**而不是新增一条——否则列表里
+    /// 会出现两个同样的 IP，用户分不清该点哪个。
+    pub fn derive_id(host: &str, port: u16) -> String {
+        let slug: String = host
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        format!("dev-{}:{port}", slug.trim_matches('-'))
+    }
+
+    /// 规范化：裁剪空白、补默认值、派生 ID。
+    pub fn normalized(mut self) -> MnResult<Self> {
+        self.host = self.host.trim().to_string();
+        self.user = self.user.trim().to_string();
+        self.workdir = self.workdir.trim().trim_end_matches('/').to_string();
+        if self.host.is_empty() {
+            return Err(MnError::bad_request("设备主机名不能为空".to_string()));
+        }
+        if self.port == 0 {
+            return Err(MnError::bad_request("设备 SSH 端口不能为 0".to_string()));
+        }
+        if self.user.is_empty() {
+            return Err(MnError::bad_request("设备登录用户不能为空".to_string()));
+        }
+        if self.workdir.is_empty() {
+            self.workdir = default_remote_workdir();
+        }
+        if !self.workdir.starts_with('/') {
+            return Err(MnError::bad_request(format!(
+                "设备工作目录必须是绝对路径，收到 `{}`",
+                self.workdir
+            )));
+        }
+        self.id = Self::derive_id(&self.host, self.port);
+        Ok(self)
+    }
+
+    /// 是否配置了密码。
+    pub fn has_password(&self) -> bool {
+        !self.password.is_none()
+    }
+}
+
 /// 调度策略配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerConfig {
@@ -757,6 +854,11 @@ pub struct Config {
     /// 覆盖 `url_template` 修正。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_sources: BTreeMap<String, crate::source::ModelSource>,
+    /// 用户登记的远端设备（设置页「设备列表」）。
+    ///
+    /// 部署时优先用这里的机器；列表为空才去云厂商创建节点。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_devices: Vec<RemoteDevice>,
 }
 
 fn default_config_version() -> u32 {
@@ -801,6 +903,27 @@ impl Config {
         self.storage.validate()?;
         for (k, p) in &self.providers {
             p.validate(k)?;
+        }
+        // 设备 ID 必须唯一：重复会让「按 ID 部署」指向不确定的机器
+        let mut ids = std::collections::BTreeSet::new();
+        for d in &self.remote_devices {
+            if d.host.trim().is_empty() {
+                return Err(MnError::config("remote_devices.host", "主机名不能为空"));
+            }
+            if d.port == 0 {
+                return Err(MnError::config("remote_devices.port", "端口不能为 0"));
+            }
+            let id = if d.id.trim().is_empty() {
+                RemoteDevice::derive_id(d.host.trim(), d.port)
+            } else {
+                d.id.clone()
+            };
+            if !ids.insert(id.clone()) {
+                return Err(MnError::config(
+                    "remote_devices",
+                    format!("设备 ID 重复：{id}"),
+                ));
+            }
         }
         // 至少一个启用的服务商，除非用户明确只要本地算力
         Ok(())
@@ -917,6 +1040,7 @@ impl Config {
             },
             providers,
             model_sources: BTreeMap::new(),
+            remote_devices: Vec::new(),
         }
     }
 }

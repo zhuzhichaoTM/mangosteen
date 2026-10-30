@@ -48,8 +48,14 @@ impl GatewayServer {
         let deploy_target = parsed
             .get("target")
             .and_then(|v| v.as_str())
-            .unwrap_or("local")
+            .unwrap_or("cloud")
             .to_string();
+        // 用户选定的云端 GPU 规格（空表示自动选点）
+        let cloud_spec = parsed
+            .get("cloud_spec")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
 
         // 同一规格正在下载 → 复用，避免两个 curl 争抢同一个 .part
         if let Some(existing) = self.pull_jobs.find_active_by_spec(spec) {
@@ -65,26 +71,18 @@ impl GatewayServer {
         }
 
         // ---- 持锁期间只做「取快照」，不做任何网络操作 ----
-        let (cfg, register, gw_for_deploy) = {
+        let (cfg, models, gw_for_deploy) = {
             let gw = match self.gateway.lock() {
                 Ok(g) => g,
                 Err(_) => return Response::text(500, "网关状态锁中毒"),
             };
-            let cfg = gw.config().clone();
-            // 登记闭包：下载完成后把文件写进模型台账。
-            // 用闭包而非可变的 Gateway 引用，是为了让下载线程完全不持锁。
-            // ModelStore 是 Clone 的（内部只有路径 + 策略），
-            // 克隆一份进闭包即可，不需要共享可变状态。
-            let models = gw.models().clone();
-            let reg: crate::pulljobs::RegisterHook =
-                Arc::new(move |path: &std::path::Path, source| {
-                    models
-                        .register_local_with_source(path, None, source)
-                        .map(|r| r.entry.id)
-                });
-            // 部署闭包要用它，但**在这里不能持锁**——只捕获 Arc，
-            // 真正执行时才短暂加锁（见下面闭包体）。
-            (cfg, reg, Arc::clone(&self.gateway))
+            (
+                gw.config().clone(),
+                // ModelStore 是 Clone 的（内部只有路径 + 策略）。
+                // 克隆一份给闭包用，下载线程全程不持网关锁。
+                gw.models().clone(),
+                Arc::clone(&self.gateway),
+            )
         };
 
         let registry = match cfg.model_source_registry() {
@@ -95,6 +93,24 @@ impl GatewayServer {
             Ok(v) => v,
             Err(e) => return Response::error(&e),
         };
+
+        // 记下直连下载地址：本地登记后，云端部署要靠它让远端自己下载。
+        // 拼不出地址（自定义源缺模板）时保持 None，调用方会给出明确错误。
+        let remote_url = source.download_url(&model).ok();
+
+        let register: crate::pulljobs::RegisterHook =
+            Arc::new(move |path: &std::path::Path, source| {
+                let id = models
+                    .register_local_with_source(path, None, source)?
+                    .entry
+                    .id;
+                if let Some(url) = &remote_url {
+                    // 记录失败不影响本次下载成功：模型已登记，只是云端部署
+                    // 会缺下载地址（届时会明确报错）。
+                    let _ = models.set_remote_url(&id, url);
+                }
+                Ok(id)
+            });
 
         let mut opts = mangosteen_base::DownloadOptions::new(
             cfg.storage.models_dir.clone(),
@@ -227,6 +243,7 @@ impl GatewayServer {
                     r.target = tgt;
                     // 云端要据此在远端下载；本地部署用不到，带着也无害
                     r.model_download = dl_spec.clone();
+                    r.cloud_spec = cloud_spec.clone();
                     r
                 };
 
@@ -323,34 +340,9 @@ impl GatewayServer {
                 g.prepare_with_progress(evaluated, &req, &sink)
             });
 
-            // ---- 第 3 段：提交（启动引擎）----
-            let jobs_c = jobs.clone();
-            let jid_c = jid.clone();
-            // commit 与 abort 都要网关句柄；abort 另需一份独立克隆，
-            // 因为 commit 的闭包已经把 gw 移进去了。
+            // 回滚与云端提交都需要一份独立网关句柄。
+            // 本地 `commit`（启动本地引擎）已随纯云端架构移除。
             let gw_for_abort = Arc::clone(&gw);
-            let gw_c = gw;
-            // commit 需要知道文件落在哪（prepare 时还没有这个文件）
-            let final_path_for_commit = final_path.clone();
-            let commit: crate::pulljobs::CommitHook = Arc::new(move |prepared| {
-                // prepare 在下载**之前**执行，那时文件还不存在，
-                // plan.model_path 是空的。这里补上真实落盘路径，
-                // 否则引擎会报「模型文件不存在：」（冒号后为空）。
-                let prepared =
-                    prepared.with_model_path(final_path_for_commit.to_string_lossy().to_string());
-                let sink_jobs = jobs_c.clone();
-                let sink_id = jid_c.clone();
-                let sink = move |stage: mangosteen_orchestration::progress::DeployStage,
-                                 outcome: mangosteen_orchestration::progress::StageOutcome,
-                                 detail: String| {
-                    sink_jobs.set_stage(&sink_id, stage, outcome, detail);
-                };
-                let mut g = gw_c
-                    .lock()
-                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
-                let plan = g.commit_local(prepared, &sink)?;
-                Ok(plan.id)
-            });
 
             // ---- 回滚：撤销这次部署产生的全部痕迹 ----
             //
@@ -359,7 +351,28 @@ impl GatewayServer {
             //  · 删台账记录（不是标 destroyed——回滚要「当没发生过」）
             //  · 释放端口预留（否则反复「部署→停止」会吃光端口区间）
             //  · 按 `delete_file` 决定是否删模型文件
-            let gw_a = gw_for_abort;
+            let gw_a = Arc::clone(&gw_for_abort);
+            // ---- 云端提交：启动引擎并探活 ----
+            //
+            // 云端没有本地下载，`prepare` 完成后立刻进入这里。
+            let jobs_cc = jobs.clone();
+            let jid_cc = jid.clone();
+            let gw_cc = Arc::clone(&gw_for_abort);
+            let commit_cloud: crate::pulljobs::CommitCloudHook = Arc::new(move |prepared| {
+                let sink_jobs = jobs_cc.clone();
+                let sink_id = jid_cc.clone();
+                let sink = move |stage: mangosteen_orchestration::progress::DeployStage,
+                                 outcome: mangosteen_orchestration::progress::StageOutcome,
+                                 detail: String| {
+                    sink_jobs.set_stage(&sink_id, stage, outcome, detail);
+                };
+                let mut g = gw_cc
+                    .lock()
+                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                let plan = g.commit_cloud(prepared, &sink)?;
+                Ok(plan.id)
+            });
+
             let abort: crate::pulljobs::AbortHook = Arc::new(move |dep_id, delete_file| {
                 let Some(dep_id) = dep_id else { return Ok(()) };
                 let mut g = gw_a
@@ -370,7 +383,7 @@ impl GatewayServer {
 
             Some(crate::pulljobs::DeployHooks {
                 prepare,
-                commit,
+                commit_cloud,
                 abort,
             })
         } else {
@@ -405,11 +418,8 @@ impl GatewayServer {
                 // 准备里仍会做评估与设备选择，用户能看到同样的六步。
                 if let Some(hooks) = dep.as_ref() {
                     match (hooks.prepare)() {
-                        Ok(crate::gateway::PreparedDeployment::Done(plan)) => {
-                            self.pull_jobs.set_deployment(&job_id, Some(&plan.id), None);
-                        }
-                        Ok(crate::gateway::PreparedDeployment::Local(p)) => {
-                            match (hooks.commit)(*p) {
+                        Ok(crate::gateway::PreparedDeployment::Cloud(p)) => {
+                            match (hooks.commit_cloud)(*p) {
                                 Ok(dep_id) => {
                                     self.pull_jobs.set_deployment(&job_id, Some(&dep_id), None)
                                 }
@@ -417,7 +427,7 @@ impl GatewayServer {
                                     &job_id,
                                     None,
                                     Some(format!(
-                                        "模型已就绪，但自动启动失败：{e}。\
+                                        "节点已就绪，但启动推理引擎失败：{e}。\
                                          可在「已下载模型」里点「启动」重试"
                                     )),
                                 ),

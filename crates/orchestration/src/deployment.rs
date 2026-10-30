@@ -2,7 +2,7 @@
 //!
 //! 这些类型属于第三层编排契约，网关只负责把 HTTP/CLI 请求收口到它们。
 
-use crate::assess::{DeploymentRequest, Evaluated};
+use crate::assess::Evaluated;
 use mangosteen_core::plan::ComputeOrigin;
 
 /// 「准备」阶段的产物。
@@ -10,61 +10,106 @@ use mangosteen_core::plan::ComputeOrigin;
 /// 把「评估 + 选择 + 配置」与「启动」分开，是为了让**下载夹在中间**：
 /// UI 对未下载的模型要走「评估 → 选设备 → 配置 → 下载 → 启动」，
 /// 先让用户看到跑不跑得动，再花时间下几 GB。
+///
+/// 云端同样两段：**设备配置**（建实例/连 SSH/准备二进制/远端下载/建隧道）
+/// 与**启动模型**（拉起引擎 + 探活）。用户要求「节点选好后先完成设备初始化，
+/// 再启动推理」，因此云端不能在一次调用里跑完。
 #[derive(Debug)]
 pub enum PreparedDeployment {
-    /// 决策为本地：参数已定、台账已落，等待下载（若需要）后启动。
-    ///
-    /// `Box` 与 [`PreparedDeployment::Done`] 同理：两个变体体积相差一个数量级。
-    Local(Box<PreparedLocal>),
-    /// 决策为云端：云端链路不需要本地文件，已在 prepare 内完成。
-    ///
-    /// `Box` 是因为 `DeploymentPlan` 远大于 `PreparedLocal`（含云端规格、
-    /// 引擎参数等整块配置）；不装箱会让每次 `prepare` 的返回值都搬几百字节。
-    Done(Box<mangosteen_core::plan::DeploymentPlan>),
+    /// 云端/远端节点：资源已就绪，等待 [`crate::Orchestrator::commit_cloud`] 启动引擎。
+    Cloud(Box<PreparedCloud>),
 }
 
-/// 本地部署的「已准备」状态，等待 [`Gateway::commit_local`] 启动。
+/// 云端/远端节点的「已准备」状态，等待启动引擎。
 ///
-/// 为什么带 `evaluated`：启动后要按它回填/展示模型规格，而重新评估一次
-/// 既浪费（远端预取要发 HTTP）又可能与用户刚看到的结果不一致。
+/// ## 为什么不把 SSH 密码写进台账
 ///
-/// 为什么带 `req`：启动失败时要判断「是否允许降级云端」，而
-/// `req.target.forces_local()` 是唯一的判据——静默降级会直接产生计费。
+/// `PreparedCloud` 只活在内存里（prepare → commit 之间），密码随它一起
+/// 在进程内传递；台账里只记节点 IP、端口、用户名，绝不落盘密码。
 #[derive(Debug)]
-pub struct PreparedLocal {
+pub struct PreparedCloud {
     /// 部署 ID（台账里已有 `provisioning` 记录）
     pub id: String,
-    /// 评估结论（含资源需求分解，供 UI 展示）
-    pub evaluated: Evaluated,
-    /// 本地启动参数
-    pub plan: mangosteen_core::plan::LocalPlan,
-    /// 原始部署诉求（降级判据需要）
-    pub req: DeploymentRequest,
+    /// 完整方案（含云端参数，台账已写入）
+    pub plan: mangosteen_core::plan::DeploymentPlan,
+    /// 远端连接信息（内存持有，不落盘）
+    pub ssh: mangosteen_device::remote::SshTarget,
+    /// 远端工作目录
+    pub workdir: String,
 }
 
-impl PreparedLocal {
-    /// 补上模型文件的**实际落盘路径**。
+/// 已保存设备的连接信息（内存态，密码来自配置）。
+#[derive(Debug, Clone)]
+pub struct DeviceTarget {
+    /// 配置里的设备条目（不含解析后的密码）
+    pub device: mangosteen_core::config::RemoteDevice,
+    /// 远端连接信息（含解析后的密码）
+    pub ssh: mangosteen_device::remote::SshTarget,
+    /// 远端工作目录
+    pub workdir: String,
+}
+
+impl DeviceTarget {
+    /// 由配置条目构造，解析密码引用。
     ///
-    /// ## 为什么必须有这一步
-    ///
-    /// `prepare` 发生在下载**之前**，此时文件还不存在：远端评估
-    /// （`evaluate_remote`）和粗估（`evaluate_estimated`）构造的
-    /// `Evaluated` 里 `model_path` 是空的，`LocalPlan::from_assessment`
-    /// 照抄这个空值。若不在启动前补上，引擎会收到空路径并报
-    /// 「模型文件不存在：」——冒号后面什么都没有，极难排查。
-    ///
-    /// 调用方（网关的下载任务管理器）知道下载落地位置，
-    /// 在启动前调本方法写回。
-    ///
-    /// 模型已在本地时（`evaluate_file`）路径本来就是对的，
-    /// 重复设置成同一路径无害。
-    pub fn with_model_path(mut self, path: impl Into<String>) -> Self {
-        let p = path.into();
-        if !p.is_empty() {
-            self.plan.model_path = p.clone();
-            self.evaluated.model_path = std::path::PathBuf::from(p);
+    /// 密码解析失败（如引用的环境变量未设置）不在这里报错：此时还没有
+    /// 做任何破坏性动作，留到 SSH 连接时给出更具体的错误更合适。
+    pub fn from_config(d: &mangosteen_core::config::RemoteDevice, default_workdir: &str) -> Self {
+        let password = d
+            .password
+            .resolve(mangosteen_platform::paths::real_env)
+            .ok()
+            .filter(|p| !p.is_empty());
+        let workdir = if d.workdir.trim().is_empty() {
+            default_workdir.trim_end_matches('/').to_string()
+        } else {
+            d.workdir.trim_end_matches('/').to_string()
+        };
+        Self {
+            device: d.clone(),
+            ssh: mangosteen_device::remote::SshTarget {
+                host: d.host.clone(),
+                port: d.port,
+                user: d.user.clone(),
+                password,
+            },
+            workdir,
         }
-        self
+    }
+}
+
+/// 部署弹窗里的「已保存节点」条目（不含密码）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DeviceBrief {
+    /// 设备 ID
+    pub id: String,
+    /// 主机名或 IP
+    pub host: String,
+    /// SSH 端口
+    pub port: u16,
+    /// 登录用户
+    pub user: String,
+    /// 是否已配置登录密码（**绝不回显密码本身**）
+    pub password_configured: bool,
+    /// 远端工作目录
+    pub workdir: String,
+}
+
+impl DeviceBrief {
+    /// 由配置条目构造。
+    pub fn from_config(d: &mangosteen_core::config::RemoteDevice) -> Self {
+        Self {
+            id: if d.id.trim().is_empty() {
+                mangosteen_core::config::RemoteDevice::derive_id(&d.host, d.port)
+            } else {
+                d.id.clone()
+            },
+            host: d.host.clone(),
+            port: d.port,
+            user: d.user.clone(),
+            password_configured: d.has_password(),
+            workdir: d.workdir.clone(),
+        }
     }
 }
 
@@ -87,16 +132,11 @@ pub fn first_line(msg: &str) -> String {
 pub fn assessed_detail(evaluated: &Evaluated) -> String {
     let a = &evaluated.assessment;
     format!(
-        "{} · {} · ctx={} · {}　| 本地{}",
+        "{} · {} · ctx={} · {}",
         evaluated.spec.name,
         a.placement.describe(evaluated.spec.n_layers),
         a.context_len,
         a.requirement.describe(),
-        if a.placement.is_local_satisfiable() {
-            "可行"
-        } else {
-            "不可行"
-        }
     )
 }
 
@@ -137,16 +177,8 @@ pub struct DeploymentPreview {
     pub model: String,
     /// 完整模型 ID
     pub model_id: String,
-    /// 本地是否可行
-    pub local_viable: bool,
-    /// 本地不可行的具体原因（本地可行时为 `None`）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local_reason: Option<String>,
     /// 将会使用的算力来源
     pub origin: ComputeOrigin,
-    /// 本地方案（本地可行时）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub local: Option<LocalPreview>,
     /// 云端方案与费用（需要上云且已选到节点时）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudPreview>,
@@ -155,65 +187,16 @@ pub struct DeploymentPreview {
     /// 选点失败原因（无可用服务商/无满足约束的规格）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_error: Option<String>,
-    /// 用户选择了「本地算力」但本地不可行 → 部署会**停止**，不会上云。
+    /// 当前没有任何可用节点（既无已保存设备，也无云候选）→ 前端不得继续。
     ///
-    /// 为什么要单独一个字段：此时 `local_viable=false` 且 `cloud` 可能有值
-    /// （因为我们仍会算一次云端报价供用户参考「改选云端要花多少钱」），
-    /// 前端若按「cloud 有值 ⇒ 会创建实例」渲染，就会让用户误以为点确认
-    /// 会上云。实际行为是拒绝部署。
+    /// 为什么要单独一个字段：此时 `cloud` 为 `None` 且 `cloud_error` 有值，
+    /// 前端若只按「列表为空就禁用」渲染，用户看不到原因；按 `blocked`
+    /// 渲染可以给出明确的下一步（去设置页添加设备 / 检查凭证）。
     pub blocked: bool,
-}
-
-/// 本地方案预览。
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct LocalPreview {
-    /// 落位形态
-    pub placement: String,
-    /// 上下文
-    pub context_len: u32,
-    /// KV 精度
-    pub kv_cache: String,
-    /// 量化
-    pub quant: String,
-    /// 权重字节
-    pub weights_bytes: u64,
-    /// KV 字节
-    pub kv_cache_bytes: u64,
-    /// 计算缓冲字节
-    pub compute_bytes: u64,
-    /// 运行时开销字节
-    pub overhead_bytes: u64,
-    /// 合计
-    pub total_bytes: u64,
-    /// 线程数
-    pub threads: u32,
-    /// 加速卡预算
-    pub accelerator_budget_bytes: u64,
-    /// 主机内存预算
-    pub host_budget_bytes: u64,
-    /// 提示
-    pub warnings: Vec<String>,
-}
-
-impl LocalPreview {
-    pub fn from_assessment(e: &Evaluated) -> Self {
-        let a = &e.assessment;
-        Self {
-            placement: a.placement.describe(e.spec.n_layers),
-            context_len: a.context_len,
-            kv_cache: a.kv_cache.as_cli_value().to_string(),
-            quant: a.quant.to_string(),
-            weights_bytes: a.requirement.weights_bytes,
-            kv_cache_bytes: a.requirement.kv_cache_bytes,
-            compute_bytes: a.requirement.compute_buffer_bytes,
-            overhead_bytes: a.requirement.runtime_overhead_bytes,
-            total_bytes: a.requirement.total_bytes(),
-            threads: a.threads,
-            accelerator_budget_bytes: a.accelerator_budget_bytes,
-            host_budget_bytes: a.host_budget_bytes,
-            warnings: a.warnings.iter().map(|w| w.message()).collect(),
-        }
-    }
+    /// 已保存的 SSH 设备（不含密码）。前端优先展示这一组。
+    pub devices: Vec<DeviceBrief>,
+    /// 默认选中的设备 ID（`None` 表示没有设备）。
+    pub default_device_id: Option<String>,
 }
 
 /// 云端方案预览（含费用）。
@@ -249,6 +232,9 @@ pub struct CloudPreview {
 pub struct CloudCandidateBrief {
     /// 服务商
     pub provider: String,
+    /// 规格 ID（厂商私有）。用户选定后原样回传给部署接口，
+    /// 编排层据此优先创建该规格，而不是重新挑。
+    pub spec_id: String,
     /// GPU 型号
     pub gpu_model: String,
     /// 地域
@@ -262,6 +248,16 @@ pub struct CloudCandidateBrief {
     pub latency_ms: Option<u32>,
     /// 总分
     pub score_total: f64,
+    /// 档位：`minimal`（最低价可跑）/ `balanced`（综合最优）/
+    /// `performance`（性能最强）。同一规格只会出现一次。
+    pub tier: String,
+    /// 厂商报的库存（`None` 表示厂商不提供）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stock: Option<u32>,
+    /// CPU 核数
+    pub cpu_cores: u32,
+    /// 内存字节
+    pub memory_bytes: u64,
 }
 /// 截断原因文本（避免轨迹过长）。
 pub fn short(s: &str) -> String {

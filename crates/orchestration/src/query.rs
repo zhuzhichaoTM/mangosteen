@@ -54,46 +54,8 @@ impl Orchestrator {
 
         for r in keep {
             let id = r.plan.id.clone();
-            // 各分支都会赋值，这里只是给编译器一个初值
-            #[allow(unused_assignments)]
-            let mut ready = false;
-
-            if r.plan.origin.is_local() {
-                if let Some(h) = self.engines.get_mut(&id) {
-                    let st = h.status(Duration::from_secs(0));
-                    ready = st.is_serving();
-                    if st.is_dead() {
-                        // 引擎已死 → 台账改为 Failed，避免误报
-                        self.state.set_status(
-                            &id,
-                            DeploymentStatus::Failed,
-                            Some(format!("本地引擎已退出：{}", st.describe())),
-                        )?;
-                    }
-                } else {
-                    // 无内存句柄：该部署可能是**另一个进程**（如 `mangosteen deploy`
-                    // 之后另起 `mangosteen serve`）启动的。此时不能直接判定为未就绪，
-                    // 必须通过 HTTP 探活——这正是「网关唯一收口」在多进程下的必要补充。
-                    ready = probe_local_health(&self.engines_registry, &r.plan);
-                    if !ready && r.status == DeploymentStatus::Ready {
-                        // 台账说 Ready 但探不通 → 进程确实没了，修正台账
-                        self.state.set_status(
-                            &id,
-                            DeploymentStatus::Failed,
-                            Some(format!(
-                                "本地引擎在 {} 无响应（进程可能已退出）",
-                                r.plan
-                                    .local_access_port()
-                                    .map(|p| format!("127.0.0.1:{p}"))
-                                    .unwrap_or_else(|| "原端口".into())
-                            )),
-                        )?;
-                    }
-                }
-            } else {
-                // 云端：只信台账状态（真实探测需要网络往返，放到推理时兜底）
-                ready = r.status == DeploymentStatus::Ready;
-            }
+            // 云端：只信台账状态（真实探测需要网络往返，放到推理时兜底）
+            let ready = r.status == DeploymentStatus::Ready;
 
             out.push(ActiveDeployment {
                 id: id.clone(),
@@ -115,26 +77,15 @@ impl Orchestrator {
     }
     /// 找出当前可用于推理的后端。
     ///
-    /// 选择规则：优先本地（本地优先原则的延伸），否则取最近就绪的云端部署。
+    /// 纯云端架构下只取最近就绪的云端部署（本地推理由 Ollama 承担，
+    /// 不在 Mangosteen 的部署编排范围内）。
     pub fn active_backend(&mut self) -> MnResult<BackendTarget> {
         let active = self.refresh()?;
 
-        // 1. 本地优先
+        // 云端：取最近就绪且已分配端口的部署
         if let Some(a) = active
             .iter()
-            .find(|a| a.origin.is_local() && a.ready && a.port.is_some())
-        {
-            return Ok(BackendTarget {
-                host: "127.0.0.1".to_string(),
-                port: a.port.unwrap(),
-                model_id: a.model.clone(),
-                origin_label: "本地算力".to_string(),
-            });
-        }
-        // 2. 云端
-        if let Some(a) = active
-            .iter()
-            .find(|a| !a.origin.is_local() && a.ready && a.port.is_some())
+            .find(|a| a.ready && a.port.is_some())
         {
             return Ok(BackendTarget {
                 host: "127.0.0.1".to_string(),
@@ -147,7 +98,7 @@ impl Orchestrator {
             "当前没有就绪的推理后端。请先执行 `mangosteen deploy <model>`",
         ))
     }
-    /// 按模型 ID 选择后端；`None`/`"auto"` 表示自动（本地优先）。
+    /// 按模型 ID 选择后端；`None`/`"auto"` 表示自动（取最近就绪的云端部署）。
     ///
     /// 为什么需要它：UI 的「模型信息」下拉让用户选具体模型，但如果网关
     /// 永远取「第一个就绪的」，那个选择就是摆设——用户选了 A，实际
@@ -212,7 +163,6 @@ impl Orchestrator {
             .state
             .list_active()?
             .into_iter()
-            .filter(|r| !r.plan.origin.is_local())
             .max_by_key(|r| r.updated_at)
         else {
             return Ok(None);
@@ -223,7 +173,6 @@ impl Orchestrator {
                 provider,
                 instance_id,
             } => (provider.clone(), instance_id.clone()),
-            ComputeOrigin::Local => return Ok(None),
         };
 
         Ok(Some(CloudDeploymentRef {

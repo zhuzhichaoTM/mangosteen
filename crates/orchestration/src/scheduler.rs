@@ -31,9 +31,9 @@
 //!
 //! ## 核心不变量
 //!
-//! * **I1**：`allow_cloud = false` 时绝不产生云端方案；
-//! * **I2**：云端方案必然带非空 `fallback_trail`（记录为何没能用本地）；
-//! * **I3**：本地评估「可行」时，第一选择必然是本地（禁止默认优先云端）；
+//! * **I1**：`allow_cloud = false` 时绝不产生云端方案（纯云端下即拒绝部署）；
+//! * **I2**：云端方案必然带非空 `fallback_trail`（记录为何选择远端节点）；
+//! * **I3**：`target = local` 必然被拒绝（本地部署已不再支持）；
 //! * **I4**：降级重试次数不超过配置上限。
 //!
 //! 这四条由本模块单测中的 `invariant_*` 用例逐条守护。
@@ -50,16 +50,11 @@ use crate::assess::{Assessor, DeploymentRequest, Evaluated};
 /// 决策结果。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
-    /// 走本地算力
-    Local {
-        /// 本地部署参数
-        plan: LocalPlan,
-    },
     /// 走云端算力
     Cloud {
         /// 云端部署参数
         plan: Box<CloudPlan>,
-        /// 为何没能用本地（必须非空，用于审计与展示）
+        /// 为何选择远端节点（用于审计与展示）
         reason: String,
     },
     /// 拒绝部署
@@ -70,11 +65,6 @@ pub enum Decision {
 }
 
 impl Decision {
-    /// 是否选择了本地。
-    pub fn is_local(&self) -> bool {
-        matches!(self, Decision::Local { .. })
-    }
-
     /// 是否选择了云端。
     pub fn is_cloud(&self) -> bool {
         matches!(self, Decision::Cloud { .. })
@@ -83,13 +73,12 @@ impl Decision {
     /// 算力来源描述。
     pub fn origin_label(&self) -> String {
         match self {
-            Decision::Local { .. } => "本地算力".to_string(),
             Decision::Cloud { plan, .. } => format!("云端算力 · {}", plan.provider),
             Decision::Reject { .. } => "已拒绝".to_string(),
         }
     }
 
-    /// 降级原因（本地方案为 `None`）。
+    /// 降级原因（云端方案为 `None`）。
     pub fn fallback_reason(&self) -> Option<&str> {
         match self {
             Decision::Cloud { reason, .. } => Some(reason),
@@ -123,21 +112,6 @@ impl SchedulerOutcome {
             self.trail.join(" → ")
         }
     }
-}
-
-/// 本地部署执行结果（由调用方在执行后回填）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocalLaunchOutcome {
-    /// 成功，携带监听端口
-    Success {
-        /// 端口
-        port: u16,
-    },
-    /// 失败
-    Failed {
-        /// 失败原因
-        reason: String,
-    },
 }
 
 /// 调度决策器。
@@ -267,70 +241,33 @@ impl Scheduler {
     /// 这是「本地优先」的核心实现。执行由网关负责，
     /// 执行失败后再调用 [`Scheduler::degrade_after_local_failure`]。
     pub fn decide(&self, evaluated: &Evaluated, req: &DeploymentRequest) -> MnResult<Decision> {
-        // ---- 0. 用户显式指定的落位优先 ----
+        // ---- 0. 本地部署已不再支持 ----
         //
-        // 默认是「本地优先、不足降级云端」（产品基线）。但用户可以在部署页
-        // 明确选「本地」或「云端」，此时必须尊重他的选择：
-        // 选了本地就**绝不**静默上云（会产生意外费用），
-        // 选了云端就跳过本地尝试（用户可能本机正忙）。
+        // 产品的定位是「只部署到远端 GPU 节点」，本地推理交由 Ollama 承担。
+        // 因此 `target=local` 必须**明确拒绝**，绝不静默上云（那会产生
+        // 用户不知情的计费实例）。
         if req.target.forces_local() {
-            if !evaluated.is_local_viable() {
-                return Ok(Decision::Reject {
-                    reason: format!(
-                        "{}。你选择了「本地算力」，不会自动改用云端。\
-                         可减少上下文长度、换更小的量化，或改选「云端算力」",
-                        self.explain_local_failure(evaluated)
-                    ),
-                });
-            }
-            let port = self.allocate_local_port();
-            let plan = LocalPlan::from_assessment(
-                &evaluated.spec,
-                evaluated.model_path.to_string_lossy(),
-                &evaluated.assessment,
-                port,
-            );
-            return Ok(Decision::Local { plan });
-        }
-
-        if req.target.forces_cloud() {
-            let why = "按你的选择使用「云端算力」（跳过本地）".to_string();
-            let cloud_plan = self.build_cloud_plan(evaluated, req, &why)?;
-            return Ok(Decision::Cloud {
-                plan: Box::new(cloud_plan),
-                reason: why,
-            });
-        }
-
-        // ---- 本地可行性判定 ----
-        if evaluated.is_local_viable() {
-            // I3：本地可行 → 首选本地，不因「慢」而降级
-            let port = self.allocate_local_port();
-            let plan = LocalPlan::from_assessment(
-                &evaluated.spec,
-                evaluated.model_path.to_string_lossy(),
-                &evaluated.assessment,
-                port,
-            );
-            return Ok(Decision::Local { plan });
-        }
-
-        // ---- 本地不可行 → 云端 ----
-        let local_reason = self.explain_local_failure(evaluated);
-
-        if !req.allow_cloud {
             return Ok(Decision::Reject {
                 reason: format!(
-                    "{local_reason}。且本次请求禁止使用云端算力（--local-only），无法部署"
+                    "{}。你选择了「本地算力」，但本版本不再支持本地部署（本地推理交由 Ollama 承担）",
+                    self.explain_local_failure(evaluated)
                 ),
             });
         }
 
-        // I2：云端方案必须带原因
-        let cloud_plan = self.build_cloud_plan(evaluated, req, &local_reason)?;
+        // ---- 禁止云端（--local-only 语义在纯云端下 = 无可用落位）----
+        if !req.allow_cloud {
+            return Ok(Decision::Reject {
+                reason: "本次请求禁止使用云端算力，而 Mangosteen 仅支持远端节点部署".to_string(),
+            });
+        }
+
+        // ---- 远端节点（云端 / 已保存设备）----
+        let why = "远端节点部署（本地推理交由 Ollama 承担）".to_string();
+        let cloud_plan = self.build_cloud_plan(evaluated, req, &why)?;
         Ok(Decision::Cloud {
             plan: Box::new(cloud_plan),
-            reason: local_reason,
+            reason: why,
         })
     }
 
@@ -370,7 +307,7 @@ impl Scheduler {
     }
 
     /// 生成云端方案。
-    fn build_cloud_plan(
+    pub(crate) fn build_cloud_plan(
         &self,
         evaluated: &Evaluated,
         req: &DeploymentRequest,
@@ -444,6 +381,12 @@ impl Scheduler {
             download_bytes: req.model_download.as_ref().and_then(|d| d.expected_bytes),
             remote_model: None,
             node_ip: None,
+            // 用户在确认弹窗里选定的规格（None = 按调度策略自动选）
+            requested_spec_id: req.cloud_spec.clone(),
+            node_ssh_port: None,
+            node_ssh_user: None,
+            // 设备绑定由编排层在选定节点后回填（见 `provision.rs`）
+            device_id: req.device_id.clone(),
         })
     }
 
@@ -475,16 +418,6 @@ impl Scheduler {
     ) -> MnResult<DeploymentPlan> {
         let id = id.into();
         match decision {
-            Decision::Local { plan } => Ok(DeploymentPlan {
-                id,
-                model: evaluated.spec.clone(),
-                origin: ComputeOrigin::Local,
-                local: Some(plan.clone()),
-                cloud: None,
-                assessment: evaluated.assessment.clone(),
-                created_at: mangosteen_core::time::now_unix(),
-                fallback_trail: trail,
-            }),
             Decision::Cloud { plan, .. } => Ok(DeploymentPlan {
                 id,
                 model: evaluated.spec.clone(),
@@ -492,11 +425,10 @@ impl Scheduler {
                     provider: plan.provider.clone(),
                     instance_id: String::new(), // 编排后回填
                 },
-                local: None,
                 cloud: Some((**plan).clone()),
                 assessment: evaluated.assessment.clone(),
                 created_at: mangosteen_core::time::now_unix(),
-                // I2：云端方案必须带非空轨迹
+                // 云端方案必须带非空轨迹：记录为何选择远端节点
                 fallback_trail: if trail.is_empty() {
                     vec!["cloud:unspecified".to_string()]
                 } else {
@@ -643,10 +575,10 @@ mod tests {
         let e = evaluated(spec_70b(), &s);
         let req = DeploymentRequest::for_model("m").with_context(4096);
         let d = s.decide(&e, &req).unwrap();
-        assert!(d.is_cloud(), "本地放不下 70B，应降级云端");
-        let reason = d.fallback_reason().expect("云端方案必须有降级原因");
+        assert!(d.is_cloud(), "纯云端：任何模型都走远端节点");
+        let reason = d.fallback_reason().expect("云端方案必须有原因");
         assert!(!reason.trim().is_empty());
-        assert!(reason.contains("本地"), "原因应说明本地情况：{reason}");
+        assert!(reason.contains("远端") || reason.contains("Ollama"), "原因应说明远端落位：{reason}");
     }
 
     #[test]
@@ -659,25 +591,25 @@ mod tests {
         let plan = s.assemble_plan("d1", &e, &d, vec![]).unwrap();
         // 即使传入空轨迹，也必须被补成非空
         assert!(!plan.fallback_trail.is_empty());
-        assert!(plan.respects_local_first());
     }
 
     // ---------------- I3: 本地可行时首选本地 ----------------
 
     #[test]
-    fn invariant_i3_local_viable_prefers_local() {
+    fn invariant_i3_local_viable_still_goes_cloud() {
+        // 产品已纯云端：即便本机算力足够，部署仍走远端节点。
         let s = scheduler(24, 64);
         let e = evaluated(spec_7b(), &s);
         assert!(e.is_local_viable());
         let d = s
             .decide(&e, &DeploymentRequest::for_model("m").with_context(8192))
             .unwrap();
-        assert!(d.is_local(), "本地可行时必须选本地，实际：{d:?}");
+        assert!(d.is_cloud(), "纯云端下即使本机可跑也走远端节点，实际：{d:?}");
     }
 
     #[test]
-    fn invariant_i3_cpu_only_still_counts_as_local() {
-        // 无 GPU 但内存够 → CPU 可跑 → 仍应选本地（不因慢而降级）
+    fn invariant_i3_cpu_only_still_goes_cloud() {
+        // 无 GPU 但内存够 → CPU 可跑，但仍走远端节点（不降级到本地）
         let s = scheduler(0, 64);
         let e = evaluated(spec_7b(), &s);
         assert_eq!(e.assessment.placement, Placement::CpuOnly);
@@ -685,43 +617,39 @@ mod tests {
         let d = s
             .decide(&e, &DeploymentRequest::for_model("m").with_context(4096))
             .unwrap();
-        assert!(d.is_local(), "CPU 可跑也算本地可行，不应降级：{d:?}");
+        assert!(d.is_cloud(), "纯云端下 CPU 可跑也走远端节点：{d:?}");
     }
 
     #[test]
-    fn local_plan_has_valid_port_and_args() {
+    fn cloud_plan_has_valid_local_port_and_args() {
         let s = scheduler(24, 64);
         let e = evaluated(spec_7b(), &s);
         let d = s
             .decide(&e, &DeploymentRequest::for_model("m").with_context(4096))
             .unwrap();
         match d {
-            Decision::Local { plan } => {
-                assert!(plan.port >= 11500 && plan.port <= 11600);
-                assert_eq!(plan.host, "127.0.0.1");
-                assert!(plan.gpu_layers > 0);
-                assert_eq!(plan.host, "127.0.0.1");
-                assert!(plan.port >= 11500 && plan.port <= 11600);
+            Decision::Cloud { plan, .. } => {
+                assert!(plan.local_port >= 11500 && plan.local_port <= 11600);
+                assert!(plan.engine.gpu_layers > 0);
             }
-            other => panic!("expected local, got {other:?}"),
+            other => panic!("expected cloud, got {other:?}"),
         }
     }
 
     #[test]
-    fn ports_rotate_across_decisions() {
+    fn cloud_local_ports_rotate_across_decisions() {
         let s = scheduler(24, 64);
         let e = evaluated(spec_7b(), &s);
         let req = DeploymentRequest::for_model("m").with_context(4096);
         let mut ports = Vec::new();
         for _ in 0..5 {
-            if let Decision::Local { plan } = s.decide(&e, &req).unwrap() {
-                ports.push(plan.port);
+            if let Decision::Cloud { plan, .. } = s.decide(&e, &req).unwrap() {
+                ports.push(plan.local_port);
             }
         }
         assert_eq!(ports.len(), 5);
         // 严格递增即可，**不要求连续**：区间内的端口若被本机其它进程
         // （或并行的其它测试）占住，分配器会跳过——那是正确行为。
-        // 之前断言 `w[1] == w[0] + 1`，并行跑测试时偶发假失败。
         assert!(
             ports.windows(2).all(|w| w[1] > w[0]),
             "连续分配应严格递增：{ports:?}"
@@ -874,7 +802,7 @@ mod tests {
     // ---------------- 方案组装 ----------------
 
     #[test]
-    fn assemble_local_plan_is_consistent() {
+    fn assemble_cloud_plan_is_consistent() {
         let s = scheduler(24, 64);
         let e = evaluated(spec_7b(), &s);
         let d = s
@@ -882,10 +810,8 @@ mod tests {
             .unwrap();
         let plan = s.assemble_plan("dep-1", &e, &d, vec![]).unwrap();
         assert_eq!(plan.id, "dep-1");
-        assert!(plan.origin.is_local());
-        assert!(plan.local.is_some());
-        assert!(plan.cloud.is_none());
-        assert!(plan.respects_local_first());
+        assert!(matches!(plan.origin, ComputeOrigin::Cloud { .. }));
+        assert!(plan.cloud.is_some());
         assert!(plan.local_access_port().is_some());
     }
 
@@ -926,6 +852,10 @@ mod tests {
             download_bytes: None,
             remote_model: None,
             node_ip: None,
+            requested_spec_id: None,
+            node_ssh_port: None,
+            node_ssh_user: None,
+            device_id: None,
             local_port: 11500,
             engine: LocalPlan {
                 model_path: "/m".into(),
@@ -1040,22 +970,19 @@ mod tests {
         }
     }
 
-    /// 选了「本地」且资源充足 → 正常本地部署。
+    /// 选了「本地」且资源充足 → 仍被拒绝（本地部署已不再支持）。
     #[test]
-    fn target_local_sufficient_deploys_locally() {
+    fn target_local_sufficient_is_rejected() {
         let s = scheduler(24, 64);
         let e = evaluated(spec_7b(), &s);
         let mut req = DeploymentRequest::for_model("m").with_context(4096);
         req.target = ComputeTarget::Local;
 
         let d = s.decide(&e, &req).unwrap();
-        assert!(matches!(d, Decision::Local { .. }), "{d:?}");
+        assert!(matches!(d, Decision::Reject { .. }), "{d:?}");
     }
 
-    /// 选了「云端」→ 跳过本地，即使本地完全够用。
-    ///
-    /// 场景：本机正跑着别的任务，用户主动要求用云端。
-    /// 若仍走本地，用户会看到「部署完成」但拿不到预期的隔离环境。
+    /// 选了「云端」→ 走云端，即使本地完全够用。
     #[test]
     fn target_cloud_skips_local_even_when_local_viable() {
         let s = scheduler(24, 64);
@@ -1068,23 +995,20 @@ mod tests {
         let d = s.decide(&e, &req).unwrap();
         assert!(d.is_cloud(), "选云端必须走云端：{d:?}");
         if let Decision::Cloud { reason, .. } = d {
-            assert!(reason.contains("云端算力"), "{reason}");
+            assert!(reason.contains("远端") || reason.contains("Ollama"), "{reason}");
         }
     }
 
-    /// 默认（Auto）行为不变：本地优先，不足才降级。
+    /// 默认（Auto）即纯云端：任何模型都走远端节点。
     #[test]
-    fn target_auto_keeps_local_first() {
+    fn target_auto_is_cloud() {
         let s = scheduler(24, 64);
         let e = evaluated(spec_7b(), &s);
         let req = DeploymentRequest::for_model("m").with_context(4096);
         assert_eq!(req.target, ComputeTarget::Auto);
-        assert!(matches!(
-            s.decide(&e, &req).unwrap(),
-            Decision::Local { .. }
-        ));
+        assert!(s.decide(&e, &req).unwrap().is_cloud());
 
-        // 本地不足 → 降级云端
+        // 本地不足 → 同样走云端
         let s2 = scheduler(4, 8);
         let e2 = evaluated(spec_70b(), &s2);
         assert!(s2.decide(&e2, &req).unwrap().is_cloud());

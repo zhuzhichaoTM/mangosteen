@@ -5,7 +5,124 @@
 
 use super::*;
 
+/// 档位强弱：同一规格同时命中多档时保留更强的一个。
+fn tier_rank(tier: Option<&str>) -> u8 {
+    match tier {
+        Some("performance") => 3,
+        Some("balanced") => 2,
+        Some("minimal") => 1,
+        _ => 0,
+    }
+}
+
 impl Orchestrator {
+    /// 三档候选：最低成本 / 综合最优 / 性能最强。
+    ///
+    /// 供部署确认弹窗让用户显式选择 GPU。三档都基于同一组硬约束
+    /// （显存/内存/磁盘/价格/库存），只是排序目标不同：
+    ///
+    /// | 档位 | 排序依据 |
+    /// |------|---------|
+    /// | `minimal` | 价格升序（满足可加载前提的最便宜节点）|
+    /// | `balanced` | 现有四维打分（价格/延迟/库存/硬件）|
+    /// | `performance` | 显存优先，其次价格（同显存选便宜的）|
+    ///
+    /// 同一规格若同时命中多档只保留一次，档位记为最强的那个
+    /// （performance > balanced > minimal），避免列表里出现重复项。
+    pub fn cloud_tiers(
+        &self,
+        constraints: &SelectionConstraints,
+    ) -> MnResult<Vec<mangosteen_core::policy::ScoredCandidate>> {
+        let o = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
+
+        // 一次查询复用三份排序：候选列举要打厂商接口，重复查询既慢又可能被限流
+        let (all, latencies) = o.collect_candidates()?;
+        let ranked = o.rank(&all, &latencies, constraints);
+
+        // minimal：约束内最便宜
+        let mut cheapest = ranked.clone();
+        cheapest.sort_by(|a, b| {
+            a.price_per_hour
+                .total_cmp(&b.price_per_hour)
+                // 同价时显存大的优先——同样的钱能跑更大的模型
+                .then(b.vram_bytes.cmp(&a.vram_bytes))
+        });
+
+        // performance：显存优先，其次价格
+        let mut strongest = ranked.clone();
+        strongest.sort_by(|a, b| {
+            b.vram_bytes
+                .cmp(&a.vram_bytes)
+                .then(a.price_per_hour.total_cmp(&b.price_per_hour))
+        });
+
+        let mut out: Vec<mangosteen_core::policy::ScoredCandidate> = Vec::new();
+        let mut push = |c: Option<&mangosteen_core::policy::ScoredCandidate>, tier: &str| {
+            let Some(c) = c else { return };
+            if let Some(existing) = out.iter_mut().find(|x| x.spec_id == c.spec_id) {
+                // 已存在：保留更强档位（performance > balanced > minimal）
+                if tier_rank(Some(tier)) > tier_rank(existing.tier.as_deref()) {
+                    existing.tier = Some(tier.to_string());
+                }
+                return;
+            }
+            let mut c = c.clone();
+            c.tier = Some(tier.to_string());
+            out.push(c);
+        };
+        push(cheapest.first(), "minimal");
+        push(ranked.first(), "balanced");
+        push(strongest.first(), "performance");
+        Ok(out)
+    }
+
+    /// 三档候选 + 规格细节（库存/CPU/内存），供部署确认弹窗直接渲染。
+    ///
+    /// 与 [`Self::cloud_tiers`] 共用同一次厂商查询：`cloud_tiers` 只返回
+    /// 打分结果，而这个方法把原始 `AvailableSpec` 里的资源信息合并进来，
+    /// 避免 UI 为了展示「几核几 G」再查一次接口。
+    pub fn cloud_tier_briefs(
+        &self,
+        constraints: &SelectionConstraints,
+    ) -> MnResult<Vec<crate::deployment::CloudCandidateBrief>> {
+        let tiers = self.cloud_tiers(constraints)?;
+        let o = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
+        let (all, _) = o.collect_candidates()?;
+
+        Ok(tiers
+            .into_iter()
+            .map(|c| {
+                let spec = all
+                    .iter()
+                    .find(|(p, s)| s.spec_id == c.spec_id && *p == c.provider)
+                    .map(|(_, s)| s);
+                crate::deployment::CloudCandidateBrief {
+                    provider: c.provider.clone(),
+                    spec_id: c.spec_id.clone(),
+                    gpu_model: c.gpu_model.clone(),
+                    region: c.region.clone(),
+                    price_per_hour: c.price_per_hour,
+                    vram_bytes: c.vram_bytes,
+                    latency_ms: c.latency_ms,
+                    score_total: c.score_total,
+                    tier: c.tier.clone().unwrap_or_else(|| "balanced".to_string()),
+                    stock: spec.and_then(|s| s.stock),
+                    cpu_cores: spec.map(|s| s.spec.cpu_cores).unwrap_or(0),
+                    memory_bytes: spec.map(|s| s.spec.memory_bytes).unwrap_or(0),
+                }
+            })
+            .collect())
+    }
     /// 云端选点：查询规格 → 打分排序 → 返回排序结果（**不创建资源**）。
     ///
     /// 供 `mangosteen cloud pick` 使用，让用户在花钱前看清决策依据。

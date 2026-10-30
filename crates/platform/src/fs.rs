@@ -75,8 +75,20 @@ pub fn set_private_permissions(path: &Path) -> MnResult<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // 配置文件可能含 API Key，权限必须收紧到 0600
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        // 配置/askpass 文件可能含 API Key 或 SSH 密码，
+        // 脚本必须可执行且仅属主可访问，否则 ssh 会报
+        // `ssh_askpass: exec(...) Permission denied`。
+        let mode = if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.contains("askpass"))
+            .unwrap_or(false)
+        {
+            0o700
+        } else {
+            0o600
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
             .map_err(|e| MnError::io(format!("设置权限 {}", path.display()), &e))?;
     }
     #[cfg(not(unix))]

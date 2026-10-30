@@ -40,6 +40,11 @@ impl GatewayServer {
             ("GET", "/api/sysinfo") => self.sysinfo(),
             ("GET", "/api/settings") => self.get_settings(),
             ("PUT", "/api/settings") => self.put_settings(req),
+            ("GET", "/api/devices") => self.get_devices(),
+            ("POST", "/api/devices") => self.add_device(req),
+            ("DELETE", p) if p.starts_with("/api/devices/") => {
+                self.remove_device(&p["/api/devices/".len()..])
+            }
             ("POST", "/api/extract") => self.extract_attachment(req),
             ("POST", "/api/fetch-url") => self.fetch_url(req),
             ("POST", "/api/models/search") => self.search_models(req),
@@ -86,11 +91,6 @@ impl GatewayServer {
             ("POST", p) if p.starts_with("/api/deployments/") && p.ends_with("/stop-service") => {
                 let id = &p["/api/deployments/".len()..p.len() - "/stop-service".len()];
                 self.stop_service(id)
-            }
-            // 启动已保存的本地部署方案：不重新评估资源。
-            ("POST", p) if p.starts_with("/api/deployments/") && p.ends_with("/start-model") => {
-                let id = &p["/api/deployments/".len()..p.len() - "/start-model".len()];
-                self.start_model(id)
             }
             ("POST", p) if p.starts_with("/api/deployments/") && p.ends_with("/start-service") => {
                 let id = &p["/api/deployments/".len()..p.len() - "/start-service".len()];

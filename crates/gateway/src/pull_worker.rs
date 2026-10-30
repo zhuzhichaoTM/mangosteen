@@ -45,13 +45,10 @@ fn source_name_for_url(url: &str) -> String {
 }
 
 pub struct DeployHooks {
-    /// 下载**前**调用：评估 → 选设备 → 配置，返回待启动的本地计划。
-    ///
-    /// 返回 `PreparedDeployment::Done` 表示无需下载（云端路径已在
-    /// `prepare` 内完成全部工作），下载与提交都会被跳过。
+    /// 下载**前**调用：评估 → 选设备 → 配置，返回待启动的云端计划。
     pub prepare: PrepareHook,
-    /// 下载**后**调用：启动本地引擎，返回部署 ID。
-    pub commit: CommitHook,
+    /// 云端：设备配置完成后调用，启动引擎并探活，返回部署 ID。
+    pub commit_cloud: CommitCloudHook,
     /// **回滚**：撤销这次部署产生的全部痕迹（停引擎、删台账、释放端口、删文件）。
     ///
     /// 参数：`(部署 ID, 要删除的文件路径)`。
@@ -69,13 +66,13 @@ pub type RegisterHook =
 pub type AbortHook =
     Arc<dyn Fn(Option<&str>, Option<&std::path::Path>) -> MnResult<()> + Send + Sync>;
 
-/// `(prepare, commit, abort)` 之外的上层装配入口，供 handlers 构造钩子时复用。
+/// `(prepare, commit_cloud, abort)` 之外的上层装配入口，供 handlers 构造钩子时复用。
 pub type PrepareHook =
     Arc<dyn Fn() -> MnResult<mangosteen_orchestration::PreparedDeployment> + Send + Sync>;
 
-/// 提交钩子：已准备的本地部署 → 部署 ID。
-pub type CommitHook =
-    Arc<dyn Fn(mangosteen_orchestration::PreparedLocal) -> MnResult<String> + Send + Sync>;
+/// 云端提交钩子：已准备好的节点 → 部署 ID（启动引擎并探活）。
+pub type CommitCloudHook =
+    Arc<dyn Fn(mangosteen_orchestration::PreparedCloud) -> MnResult<String> + Send + Sync>;
 
 /// 启动一个下载任务（在独立线程执行）。
 ///
@@ -145,7 +142,6 @@ pub fn spawn(
             // 评估所需的 GGUF 元数据由 `prepare` 内部用 HTTP Range 取文件
             // 头部拿到（见 `mangosteen_base::probe_remote_metadata`），
             // 失败则降级为按体积粗估。
-            let mut prepared = None;
             if let Some(hooks) = deploy.as_ref() {
                 // 准备阶段开始前先看一次：用户可能在请求返回后就点了停止
                 if jobs.is_cancelled(&job_id) {
@@ -154,14 +150,19 @@ pub fn spawn(
                     return;
                 }
                 match (hooks.prepare)() {
-                    Ok(mangosteen_orchestration::PreparedDeployment::Done(_plan)) => {
-                        // 云端路径：prepare 已在内部完成全部工作（含计费
-                        // 实例创建）。不需要下载，也没有本地文件可登记。
-                        jobs.set_deployment(&job_id, Some(&_plan.id), None);
+                    Ok(mangosteen_orchestration::PreparedDeployment::Cloud(p)) => {
+                        // 云端路径：设备配置已完成（实例/隧道/权重）。
+                        // 不需要本地下载，也没有本地文件可登记；
+                        // 直接进入「启动模型」阶段。
+                        match (hooks.commit_cloud)(*p) {
+                            Ok(dep_id) => jobs.set_deployment(&job_id, Some(&dep_id), None),
+                            Err(e) => jobs.set_deployment(
+                                &job_id,
+                                None,
+                                Some(format!("节点已就绪，但启动推理引擎失败：{e}")),
+                            ),
+                        }
                         return;
-                    }
-                    Ok(mangosteen_orchestration::PreparedDeployment::Local(p)) => {
-                        prepared = Some(p);
                     }
                     Err(e) => {
                         // 准备失败（评估不可行 / 设备选择失败 / 引擎未适配）
@@ -175,14 +176,6 @@ pub fn spawn(
                         jobs.mark_failed(&job_id, format!("部署准备失败：{e}"));
                         return;
                     }
-                }
-                // 准备可能耗时几秒（远端预取），其间用户可能点了停止。
-                // 此时台账里已经落了 provisioning 记录，必须回滚掉。
-                if jobs.is_cancelled(&job_id) {
-                    let dep_id = prepared.as_ref().map(|p| p.id.clone());
-                    (hooks.abort)(dep_id.as_deref(), None).ok();
-                    jobs.set_note(&job_id, "已取消，已回滚部署准备产生的记录".to_string());
-                    return;
                 }
             }
 
@@ -233,7 +226,9 @@ pub fn spawn(
                     // 下载成功但用户已在最后一刻点了停止 → 回滚（含删文件）
                     if let Some(hooks) = deploy.as_ref() {
                         if jobs.is_cancelled(&job_id) {
-                            let dep_id = prepared.as_ref().map(|p| p.id.clone());
+                            // 云端路径在 prepare 阶段已提交并 return，走到这里的
+                            // 只可能是纯下载任务（无本地部署计划可回滚）。
+                            let dep_id: Option<String> = None;
                             // 这个文件是本次刚下完的，属于「本次部署产生的资源」
                             (hooks.abort)(dep_id.as_deref(), Some(abort_file.as_path())).ok();
                             jobs.set_note(
@@ -274,41 +269,8 @@ pub fn spawn(
 
                             // ============ 第 3 段：提交（启动）============
                             //
-                            // 失败不回滚下载：文件已在磁盘上，用户可以直接
-                            // 在「已下载模型」里再点「启动」。
-                            // 所以这里用 warning 而不是 failed。
-                            if let (Some(hooks), Some(p)) = (deploy.as_ref(), prepared) {
-                                jobs.mark_deploying(&job_id);
-                                match (hooks.commit)(*p) {
-                                    Ok(dep_id) => {
-                                        // 启动期间用户点了停止：引擎已经起来了，
-                                        // 必须停掉它并回滚（否则「点了停止但模型还在跑」）。
-                                        // 注意这里**不删文件**——下载已经完成并登记，
-                                        // 删文件属于「卸载模型」，不是「停止部署」。
-                                        if jobs.is_cancelled(&job_id) {
-                                            (hooks.abort)(Some(&dep_id), None).ok();
-                                            jobs.set_note(
-                                                &job_id,
-                                                "已停止部署，引擎已关闭、部署记录已清理\
-                                                 （模型文件保留，可在「模型列表」中再次启动）"
-                                                    .to_string(),
-                                            );
-                                            return;
-                                        }
-                                        jobs.set_deployment(&job_id, Some(&dep_id), None);
-                                    }
-                                    Err(e) => {
-                                        jobs.set_deployment(
-                                            &job_id,
-                                            None,
-                                            Some(format!(
-                                                "模型已就绪，但自动启动失败：{e}。\
-                                                 可在「已下载模型」里点「启动」重试"
-                                            )),
-                                        );
-                                    }
-                                }
-                            }
+                            // 纯云端部署在 prepare 阶段已提交并 return，走到这里的
+                            // 只可能是纯下载任务（CLI `models pull`），无需启动引擎。
                         }
                         Err(e) => {
                             jobs.mark_done_with(
@@ -336,7 +298,7 @@ pub fn spawn(
                             // 身份永久挡住这个模型的后续部署。
                             // 不删文件：用户可能想自己处理（例如它是 imatrix）。
                             if let Some(hooks) = deploy.as_ref() {
-                                let dep_id = prepared.as_ref().map(|p| p.id.clone());
+                                let dep_id: Option<String> = None;
                                 (hooks.abort)(dep_id.as_deref(), None).ok();
                             }
                         }
@@ -347,7 +309,7 @@ pub fn spawn(
                     // 失败会触发重试/降级，而取消的语义是「当我没做过」。
                     if e.is_cancelled() {
                         if let Some(hooks) = deploy.as_ref() {
-                            let dep_id = prepared.as_ref().map(|p| p.id.clone());
+                            let dep_id: Option<String> = None;
                             (hooks.abort)(dep_id.as_deref(), Some(abort_file.as_path())).ok();
                         }
                         jobs.set_note(
@@ -367,7 +329,7 @@ pub fn spawn(
                     // 注意**不删文件**：下载失败时文件没下完整，
                     // 保留 `.part` 是为了下次续传。
                     if let Some(hooks) = deploy.as_ref() {
-                        let dep_id = prepared.as_ref().map(|p| p.id.clone());
+                        let dep_id: Option<String> = None;
                         (hooks.abort)(dep_id.as_deref(), None).ok();
                     }
                     if tracked {

@@ -572,7 +572,12 @@ fn instances(args: Args) -> MnResult<i32> {
     let cloud_deployments: Vec<_> = store
         .list()?
         .into_iter()
-        .filter(|r| !r.plan.origin.is_local())
+        .filter(|r| {
+            matches!(
+                r.plan.origin,
+                mangosteen_core::plan::ComputeOrigin::Cloud { .. }
+            )
+        })
         .collect();
 
     if args.has("json") {
@@ -584,7 +589,6 @@ fn instances(args: Args) -> MnResult<i32> {
                         provider,
                         instance_id,
                     } => (provider.clone(), instance_id.clone()),
-                    _ => (String::new(), String::new()),
                 };
                 serde_json::json!({
                     "deployment_id": r.plan.id,
@@ -617,7 +621,6 @@ fn instances(args: Args) -> MnResult<i32> {
                     provider,
                     instance_id,
                 } => (provider.clone(), instance_id.clone()),
-                _ => ("-".into(), "-".into()),
             };
             vec![
                 r.plan.id.clone(),
@@ -672,11 +675,6 @@ fn destroy(args: Args) -> MnResult<i32> {
             provider,
             instance_id,
         } => (provider.clone(), instance_id.clone()),
-        _ => {
-            return Err(mangosteen_core::MnError::bad_request(format!(
-                "部署 `{id}` 是本地部署，请用 `mangosteen stop {id}` 停止"
-            )))
-        }
     };
 
     if !args.has("yes") {

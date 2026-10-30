@@ -110,6 +110,19 @@ pub struct TunnelSpec {
     pub forwards: Vec<PortForward>,
     /// 是否启用连接复用（`ControlMaster`），可显著降低重连延迟
     pub control_master: bool,
+    /// 远端端口此刻**还没有服务监听**。
+    ///
+    /// ## 为什么需要这个开关
+    ///
+    /// 部署被拆成「设备配置」与「启动模型」两段后，隧道必须在设备配置阶段
+    /// 建好（用户要求先完成设备初始化），而推理引擎要到下一阶段才拉起。
+    /// 默认的 `ExitOnForwardFailure=yes` 会在转发目标不可达时让 ssh 立刻退出，
+    /// 表现为「隧道刚建就断」，看起来像密码/安全组问题。
+    ///
+    /// 打开后：不传该选项，且建立时不要求本地端口立刻可连通——只确认
+    /// ssh 进程活着。真正的可用性由启动阶段经隧道探 `/health` 判定。
+    #[serde(default)]
+    pub allow_unready_remote: bool,
     /// 登录密码（`None` 表示走密钥/agent）。
     ///
     /// ## 为什么需要它
@@ -201,11 +214,13 @@ impl TunnelSpec {
     /// * `-o ExitOnForwardFailure=yes` 端口占用时立即失败，避免「假连通」
     /// * `-o ServerAliveInterval` 保活，防止云侧 NAT 静默断开
     pub fn to_ssh_args(&self) -> Vec<String> {
-        let mut a = vec![
-            "-N".to_string(),
-            "-T".to_string(),
-            "-o".to_string(),
-            "ExitOnForwardFailure=yes".to_string(),
+        let mut a = vec!["-N".to_string(), "-T".to_string()];
+        // 目标端口还没监听时不能要求转发立即成功，否则 ssh 会直接退出
+        if !self.allow_unready_remote {
+            a.push("-o".to_string());
+            a.push("ExitOnForwardFailure=yes".to_string());
+        }
+        a.extend([
             "-o".to_string(),
             "ServerAliveInterval=15".to_string(),
             "-o".to_string(),
@@ -214,7 +229,7 @@ impl TunnelSpec {
             "StrictHostKeyChecking=accept-new".to_string(),
             "-p".to_string(),
             self.ssh_port.to_string(),
-        ];
+        ]);
         if let Some(id) = &self.identity_file {
             a.push("-i".to_string());
             a.push(id.display().to_string());
@@ -450,13 +465,14 @@ mod tests {
 
     #[test]
     fn tunnel_spec_generates_safe_ssh_args() {
-        let t = TunnelSpec {
+        let mut t = TunnelSpec {
             ssh_host: "1.2.3.4".into(),
             ssh_port: 22,
             ssh_user: "root".into(),
             identity_file: Some(PathBuf::from("/home/u/.ssh/id_ed25519")),
             forwards: vec![PortForward::loopback(11435, 8080)],
             control_master: true,
+            allow_unready_remote: false,
             password: None,
         };
         assert!(t.validate().is_ok());
@@ -468,6 +484,15 @@ mod tests {
         assert!(args.contains(&"/home/u/.ssh/id_ed25519".to_string()));
         assert!(args.contains(&"-L".to_string()));
         assert!(args.contains(&"127.0.0.1:11435:127.0.0.1:8080".to_string()));
+
+        // 远端尚未监听时不能要求转发立即成功，否则 ssh 建好即退出
+        t.allow_unready_remote = true;
+        let args = t.to_ssh_args();
+        assert!(
+            !args.contains(&"ExitOnForwardFailure=yes".to_string()),
+            "目标端口未就绪时不得带 ExitOnForwardFailure：{args:?}"
+        );
+        assert!(args.contains(&"-N".to_string()), "仍是纯转发模式");
         // 目标必须是最后一项
         assert_eq!(args.last().unwrap(), "root@1.2.3.4");
     }
@@ -484,6 +509,7 @@ mod tests {
                 PortForward::loopback(11435, 8081),
             ],
             control_master: false,
+            allow_unready_remote: false,
             password: None,
         };
         assert!(t.validate().is_err());
@@ -498,6 +524,7 @@ mod tests {
             identity_file: None,
             forwards: vec![],
             control_master: false,
+            allow_unready_remote: false,
             password: None,
         };
         assert!(t.validate().is_err());
@@ -512,6 +539,7 @@ mod tests {
             identity_file: None,
             forwards: vec![PortForward::loopback(11435, 8080)],
             control_master: false,
+            allow_unready_remote: false,
             password: None,
         };
         assert_eq!(

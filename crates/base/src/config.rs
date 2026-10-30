@@ -210,6 +210,7 @@ mod tests {
             },
             providers: Default::default(),
             model_sources: Default::default(),
+            remote_devices: Default::default(),
         }
     }
 

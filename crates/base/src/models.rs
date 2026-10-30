@@ -161,6 +161,7 @@ impl ModelStore {
             spec,
             location: ModelLocation::Local { path: real },
             source: source.map(|s| s.to_string()),
+            remote_url: None,
             sha256,
             version: version.map(|s| s.to_string()),
             verified_at: Some(now),
@@ -190,6 +191,19 @@ impl ModelStore {
         })
     }
 
+    /// 记录模型的直连下载地址（云端部署时远端据此自行下载）。
+    pub fn set_remote_url(&self, id: &str, url: &str) -> MnResult<()> {
+        let mut index = self.load_index()?;
+        let Some(slot) = index.models.iter_mut().find(|m| m.id == id) else {
+            return Ok(());
+        };
+        if slot.remote_url.as_deref() == Some(url) {
+            return Ok(());
+        }
+        slot.remote_url = Some(url.to_string());
+        self.save_index(&index)
+    }
+
     /// 登记云端实例上的模型（不做本地文件校验）。
     pub fn register_cloud(
         &self,
@@ -207,6 +221,7 @@ impl ModelStore {
                 path: remote_path.to_string(),
             },
             source: None,
+            remote_url: None,
             sha256: None,
             version: None,
             verified_at: Some(mangosteen_core::time::now_unix()),

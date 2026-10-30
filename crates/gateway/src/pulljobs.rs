@@ -487,7 +487,7 @@ impl PullJobs {
 /// 后台 worker 的公开契约位于 [`pull_worker`]；此处保留 re-export，
 /// 兼容已有 gateway 调用方。
 pub use crate::pull_worker::{
-    spawn, AbortHook, CommitHook, DeployHooks, PrepareHook, RegisterHook,
+    spawn, AbortHook, CommitCloudHook, DeployHooks, PrepareHook, RegisterHook,
 };
 
 #[cfg(test)]

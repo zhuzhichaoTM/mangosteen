@@ -39,8 +39,7 @@ use mangosteen_core::config::{Config, SchedulerConfig};
 use mangosteen_core::MnResult;
 use mangosteen_device::LlamaCppEngine;
 pub use mangosteen_orchestration::deployment::{
-    CloudCandidateBrief, CloudPreview, DeploymentPreview, LocalPreview, PreparedDeployment,
-    PreparedLocal,
+    CloudCandidateBrief, CloudPreview, DeploymentPreview, PreparedDeployment,
 };
 use mangosteen_orchestration::Assessor;
 pub use mangosteen_orchestration::{

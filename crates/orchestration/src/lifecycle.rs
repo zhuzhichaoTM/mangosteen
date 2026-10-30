@@ -14,15 +14,6 @@ impl Orchestrator {
             .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
 
         match &record.plan.origin {
-            ComputeOrigin::Local => {
-                if let Some(mut h) = self.engines.remove(id) {
-                    h.shutdown()?;
-                } else if let Some(pid) = record.pid {
-                    // 进程不是本实例启动的（如 deploy 在另一个进程里），
-                    // 按台账记录的 PID 终止，避免留下孤儿进程占用端口。
-                    mangosteen_platform::process::terminate_pid(pid, Duration::from_secs(3))?;
-                }
-            }
             ComputeOrigin::Cloud {
                 provider,
                 instance_id,
@@ -42,7 +33,7 @@ impl Orchestrator {
             .set_status(id, DeploymentStatus::Destroyed, None)?;
         Ok(())
     }
-    /// **停止服务**（云端：停推理进程 + 关机实例；本地：停引擎进程）。
+    /// **停止服务**（云端：停推理进程 + 关机实例）。
     ///
     /// ## 与 [`Orchestrator::stop`] 的区别
     ///
@@ -61,13 +52,6 @@ impl Orchestrator {
             .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
 
         match &record.plan.origin {
-            ComputeOrigin::Local => {
-                if let Some(mut h) = self.engines.remove(id) {
-                    h.shutdown()?;
-                } else if let Some(pid) = record.pid {
-                    mangosteen_platform::process::terminate_pid(pid, Duration::from_secs(3))?;
-                }
-            }
             ComputeOrigin::Cloud {
                 provider,
                 instance_id,
@@ -96,10 +80,8 @@ impl Orchestrator {
                 return Ok(());
             }
         }
-        self.state.set_status(id, DeploymentStatus::Stopped, None)?;
-        Ok(())
     }
-    /// **启动服务**（云端：开机 + 起推理进程；本地：重新拉起引擎）。
+    /// **启动服务**（云端：开机 + 起推理进程）。
     ///
     /// 与重新部署的区别：不重新建实例、不重新传权重，只把停掉的东西拉起来。
     /// 云端权重与二进制都还在盘上，所以通常十几秒就能用。
@@ -111,9 +93,6 @@ impl Orchestrator {
         let plan = record.plan.clone();
 
         match &plan.origin {
-            ComputeOrigin::Local => Err(MnError::bad_request(
-                "本地部署没有「保留实例再启动」的概念：请直接重新部署该模型".to_string(),
-            )),
             ComputeOrigin::Cloud {
                 provider,
                 instance_id,
@@ -202,20 +181,9 @@ impl Orchestrator {
     ) -> MnResult<()> {
         let record = self.state.get(id)?;
 
-        // 1) 停引擎 / 销毁云端实例（可能不存在：prepare 后立即被中止）
+        // 1) 销毁云端实例（可能不存在：prepare 后立即被中止）
         if let Some(rec) = &record {
             match &rec.plan.origin {
-                ComputeOrigin::Local => {
-                    if let Some(mut h) = self.engines.remove(id) {
-                        let _ = h.shutdown();
-                    } else if let Some(pid) = rec.pid {
-                        // 忽略失败：进程可能已经退了
-                        let _ = mangosteen_platform::process::terminate_pid(
-                            pid,
-                            Duration::from_secs(3),
-                        );
-                    }
-                }
                 ComputeOrigin::Cloud {
                     provider,
                     instance_id,

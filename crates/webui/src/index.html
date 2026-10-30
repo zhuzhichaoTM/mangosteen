@@ -446,7 +446,15 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 .cost .dt{color:var(--muted);font-size:12px;margin-top:5px;font-family:var(--mono)}
 .cost.warn{border-color:var(--warn-line);background:var(--warn-soft)}
 .cost.warn .num{color:var(--warn)}
-.confirm{
+.gpu-pick{display:flex;flex-direction:column;gap:6px;margin-top:7px;max-height:250px;overflow-y:auto}
+.gpu-item{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);cursor:pointer;transition:.13s}
+.gpu-item:hover{border-color:var(--accent-line);background:var(--accent-soft)}
+.gpu-item.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 1px var(--accent-line)}
+.gi-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.gi-main b{font-size:12.5px}.gi-sub{color:var(--muted);font-size:11px}
+.gi-meta{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:11px;white-space:nowrap}
+.gi-meta .price{font-weight:650;color:var(--accent);font-family:var(--mono)}
+
   display:flex;gap:9px;align-items:flex-start;margin-top:14px;padding:11px 13px;
   border:1px dashed var(--danger-line);border-radius:9px;background:var(--danger-soft);
 }
@@ -497,17 +505,6 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
       <polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
     </svg>
     <span class="lbl">部署</span>
-  </button>
-  <button class="navitem" data-tab="device">
-    <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round">
-      <rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/>
-      <line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/>
-      <line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>
-      <line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/>
-      <line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>
-    </svg>
-    <span class="lbl">设备</span>
   </button>
   <button class="navitem" data-tab="setting">
     <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -652,112 +649,6 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
     </div>
   </div>
 
-  <!-- ============================ 设备 ============================ -->
-  <div class="view" id="v-device" hidden>
-    <div class="pane">
-      <div class="pane-narrow">
-        <h1>设备</h1>
-        <div class="sub" id="dv-sub">实时资源占用</div>
-
-        <!-- 云端算力：仅当活跃部署跑在云端时出现 -->
-        <div class="card" id="dv-cloud" hidden>
-          <h3>云端算力 <span class="pill" id="dv-cloud-pill">—</span></h3>
-          <div class="kv"><span class="k">服务商</span><span class="v" id="dv-cloud-provider">—</span></div>
-          <div class="kv"><span class="k">实例</span><span class="v" id="dv-cloud-inst">—</span></div>
-          <div class="kv"><span class="k">模型</span><span class="v" id="dv-cloud-model">—</span></div>
-          <div class="kv"><span class="k">数据新鲜度</span><span class="v" id="dv-cloud-age">—</span></div>
-
-          <div class="grid2-tight" style="margin-top:12px">
-            <div class="gauge">
-              <div class="ring" id="dv-cg-ring"></div>
-              <div class="meta">
-                <div class="big">GPU</div>
-                <div class="small" id="dv-cg-note">—</div>
-              </div>
-            </div>
-            <div class="gauge">
-              <div class="ring" id="dv-cv-ring"></div>
-              <div class="meta">
-                <div class="big">显存</div>
-                <div class="small" id="dv-cv-note">—</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="grid2-tight" style="margin-top:12px">
-            <div class="gauge">
-              <div class="ring" id="dv-cc-ring"></div>
-              <div class="meta">
-                <div class="big">CPU</div>
-                <div class="small" id="dv-cc-note">—</div>
-              </div>
-            </div>
-            <div class="gauge">
-              <div class="ring" id="dv-cm-ring"></div>
-              <div class="meta">
-                <div class="big">内存</div>
-                <div class="small" id="dv-cm-note">—</div>
-              </div>
-            </div>
-          </div>
-
-          <div style="margin-top:10px">
-            <div class="kv"><span class="k">系统盘</span><span class="v" id="dv-cd-sys">—</span></div>
-            <div class="kv"><span class="k">数据盘</span><span class="v" id="dv-cd-data">—</span></div>
-          </div>
-
-          <div id="dv-cloud-msg" style="margin-top:10px"></div>
-        </div>
-
-        <!-- 本机资源：始终显示（控制端机器），云端激活时明确标注 -->
-        <div class="banner info" id="dv-local-note" hidden>
-          以下为<b>本机</b>（控制端）资源。推理正运行在云端，本机 GPU 不参与计算。
-        </div>
-
-        <div class="grid2">
-          <div class="card">
-            <h3>CPU</h3>
-            <div class="gauge">
-              <div class="ring" id="dv-cpu-ring"></div>
-              <div class="meta">
-                <div class="big" id="dv-cpu-model">—</div>
-                <div class="small" id="dv-cpu-core">—</div>
-              </div>
-            </div>
-            <canvas class="spark" id="dv-cpu-spark"></canvas>
-          </div>
-
-          <div class="card">
-            <h3>内存</h3>
-            <div class="gauge">
-              <div class="ring" id="dv-mem-ring"></div>
-              <div class="meta">
-                <div class="big" id="dv-mem-used">—</div>
-                <div class="small" id="dv-mem-total">—</div>
-              </div>
-            </div>
-            <canvas class="spark" id="dv-mem-spark"></canvas>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>加速卡</h3>
-          <div id="dv-gpu"><div class="empty">—</div></div>
-        </div>
-
-        <div class="card">
-          <h3>磁盘</h3>
-          <div id="dv-disk"><div class="empty">—</div></div>
-        </div>
-
-        <div class="card">
-          <h3>推理进程</h3>
-          <div id="dv-procs"><div class="empty">暂无运行中的部署</div></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- ============================ 设置 ============================ -->
   <div class="view" id="v-setting" hidden>
     <div class="pane">
@@ -766,19 +657,23 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
         <div class="sub">修改后写入配置文件；标注「需重启」的项在重启网关后生效</div>
 
         <div class="card">
-          <h3>设备选择</h3>
-          <div class="row">
-            <div class="seg" id="se-target">
-              <button data-t="local">本地</button>
-              <button data-t="cloud" class="on">云端</button>
-            </div>
-            <button class="help" type="button" id="se-target-help"
-                    aria-label="设备选择说明">?</button>
+          <h3>部署位置</h3>
+          <div class="banner ok">默认使用云端节点：优先选择设备列表中的 SSH 节点；没有可用节点时自动创建云端实例。</div>
+        </div>
+
+        <div class="card">
+          <h3>设备列表</h3>
+          <div class="hint">添加后部署会优先使用该 SSH 节点。密码只用于连接，不会回显。</div>
+          <div id="se-devices"><div class="empty">加载中…</div></div>
+          <div class="field-grid" style="margin-top:12px">
+            <input id="se-dev-host" placeholder="主机名或 IP">
+            <input id="se-dev-port" type="number" value="22" min="1" max="65535" placeholder="SSH 端口">
+            <input id="se-dev-user" value="root" placeholder="用户名">
+            <input id="se-dev-password" type="password" placeholder="登录密码">
           </div>
-          <div class="helpbox" id="se-target-helpbox" hidden>
-            <b>本地</b>：全部资源都在本机，不产生费用。资源不足时会<b>停止部署并说明原因</b>，不会自动改用云端。<br>
-            <b>云端</b>：全部资源都在云端实例，模型文件会同步到实例，按小时计费（部署前弹窗展示预估费用）。
-            <div class="cur" id="se-target-note"></div>
+          <div class="row" style="margin-top:10px">
+            <input id="se-dev-workdir" value="/root/mangosteen" placeholder="远端工作目录" class="grow">
+            <button class="primary sm" id="se-dev-add">添加设备</button>
           </div>
         </div>
 
@@ -797,63 +692,6 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
             与本项目的模型台账不同，<b>尚未适配</b>——选中后部署会明确提示，不会静默失败。
             <div class="cur" id="se-engine-note"></div>
           </div>
-        </div>
-
-        <div class="card">
-          <h3>调度策略</h3>
-          <label class="switch">
-            <input type="checkbox" id="se-local-first">
-            <span><span class="lbl">本地优先</span>
-              <span class="desc">产品基线要求开启。关闭后不再优先尝试本地部署，仅用于临时排障</span></span>
-          </label>
-          <div class="field-grid">
-            <div>
-              <label class="f">云端时价上限（元/小时）</label>
-              <input type="number" id="se-max-price" step="0.01" min="0" placeholder="留空表示不限">
-            </div>
-            <div>
-              <label class="f">启动超时（秒）</label>
-              <input type="number" id="se-launch-timeout" min="1" disabled>
-              <span class="hint">需重启生效</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>本地推理</h3>
-          <div class="field-grid">
-            <div>
-              <label class="f">默认上下文长度</label>
-              <input type="number" id="se-ctx" step="512" min="512">
-            </div>
-            <div>
-              <label class="f">KV Cache 精度</label>
-              <select id="se-kv">
-                <option value="f16">f16（精度最高）</option>
-                <option value="q8_0">q8_0（省一半）</option>
-                <option value="q4_0">q4_0（最省，精度损失明显）</option>
-              </select>
-            </div>
-            <div>
-              <label class="f">批大小</label>
-              <input type="number" id="se-batch" step="64" min="1">
-            </div>
-            <div>
-              <label class="f">引擎路径</label>
-              <input type="text" id="se-engine" disabled>
-              <span class="hint">需重启生效；用 <code>mangosteen engine env</code> 诊断</span>
-            </div>
-          </div>
-          <label class="switch" style="margin-top:8px">
-            <input type="checkbox" id="se-cpu-fallback">
-            <span><span class="lbl">允许纯 CPU 回退</span>
-              <span class="desc">无 GPU 时以 CPU 推理（很慢但能跑）</span></span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="se-partial">
-            <span><span class="lbl">允许部分卸载</span>
-              <span class="desc">显存不足时把部分层留在内存</span></span>
-          </label>
         </div>
 
         <div class="card">
@@ -1502,60 +1340,13 @@ const TARGET_KEY = "mn.deploy.target";
 /// 当前设备选择。读按钮上的 `on` 类，而不是某个内部变量——
 /// 这样界面是唯一真相，不会出现「状态变了但高亮没变」。
 function currentTarget() {
-  const box = $("se-target");
-  if (!box) return "local";
-  const on = box.querySelector("button.on");
-  return on && on.dataset.t === "cloud" ? "cloud" : "local";
+  return "cloud";
 }
 
 /// 刷新说明区里的「当前选择」一行。
 ///
 /// 这行放在「?」展开的说明区内部，不在页面上常驻——
 /// 页面上只留「本地 / 云端」两个按钮，需要解释时再点开。
-function syncTargetNote() {
-  const t = currentTarget();
-  const note = $("se-target-note");
-  if (!note) return;
-  if (t === "cloud") {
-    note.innerHTML = "当前选择：<b>云端</b>。点「部署」会先弹窗展示预估费用，确认后才创建实例。";
-  } else {
-    note.innerHTML = "当前选择：<b>本地</b>。若本机显存/内存不足，部署会停止并提示原因，" +
-      "不会自动改用云端。";
-  }
-}
-
-function bindTarget() {
-  const box = $("se-target");
-  if (!box) return;
-
-  const paint = (t) => {
-    box.querySelectorAll("button").forEach((b) => {
-      b.classList.toggle("on", b.dataset.t === t);
-    });
-    syncTargetNote();
-  };
-
-  // 恢复上次选择。
-  //
-  // 默认改为「云端」：产品当前策略是云端 GPU 部署（成本可控、型号可选），
-  // 本地保留为显式选项。**但云端会真实计费**，所以「部署」前仍会弹窗
-  // 展示预估费用并要用户确认——默认值不构成「一不留神就扣钱」。
-  let saved = "cloud";
-  try {
-    const v = localStorage.getItem(TARGET_KEY);
-    if (v === "cloud" || v === "local") saved = v;
-  } catch (e) { /* 隐私模式下 localStorage 不可用，忽略 */ }
-  paint(saved);
-
-  box.querySelectorAll("button").forEach((b) => {
-    b.onclick = () => {
-      paint(b.dataset.t);
-      try { localStorage.setItem(TARGET_KEY, b.dataset.t); } catch (e) {}
-    };
-  });
-}
-
-
 /// 加载推理引擎列表并绑定切换。
 ///
 /// 未适配的引擎也列出来但标注「未适配」：用户能看见有哪些选择，
@@ -2018,6 +1809,45 @@ Tabs.register("deploy", (() => {
     deployFromSearch(it);
   }
 
+  /// 搜索结果的云端部署确认：候选为空时不允许进入下载/创建阶段。
+  function renderCloudPullConfirm(pv, spec, name) {
+    const body = $("dlg-body");
+    $("ov-deploy").classList.add("show");
+    $("dlg-title").textContent = "确认云端 GPU 部署";
+    $("dlg-sub").textContent = "请选择 GPU 型号并确认费用后才会创建实例";
+    body.innerHTML = "";
+    $("dlg-foot").style.display = "flex";
+    let selected = null;
+    const cands = pv.cloud_candidates || [];
+    const list = el("div", "gpu-pick");
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "cb-confirm-pull";
+    const lb = document.createElement("label"); lb.htmlFor = "cb-confirm-pull";
+    const box = el("div", "confirm"); box.appendChild(cb); box.appendChild(lb);
+    const sync = () => {
+      list.querySelectorAll(".gpu-item").forEach(n => n.classList.toggle("on", n.dataset.spec === selected));
+      const x = cands.find(c => c.spec_id === selected);
+      lb.textContent = x ? "我已了解将创建 " + x.gpu_model + "（约 " + cny(x.price_per_hour) + "/小时）" : "请先选择 GPU 型号";
+      $("dlg-ok").disabled = !(x && cb.checked);
+    };
+    cands.forEach(x => {
+      const item = el("div", "gpu-item"); item.dataset.spec = x.spec_id;
+      item.innerHTML = '<div class="gi-main"><b>' + esc(x.tier || "候选") + " · " + esc(x.gpu_model) + '</b><span class="gi-sub">' + esc(x.provider) + " · " + esc(x.region) + '</span></div><div class="gi-meta"><span>' + gib(x.vram_bytes) + '</span><span class="price">' + cny(x.price_per_hour) + "/h</span></div>';
+      item.onclick = () => { selected = x.spec_id; sync(); }; list.appendChild(item);
+    });
+    body.appendChild(section("GPU 节点")); body.appendChild(list); body.appendChild(box);
+    $("dlg-ok").textContent = "确认并开始下载"; $("dlg-ok").disabled = true;
+    cb.onchange = sync;
+    $("dlg-ok").onclick = async () => {
+      $("dlg-ok").disabled = true; $("dlg-ok").innerHTML = '<span class="spin"></span> 提交中…';
+      try {
+        await api("/api/models/pull", { method: "POST", body: JSON.stringify({ model: spec, deploy: true, target: "cloud", cloud_spec: selected }), timeoutMs: 60000 });
+        $("ov-deploy").classList.remove("show"); $("dp-detail").hidden = true; $("dp-progress-toggle").textContent = "详情"; startJobPolling(); await refreshModelCards();
+      } catch (e) { $("dlg-ok").innerHTML = "重试"; $("dlg-ok").disabled = false; $("dlg-hint").textContent = e.message; }
+    };
+    $("dlg-cancel").onclick = () => $("ov-deploy").classList.remove("show");
+    void name;
+  }
+
   /// 从搜索结果直接部署：下载（若没有）→ 自动启动。
   ///
   /// 为什么复用 `/api/models/pull` 而不是新增接口：下载链路已经有
@@ -2028,6 +1858,21 @@ Tabs.register("deploy", (() => {
     const name = it.file.split("/").pop();
     toast("正在准备 " + name + "…", "ok");
     try {
+      // 与模型列表「部署/启动」统一：云端必须先拿到 GPU 候选并让用户确认。
+      // 不能直接 POST /pull，否则会绕过设备选择，后台静默创建计费实例。
+      if (currentTarget() === "cloud") {
+        const pv = await api("/api/preview", {
+          method: "POST",
+          body: JSON.stringify({ model: it.source + ":" + it.repo + "/" + it.file, target: "cloud" }),
+        });
+        if (!pv.cloud_candidates || !pv.cloud_candidates.length || pv.cloud_error) {
+          toast("没有可用的 GPU 节点：" + (pv.cloud_error || "请稍后重试"), "err");
+          return;
+        }
+        // 复用同一个 GPU/费用确认弹窗；确认回调会提交 pull。
+        renderCloudPullConfirm(pv, spec, name);
+        return;
+      }
       const r = await api("/api/models/pull", {
         method: "POST",
         body: JSON.stringify({ model: spec, deploy: true, target: currentTarget() }),
@@ -2194,19 +2039,15 @@ Tabs.register("deploy", (() => {
     const extra = $("dp-progress-extra");
     extra.innerHTML = "";
 
+    // 生成阶段错误只显示进度区的单一提示；不要再叠加 toast/第二个弹窗。
     if (failed) {
-      const err = el("div", "banner err");
-      err.innerHTML = "<b>部署失败</b>　" +
-        esc(j.error || j.deploy_detail || "未知原因");
-      extra.appendChild(err);
-      // 给出可操作的下一步，而不是只报错
-      if (j.model_id) {
-        const tip = el("div", "sub");
-        tip.style.marginTop = "8px";
-        tip.textContent = "模型文件已就位，可在下方「模型列表」里点「启动」重试；" +
-          "若反复失败，请到设置页确认推理引擎与设备配置。";
-        extra.appendChild(tip);
-      }
+      const tip = el("div", "sub");
+      tip.style.marginTop = "8px";
+      tip.textContent = j.model_id
+        ? "模型文件已就位，可在下方「模型列表」里点「启动」重试；" +
+          "若反复失败，请到设置页确认推理引擎与设备配置。"
+        : "请检查模型文件、推理引擎与设备配置后重试。";
+      extra.appendChild(tip);
     } else if (j.warning) {
       const w = el("div", "banner info");
       w.textContent = j.warning;
@@ -2649,6 +2490,10 @@ Tabs.register("deploy", (() => {
     $("dlg-foot").style.display = "flex";
     $("dlg-ok").disabled = false;
 
+    // 当前确认弹窗里用户选定的云端规格 ID。默认第一项，仅在用户确认
+    // 费用与 GPU 型号后才写入 /api/deploy。
+    let selectedCloudSpec = null;
+
     // ---- 选了「本地」但资源不足：停止部署，绝不静默上云 ----
     //
     // 这个分支必须放在最前面：此时 `pv.cloud` 也可能有值（我们算了报价
@@ -2754,22 +2599,42 @@ Tabs.register("deploy", (() => {
       ["是否充足", c.vram_bytes >= c.required_vram_bytes ? "充足" : "不足（可能启动失败）"],
     ]));
 
-    if (pv.cloud_candidates && pv.cloud_candidates.length > 1) {
-      body.appendChild(section("备选节点（按综合评分）"));
-      const t = el("table", "t");
-      t.innerHTML = "<thead><tr><th>服务商</th><th>GPU</th><th>时价</th><th>延迟</th></tr></thead>";
-      const tb = el("tbody");
-      pv.cloud_candidates.forEach((x, i) => {
-        const tr = el("tr");
-        if (i === 0) tr.style.color = "var(--accent)";
-        tr.innerHTML = "<td>" + esc(x.provider) + "</td><td>" + esc(x.gpu_model) +
-          "</td><td>" + cny(x.price_per_hour) + "</td><td>" +
-          (x.latency_ms != null ? x.latency_ms + "ms" : "—") + "</td>";
-        tb.appendChild(tr);
+    // ---- GPU 型号选择：必须由用户明确确认 ----
+    //
+    // 云端会按小时计费，且不同卡型价格差十几倍（P40 ¥0.38 vs 5090 ¥3.79）。
+    // 所以不自动替用户决定：列出候选，默认选第一项，用户点选后
+    // 才允许继续；未选择时确认按钮保持禁用。
+    const cands = pv.cloud_candidates || [];
+    selectedCloudSpec = cands.length ? (cands[0].spec_id || null) : null;
+
+    body.appendChild(section("选择 GPU 型号"));
+    const list = el("div", "gpu-pick");
+
+    function paintGpu() {
+      list.querySelectorAll(".gpu-item").forEach((n) => {
+        n.classList.toggle("on", n.dataset.spec === selectedCloudSpec);
       });
-      t.appendChild(tb);
-      body.appendChild(t);
+      const hit = cands.find((x) => x.spec_id === selectedCloudSpec);
+      if (hit) {
+        $("dlg-sub").textContent =
+          "将创建 " + hit.gpu_model + " · " + cny(hit.price_per_hour) + "/小时";
+      }
+      syncConfirm();
     }
+
+    cands.forEach((x) => {
+      const item = el("div", "gpu-item");
+      item.dataset.spec = x.spec_id || x.gpu_model;
+      item.innerHTML =
+        '<div class="gi-main"><b>' + esc(x.gpu_model) + "</b>" +
+        '<span class="gi-sub">' + esc(x.provider) + " · " + esc(x.region) + "</span></div>" +
+        '<div class="gi-meta"><span class="mono">' + gib(x.vram_bytes) + "</span>" +
+        "<span>" + (x.latency_ms != null ? x.latency_ms + " ms" : "延迟未知") + "</span>" +
+        '<span class="price">' + cny(x.price_per_hour) + "/h</span></div>";
+      item.onclick = () => { selectedCloudSpec = x.spec_id || x.gpu_model; paintGpu(); };
+      list.appendChild(item);
+    });
+    body.appendChild(list);
 
     const cbox = el("div", "confirm");
     const cb = document.createElement("input");
@@ -2777,22 +2642,32 @@ Tabs.register("deploy", (() => {
     cb.id = "cb-confirm";
     const lb = document.createElement("label");
     lb.htmlFor = "cb-confirm";
-    lb.textContent = "我已了解将创建云端计费实例（约 " + cny(c.price_per_hour) +
-      "/小时），并会在用完后及时停止。";
     cbox.appendChild(cb);
     cbox.appendChild(lb);
     body.appendChild(cbox);
 
+    function syncConfirm() {
+      const hit = cands.find((x) => x.spec_id === selectedCloudSpec);
+      lb.textContent = hit
+        ? "我已了解将创建 " + hit.gpu_model + " 实例（约 " +
+          cny(hit.price_per_hour) + "/小时），并会在用完后及时停止。"
+        : "请先选择 GPU 型号";
+      const ok = !!hit && cb.checked;
+      $("dlg-ok").disabled = !ok;
+    }
+
+    paintGpu();
     $("dlg-ok").disabled = true;
-    cb.onchange = () => { $("dlg-ok").disabled = !cb.checked; };
+    cb.onchange = () => { syncConfirm(); };
     $("dlg-ok").textContent = "确认并开始计费";
-    $("dlg-ok").onclick = () => doDeploy(modelId);
+    $("dlg-ok").onclick = () => doDeploy(modelId, () => selectedCloudSpec);
   }
 
-  async function doDeploy(modelId) {
+  async function doDeploy(modelId, specOf) {
     $("dlg-ok").disabled = true;
     $("dlg-ok").innerHTML = '<span class="spin"></span> 部署中…';
     const cloud = currentTarget() === "cloud";
+    const cloudSpec = cloud && typeof specOf === "function" ? specOf() : null;
     $("dlg-hint").textContent = cloud ? "正在创建云端实例…" : "正在启动本地引擎…";
     try {
       const r = await api("/api/deploy", {
@@ -2801,6 +2676,8 @@ Tabs.register("deploy", (() => {
           model: modelId,
           context_len: 4096,
           target: currentTarget(),
+          // 云端：用户确认过的 GPU 规格。空值由服务端按策略自动选。
+          cloud_spec: cloudSpec || undefined,
         }),
         // 云端要走「建实例 → 等 Running → 建隧道 → 拉模型」四步，
         // 分钟级很正常。默认 3 分钟会中途判超时，而服务端其实还在跑，
@@ -2823,239 +2700,6 @@ Tabs.register("deploy", (() => {
 })());
 
 
-/* ==================================================================== 设备 */
-
-Tabs.register("device", (() => {
-  let timer = null;
-  let cpuHist = [];
-  let memHist = [];
-  const MAXP = 60;
-  const COL_CPU = "#2f6f4e";
-  const COL_MEM = "#2d5f8a";
-
-  function ring(host, ratio) {
-    const R = 26, C = 2 * Math.PI * R;
-    const p = ratio == null ? 0 : Math.max(0, Math.min(1, ratio));
-    host.innerHTML =
-      '<svg width="64" height="64" viewBox="0 0 64 64">' +
-      '<circle cx="32" cy="32" r="' + R + '" fill="none" stroke="var(--line2)" stroke-width="6"/>' +
-      '<circle cx="32" cy="32" r="' + R + '" fill="none" stroke="var(--accent)" stroke-width="6"' +
-      ' stroke-dasharray="' + C + '" stroke-dashoffset="' + (C * (1 - p)) + '"' +
-      ' stroke-linecap="round"/></svg>' +
-      '<div class="val">' + (ratio == null ? "—" : Math.round(p * 100)) + "</div>";
-  }
-
-  /* ---------------- 云端算力区块 ----------------
-   *
-   * 数据来自后台采集缓存（每 5 秒刷新一次），与本地 2 秒采样节奏不同，
-   * 因此必须显式展示「数据新鲜度」——否则用户会把 5 秒前的云端读数
-   * 当成实时值，在排查性能问题时得出错误结论。
-   */
-  function renderCloud(c) {
-    const card = $("dv-cloud");
-    const localNote = $("dv-local-note");
-
-    if (!c || !c.active) {
-      card.hidden = true;
-      localNote.hidden = true;
-      return;
-    }
-
-    card.hidden = false;
-    localNote.hidden = false;
-
-    $("dv-cloud-pill").textContent = c.status || "—";
-    $("dv-cloud-pill").className =
-      "pill" + (c.status === "ready" ? " ok" : (c.error ? " warn" : ""));
-    $("dv-cloud-provider").textContent = c.provider || "—";
-    $("dv-cloud-inst").textContent = c.instance_id || "—";
-    $("dv-cloud-model").textContent = c.model || "—";
-
-    const age = c.age_ms == null ? null : Math.round(c.age_ms / 1000);
-    $("dv-cloud-age").textContent =
-      age == null ? "采集中" : (age <= 1 ? "刚刚" : age + " 秒前");
-
-    const m = c.metrics || {};
-    ring($("dv-cg-ring"), m.gpu_usage);
-    ring($("dv-cv-ring"), m.gpu_memory_usage);
-    ring($("dv-cc-ring"), m.cpu_usage);
-    ring($("dv-cm-ring"), m.memory_usage);
-
-    // 副标题写清「厂商上报值」，避免与本地实时采样混淆
-    $("dv-cg-note").textContent = m.gpu_usage == null ? "无数据" : "厂商上报";
-    $("dv-cv-note").textContent = m.gpu_memory_usage == null ? "无数据" : "厂商上报";
-    $("dv-cc-note").textContent = m.cpu_usage == null ? "无数据" : "厂商上报";
-    $("dv-cm-note").textContent = m.memory_usage == null ? "无数据" : "厂商上报";
-
-    $("dv-cd-sys").textContent = m.disk_usage == null ? "—" : pctOf(m.disk_usage);
-    $("dv-cd-data").textContent = m.data_disk_usage == null ? "—" : pctOf(m.data_disk_usage);
-
-    // 状态说明：优先报错，其次解释「为什么没有数据」
-    const msg = $("dv-cloud-msg");
-    if (c.error) {
-      msg.className = "banner err";
-      msg.textContent = "云端监控查询失败：" + c.error +
-        "（下面仍显示本机资源；云端数据会继续重试）";
-    } else if (!c.supported) {
-      msg.className = "banner info";
-      msg.textContent = "服务商 " + (c.provider || "") +
-        " 未提供实例监控接口，无法显示云端使用率。";
-    } else if (!m.has_any) {
-      msg.className = "banner";
-      // 关机/刚开机时厂商确实没有数据点，这不是故障，要说清楚
-      msg.textContent = "云端暂无监控数据：实例可能已关机，或刚启动厂商数据尚未就绪" +
-        "（通常需要 1~2 分钟）。";
-    } else {
-      msg.className = "";
-      msg.textContent = "";
-    }
-  }
-
-  function spark(canvas, hist, color) {
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.clientWidth || 320;
-    const h = 52;
-    canvas.width = Math.max(1, Math.floor(w * dpr));
-    canvas.height = Math.floor(h * dpr);
-    canvas.style.height = h + "px";
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    if (hist.length < 2) return;
-
-    const step = w / (MAXP - 1);
-    const x0 = w - (hist.length - 1) * step;  // 右对齐：新点从右侧进入
-    ctx.beginPath();
-    hist.forEach((v, i) => {
-      const x = x0 + i * step;
-      const y = h - Math.max(0, Math.min(1, v)) * (h - 4) - 2;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    });
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.6;
-    ctx.lineJoin = "round";
-    ctx.stroke();
-    ctx.lineTo(x0 + (hist.length - 1) * step, h);
-    ctx.lineTo(x0, h);
-    ctx.closePath();
-    ctx.globalAlpha = 0.13;
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.globalAlpha = 1;
-  }
-
-  function redraw() {
-    spark($("dv-cpu-spark"), cpuHist, COL_CPU);
-    spark($("dv-mem-spark"), memHist, COL_MEM);
-  }
-
-  async function tick() {
-    if (Tabs.current !== "device") return;
-    let d;
-    try { d = await api("/api/sysinfo"); }
-    catch (e) {
-      // 单次失败不应中断轮询；但要让用户看到失败原因
-      console.warn("sysinfo 采样失败:", e.message);
-      $("dv-sub").textContent = "采样失败：" + e.message;
-      return;
-    }
-
-    try {
-    ring($("dv-cpu-ring"), d.cpu_usage);
-    ring($("dv-mem-ring"), d.memory_usage);
-
-    // 云端算力（仅在活跃部署跑在云端时出现）
-    renderCloud(d.cloud);
-
-    const cloudOn = !!(d.cloud && d.cloud.active);
-    $("dv-sub").textContent = cloudOn
-      ? "云端算力 · " + (d.cloud.provider || "") + " · 采样于 " + new Date().toLocaleTimeString()
-      : d.os + " / " + d.arch + " · 采样于 " + new Date().toLocaleTimeString();
-    $("dv-cpu-model").textContent = d.cpu_model || "—";
-    $("dv-cpu-core").textContent = d.physical_cores + " 物理核 / " +
-      d.logical_cores + " 逻辑核" +
-      (d.cpu_usage == null ? " · 首次采样中" : " · 占用 " + pctOf(d.cpu_usage));
-
-    const used = d.total_memory_bytes - d.available_memory_bytes;
-    $("dv-mem-used").textContent = "已用 " + gib(used) +
-      (d.memory_usage != null ? " · " + pctOf(d.memory_usage) : "");
-    $("dv-mem-total").textContent = "共 " + gib(d.total_memory_bytes);
-
-    if (d.cpu_usage != null) {
-      cpuHist.push(d.cpu_usage);
-      if (cpuHist.length > MAXP) cpuHist.shift();
-    }
-    memHist.push(d.memory_usage || 0);
-    if (memHist.length > MAXP) memHist.shift();
-    redraw();
-
-    const gpu = $("dv-gpu");
-    gpu.innerHTML = "";
-    if (!d.accelerators || !d.accelerators.length) {
-      gpu.innerHTML = '<div class="empty">未检测到独立加速卡，将以 CPU 推理</div>';
-    } else {
-      d.accelerators.forEach((a) => {
-        const r = el("div", "kv");
-        r.innerHTML = '<span class="k">' + esc(a.name) + "</span>" +
-          '<span class="v">' + gib(a.vram_bytes) + " · " + esc(a.vendor) + "</span>";
-        gpu.appendChild(r);
-      });
-    }
-
-    const dk = $("dv-disk");
-    dk.innerHTML = "";
-    if (d.disk_free_bytes == null) {
-      dk.innerHTML = '<div class="empty">无法读取磁盘信息</div>';
-    } else {
-      const r = el("div", "kv");
-      r.innerHTML = '<span class="k">模型库可用空间</span>' +
-        '<span class="v">' + gib(d.disk_free_bytes) + "</span>";
-      dk.appendChild(r);
-    }
-
-    const pr = $("dv-procs");
-    pr.innerHTML = "";
-    if (!d.deployments || !d.deployments.length) {
-      pr.innerHTML = '<div class="empty">暂无运行中的部署</div>';
-    } else {
-      const t = el("table", "t");
-      t.innerHTML = "<thead><tr><th>模型</th><th>状态</th><th>PID</th>" +
-                    "<th>内存 (RSS)</th><th>端口</th></tr></thead>";
-      const tb = el("tbody");
-      d.deployments.forEach((x) => {
-        const tr = el("tr");
-        const cls = x.status === "ready" ? "pill ok" : "pill";
-        tr.innerHTML =
-          '<td class="mono">' + esc(x.model) + "</td>" +
-          '<td><span class="' + cls + '">' + esc(x.status) + "</span></td>" +
-          '<td class="mono">' + (x.pid || "—") + "</td>" +
-          '<td class="mono">' + (x.rss_bytes ? mib(x.rss_bytes) : "—") + "</td>" +
-          '<td class="mono">' + (x.port || "—") + "</td>";
-        tb.appendChild(tr);
-      });
-      t.appendChild(tb);
-      pr.appendChild(t);
-    }
-    } catch (e) {
-      console.error("渲染设备页失败:", e);
-    }
-  }
-
-  return {
-    async mount() {
-      cpuHist = [];
-      memHist = [];
-      await tick();
-      timer = setInterval(tick, 2000);
-      window.addEventListener("resize", redraw);
-    },
-    unmount() {
-      if (timer) { clearInterval(timer); timer = null; }
-      window.removeEventListener("resize", redraw);
-    },
-  };
-})());
-
 /* ==================================================================== 设置 */
 
 Tabs.register("setting", (() => {
@@ -3065,18 +2709,12 @@ Tabs.register("setting", (() => {
     $("se-msg").textContent = "读取中…";
     try {
       const s = await api("/api/settings");
-      $("se-local-first").checked = s.scheduler.local_first;
       $("se-max-price").value =
         s.scheduler.max_price_per_hour == null ? "" : s.scheduler.max_price_per_hour;
-      $("se-launch-timeout").value = s.scheduler.launch_timeout_secs;
-      $("se-ctx").value = s.local.default_context;
-      $("se-kv").value = s.local.kv_cache;
-      $("se-batch").value = s.local.batch_size;
       $("se-engine").value = s.local.engine_path || "（自动查找 PATH）";
-      $("se-cpu-fallback").checked = s.local.allow_cpu_fallback;
-      $("se-partial").checked = s.local.allow_partial_offload;
       $("se-models-dir").value = s.storage.models_dir;
       $("se-source").value = s.storage.default_source;
+      await loadDevices();
 
       const box = $("se-providers");
       box.innerHTML = "";
@@ -3108,16 +2746,35 @@ Tabs.register("setting", (() => {
     }
   }
 
+  async function loadDevices() {
+    const box = $("se-devices");
+    try {
+      const r = await api("/api/devices");
+      box.innerHTML = "";
+      if (!r.devices.length) { box.innerHTML = '<div class="empty">暂无手动设备，部署时将自动创建云端节点</div>'; return; }
+      r.devices.forEach((d) => {
+        const row = el("div", "kv");
+        row.innerHTML = '<span class="k">' + esc(d.host) + ':' + d.port + ' · ' + esc(d.user) + '</span>' +
+          '<span class="v"><button class="danger sm">删除</button></span>';
+        row.querySelector("button").onclick = async () => { await api("/api/devices/" + encodeURIComponent(d.id), {method:"DELETE"}); await loadDevices(); };
+        box.appendChild(row);
+      });
+    } catch (e) { box.innerHTML = '<div class="empty">设备列表读取失败：' + esc(e.message) + '</div>'; }
+  }
+
+  async function addDevice() {
+    try {
+      await api("/api/devices", { method: "POST", body: JSON.stringify({
+        host: $("se-dev-host").value.trim(), port: Number($("se-dev-port").value),
+        user: $("se-dev-user").value.trim(), password: $("se-dev-password").value,
+        workdir: $("se-dev-workdir").value.trim()
+      })});
+      $("se-dev-password").value = ""; await loadDevices(); toast("设备已保存", "ok");
+    } catch (e) { toast("保存设备失败：" + e.message, "err"); }
+  }
+
   async function save() {
     const patch = {
-      scheduler: { local_first: $("se-local-first").checked },
-      local: {
-        default_context: Number($("se-ctx").value),
-        kv_cache: $("se-kv").value,
-        batch_size: Number($("se-batch").value),
-        allow_cpu_fallback: $("se-cpu-fallback").checked,
-        allow_partial_offload: $("se-partial").checked,
-      },
       storage: { default_source: $("se-source").value.trim() },
       providers: {},
     };
@@ -3144,10 +2801,8 @@ Tabs.register("setting", (() => {
       if (!mounted) {
         $("se-save").onclick = save;
         $("se-reload").onclick = load;
-        // 设备选择 / 推理引擎的交互也归设置页管（它们已从部署页迁来）
-        bindTarget();
-        bindHelp("se-target-help", "se-target-helpbox");
         bindHelp("se-engine-help", "se-engine-helpbox");
+        $("se-dev-add").onclick = addDevice;
         mounted = true;
       }
       await load();

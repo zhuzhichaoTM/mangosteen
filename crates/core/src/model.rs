@@ -362,6 +362,12 @@ pub struct ModelEntry {
     pub spec: ModelSpec,
     /// 物理位置
     pub location: ModelLocation,
+    /// 模型文件的直连下载地址。
+    ///
+    /// 云端部署要求「远端自己下载」，已下载到本地的模型也必须保留这个地址，
+    /// 否则「本地有文件 → 部署到云端」会因为拿不到 URL 被直接拒绝。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
     /// 模型来源（如 `modelscope`、`hf-mirror`、`huggingface`）。
     ///
     /// 旧台账没有该字段时保持 `None`，不根据文件名猜测来源。

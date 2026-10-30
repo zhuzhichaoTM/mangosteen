@@ -283,6 +283,36 @@ impl TunnelManager {
         //
         // 脚本要留到「隧道建成」或「明确失败」之后再删，见下面各返回路径。
 
+        // 远端端口尚未监听（设备配置阶段先建隧道、后起引擎）时，不能要求
+        // 「本地端口可连通」：`ssh -L` 是惰性转发，本地端口在引擎起来前
+        // 就已经在监听，连通性检测无法区分「隧道好」与「目标没人听」。
+        // 因此只确认 ssh 进程在观察窗内活着；真正可用性由启动阶段探 /health 判定。
+        if effective.allow_unready_remote {
+            let settle = Duration::from_millis(800);
+            let deadline = Instant::now() + connect_timeout.min(settle);
+            loop {
+                if let Some(code) = child.exit_code() {
+                    let tail = child.stderr_tail(8);
+                    self.allocator.release(local_port);
+                    if let Some(p) = &askpass {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    return Err(MnError::Network {
+                        stage: "建立 ssh 隧道".to_string(),
+                        reason: format!(
+                            "ssh 在隧道建立前退出（退出码 {code:?}）。常见原因：密码/密钥错误、\
+                             实例未就绪、安全组拦截。stderr：{}",
+                            if tail.trim().is_empty() { "（空）" } else { &tail }
+                        ),
+                    });
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
         // 等待本地端口连通
         let deadline = Instant::now() + connect_timeout;
         loop {
@@ -304,6 +334,11 @@ impl TunnelManager {
                         }
                     ),
                 });
+            }
+            // 目标端口尚未监听时（设备配置阶段），上面已确认 ssh 存活，
+            // 本地端口连通与否不具判别力，直接视为隧道就绪。
+            if effective.allow_unready_remote {
+                break;
             }
             if std::net::TcpStream::connect_timeout(
                 &([127, 0, 0, 1], local_port).into(),
@@ -509,6 +544,7 @@ mod tests {
             identity_file: None,
             forwards: vec![PortForward::loopback(0, remote_port)],
             control_master: false,
+            allow_unready_remote: false,
             password: None,
         }
     }

@@ -299,6 +299,7 @@ mod tests {
             },
             providers: BTreeMap::new(),
             model_sources: BTreeMap::new(),
+            remote_devices: Vec::new(),
         }
     }
 

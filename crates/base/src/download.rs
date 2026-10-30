@@ -1578,6 +1578,34 @@ mod tests {
     }
 
     #[test]
+    fn rank_candidates_prefers_fastest_and_keeps_failures_last() {
+        // 失败候选不能被丢弃：HEAD 被拒不代表 GET 不可用，
+        // 因此它们只排在最后，仍会作为回退尝试。
+        let measured = vec![
+            ("hf".to_string(), "slow".to_string(), Some(300.0)),
+            ("hf-mirror".to_string(), "dead".to_string(), None),
+            ("hf".to_string(), "fast".to_string(), Some(50.0)),
+        ];
+        let ranked = rank_candidates(&measured);
+        assert_eq!(ranked[0].1, "fast");
+        assert_eq!(ranked[1].1, "slow");
+        assert_eq!(ranked[2].1, "dead");
+    }
+
+    #[test]
+    fn huggingface_candidates_cover_mirror_and_official() {
+        let m = ModelRef::new("hf-mirror", "Qwen/repo", "m.gguf");
+        let c = huggingface_candidates(&m);
+        assert_eq!(c.len(), 2);
+        assert!(c
+            .iter()
+            .any(|(n, u)| n == "hf-mirror" && u.contains("hf-mirror.com")));
+        assert!(c
+            .iter()
+            .any(|(n, u)| n == "hf" && u.contains("huggingface.co")));
+    }
+
+    #[test]
     fn partial_file_not_treated_as_final() {
         // .part 后缀不能被 `.gguf` 匹配，否则登记逻辑会把残缺文件当模型
         let name = "m.gguf";

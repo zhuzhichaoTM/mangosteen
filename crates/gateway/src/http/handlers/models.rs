@@ -29,14 +29,10 @@ impl GatewayServer {
                     &r.plan.model.name,
                     r.plan.model.quant,
                 );
-                let (kind, ip) = if r.plan.origin.is_local() {
-                    ("local", None)
-                } else {
-                    (
-                        "cloud",
-                        r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone()),
-                    )
-                };
+                let (kind, ip) = (
+                    "cloud",
+                    r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone()),
+                );
                 live.insert(id, (kind, ip));
             }
         }
@@ -58,30 +54,23 @@ impl GatewayServer {
                     }
                 };
 
-                // 能否部署：只做**本地计算**（资源是否够），不探测引擎、
-                // 不查云端库存。原因是这里要列表展示，必须毫秒级返回。
-                //
-                // 文件不存在就明确不可部署——让用户看到灰色的「部署」而不是
-                // 点了才失败。真正的可行性评估仍在点「部署」时做（含引擎与
-                // 云端费用），这里只负责把明显不能部署的置灰。
+                // 纯云端部署：能否部署取决于「是否有远端节点可用」
+                // （已配置云服务商或已保存的远程设备）。这里只做读配置的
+                // 毫秒级判断，真正的账号/库存可行性在点击「部署」时再确认。
                 let (deployable, reason) = if !exists {
                     (false, Some("模型文件不存在或已被删除".to_string()))
                 } else {
-                    let dreq = mangosteen_orchestration::assess::DeploymentRequest::for_model(
-                        m.id.clone(),
-                    );
-                    match gw.evaluate(&dreq) {
-                        Ok(ev) => {
-                            if ev.is_local_viable() {
-                                (true, None)
-                            } else {
-                                (
-                                    false,
-                                    Some("本地资源不足（点「部署」可查看云端方案）".to_string()),
-                                )
-                            }
-                        }
-                        Err(e) => (false, Some(e.to_string())),
+                    let cloud_available = !gw.config().providers.is_empty()
+                        || !gw.config().remote_devices.is_empty();
+                    if cloud_available {
+                        (true, None)
+                    } else {
+                        (
+                            false,
+                            Some(
+                                "未配置云服务商或远程设备，无法部署到远端节点".to_string(),
+                            ),
+                        )
                     }
                 };
 

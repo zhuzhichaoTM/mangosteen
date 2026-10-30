@@ -134,6 +134,12 @@ pub struct ScoredCandidate {
     pub score_hardware: f64,
     /// 加权总分
     pub score_total: f64,
+    /// 档位标记（`minimal` / `balanced` / `performance` / 空）。
+    ///
+    /// 由编排层的三档候选生成逻辑填写；普通打分结果为 `None`。
+    /// 用字符串而不是枚举，是为了让 CLI 与 UI 都能原样透传。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 impl ScoredCandidate {
@@ -464,6 +470,7 @@ impl NodeSelector {
                     score_availability: s_avail,
                     score_hardware: s_hw,
                     score_total: total,
+                    tier: None,
                 }
             })
             .collect();

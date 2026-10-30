@@ -296,7 +296,7 @@ mod tests {
     use super::*;
     use mangosteen_core::estimate::{AssessRequest, Assessment, KvCacheType, Placement};
     use mangosteen_core::model::{ModelSpec, Quantization};
-    use mangosteen_core::plan::{ComputeOrigin, LocalPlan};
+    use mangosteen_core::plan::ComputeOrigin;
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mn-state-{tag}-{}", std::process::id()));
@@ -335,12 +335,13 @@ mod tests {
             host_budget_bytes: 48 << 30,
             warnings: vec![],
         };
-        let local = LocalPlan::from_assessment(&spec, "/m/q.gguf", &assessment, 11435);
         DeploymentPlan {
             id: id.to_string(),
             model: spec,
-            origin: ComputeOrigin::Local,
-            local: Some(local),
+            origin: ComputeOrigin::Cloud {
+                provider: "test-provider".to_string(),
+                instance_id: "test-instance".to_string(),
+            },
             cloud: None,
             assessment,
             created_at: 1_700_000_000,
@@ -513,8 +514,6 @@ mod tests {
         s.upsert(DeploymentRecord::from_plan(plan.clone())).unwrap();
         let back = s.get("d1").unwrap().unwrap();
         assert_eq!(back.plan, plan);
-        // 方案仍满足本地优先原则
-        assert!(back.plan.respects_local_first());
         std::fs::remove_dir_all(&d).ok();
     }
 

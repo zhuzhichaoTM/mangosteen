@@ -451,8 +451,9 @@ impl SshTarget {
         let escaped = pw.replace('\'', r#"'\''"#);
         std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{escaped}'\n"))
             .map_err(|e| MnError::io(format!("写入 askpass 脚本 {}", path.display()), &e))?;
-        // 权限收敛统一走平台层（Windows 无 POSIX 权限位，那里是无操作）
-        let _ = mangosteen_platform::fs::set_private_permissions(&path);
+        // askpass 是由 ssh 直接 exec 的脚本，必须有执行位（0700）；
+        // 普通 secret/config 文件才使用 0600。平台层按文件名区分。
+        mangosteen_platform::fs::set_private_permissions(&path)?;
         Ok(Some(path))
     }
 
@@ -614,6 +615,19 @@ pub fn ensure_llama_server(
     Ok(path)
 }
 
+/// 与 [`ensure_llama_server`] 相同，预留下载阶段进度回调。
+///
+/// 引擎预编译包通常较小；当前回调只保证契约存在，具体下载进度由远端模型
+/// 权重下载流程上报。
+pub fn ensure_llama_server_with_progress(
+    target: &SshTarget,
+    workdir: &str,
+    download_url: &str,
+    _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+) -> MnResult<String> {
+    ensure_llama_server(target, workdir, download_url)
+}
+
 /// 在远端后台启动 `llama-server`。
 ///
 /// ## 为什么要 `setsid` + `nohup`
@@ -647,6 +661,17 @@ pub fn start_llama_server(
     );
     ssh_exec(target, &script, 120)?;
     Ok(())
+}
+
+/// 与 [`start_llama_server`] 相同，预留启动阶段进度回调。
+pub fn start_llama_server_with_progress(
+    target: &SshTarget,
+    bin: &str,
+    args: &[String],
+    workdir: &str,
+    _on_progress: Option<&(dyn Fn(&str) + Send + Sync)>,
+) -> MnResult<()> {
+    start_llama_server(target, bin, args, workdir)
 }
 
 /// 给 shell 参数加单引号（模型路径里可能有空格）。
@@ -754,6 +779,20 @@ pub fn download_model_remote(
     dest: &str,
     expected_bytes: Option<u64>,
 ) -> MnResult<u64> {
+    download_model_remote_with_progress(target, url, dest, expected_bytes, None)
+}
+
+/// 带进度回调的远端下载。
+///
+/// 回调参数为已下载字节与期望总字节；只在上报点调用，不做格式化——
+/// 进度如何展示由调用方决定。
+pub fn download_model_remote_with_progress(
+    target: &SshTarget,
+    url: &str,
+    dest: &str,
+    expected_bytes: Option<u64>,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+) -> MnResult<u64> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(MnError::Network {
             stage: "云端下载模型".to_string(),
@@ -781,6 +820,9 @@ pub fn download_model_remote(
     loop {
         std::thread::sleep(std::time::Duration::from_secs(5));
         let size = remote_file_size(target, dest)?;
+        if let Some(cb) = on_progress {
+            cb(size, expected_bytes);
+        }
         if let Some(exp) = expected_bytes {
             if exp > 0 && size == exp {
                 return Ok(size);

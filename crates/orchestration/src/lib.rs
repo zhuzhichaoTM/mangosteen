@@ -36,11 +36,11 @@ pub mod scheduler;
 pub use assess::{Assessor, ComputeTarget, DeploymentRequest, Evaluated, ModelDownloadSpec};
 pub use backend::BackendTarget;
 pub use deployment::{
-    CloudCandidateBrief, CloudPreview, DeploymentPreview, LocalPreview, PreparedDeployment,
-    PreparedLocal,
+    CloudCandidateBrief, CloudPreview, DeploymentPreview, DeviceBrief, DeviceTarget,
+    PreparedCloud, PreparedDeployment,
 };
 pub use orchestrator::{
     scheduler_config_with_overrides, ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot,
     GatewayStatus, Orchestrator,
 };
-pub use scheduler::{Decision, LocalLaunchOutcome, Scheduler, SchedulerOutcome};
+pub use scheduler::{Decision, Scheduler, SchedulerOutcome};

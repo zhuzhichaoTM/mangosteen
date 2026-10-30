@@ -24,11 +24,12 @@ pub struct EngineLaunchConfig {
 }
 
 /// 算力来源。调度决策器的核心输出，也是一切审计日志的分组维度。
+///
+/// Mangosteen 只把模型部署到远端 GPU 节点（云端实例 + 已保存 SSH 设备），
+/// 本地推理交由 Ollama 承担，因此这里只有 `Cloud` 一种来源。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ComputeOrigin {
-    /// 本地算力链路（llama.cpp 直跑在本机）
-    Local,
     /// 云端算力链路。携服务商与实例标识，供 UI 展示但不影响上层调用方式。
     Cloud {
         provider: String,
@@ -37,15 +38,9 @@ pub enum ComputeOrigin {
 }
 
 impl ComputeOrigin {
-    /// 是否为本地来源。
-    pub fn is_local(&self) -> bool {
-        matches!(self, ComputeOrigin::Local)
-    }
-
     /// 展示名。
     pub fn label(&self) -> String {
         match self {
-            ComputeOrigin::Local => "本地算力".to_string(),
             ComputeOrigin::Cloud { provider, .. } => format!("云端算力 · {provider}"),
         }
     }
@@ -207,6 +202,21 @@ pub struct CloudPlan {
     /// 猜测地址。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_ip: Option<String>,
+    /// 用户选定的规格 ID（`None` 表示自动选点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_spec_id: Option<String>,
+    /// 节点 SSH 端口（登录信息展示用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ssh_port: Option<u16>,
+    /// 节点 SSH 用户（通常 `root`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_ssh_user: Option<String>,
+    /// 部署在**用户自建设备**上时的设备 ID（设置页「设备列表」）。
+    ///
+    /// 有值时这台机器**不是我们创建的**：停止部署只能停远端推理进程，
+    /// 绝不能关机或销毁——那会影响用户的其它用途。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 // 云端运行参数由引擎插件生成；CloudPlan 只保留节点配置数据。
@@ -220,10 +230,6 @@ pub struct DeploymentPlan {
     pub model: ModelSpec,
     /// 算力来源
     pub origin: ComputeOrigin,
-    /// 本地参数（本地部署时必填；云端部署时为 `None`，
-    /// 云端参数见 `cloud.engine`，两者语义一致但端口/绑定不同）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub local: Option<LocalPlan>,
     /// 云端参数
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<CloudPlan>,
@@ -245,26 +251,11 @@ impl DeploymentPlan {
 
     /// 本机可访问的推理端口。
     ///
-    /// * 本地部署：直接用 `local.port`
-    /// * 云端部署：用隧道映射后的 `cloud.local_port`
+    /// 云端部署走隧道映射后的 `cloud.local_port`。
     pub fn local_access_port(&self) -> Option<u16> {
-        match (&self.origin, &self.local, &self.cloud) {
-            (ComputeOrigin::Local, Some(l), _) => Some(l.port),
-            (ComputeOrigin::Cloud { .. }, _, Some(c)) => Some(c.local_port),
+        match (&self.origin, &self.cloud) {
+            (ComputeOrigin::Cloud { .. }, Some(c)) => Some(c.local_port),
             _ => None,
-        }
-    }
-
-    /// 该方案是否为「本地优先」的正常路径。
-    ///
-    /// 用于断言调度决策器未违反核心约束（在运维自检与单测中使用）。
-    pub fn respects_local_first(&self) -> bool {
-        match &self.origin {
-            ComputeOrigin::Local => true,
-            ComputeOrigin::Cloud { .. } => {
-                // 云端方案必须带有降级原因，否则说明未经本地尝试
-                !self.fallback_trail.is_empty()
-            }
         }
     }
 }
@@ -357,6 +348,10 @@ mod tests {
             download_bytes: None,
             remote_model: None,
             node_ip: None,
+            requested_spec_id: None,
+            node_ssh_port: None,
+            node_ssh_user: None,
+            device_id: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -377,7 +372,6 @@ mod tests {
 
     #[test]
     fn origin_labels() {
-        assert_eq!(ComputeOrigin::Local.label(), "本地算力");
         assert_eq!(
             ComputeOrigin::Cloud {
                 provider: "autodl".into(),
@@ -394,24 +388,15 @@ mod tests {
         let a = crate::estimate::assess(&s, &hw(24), &AssessRequest::default().with_context(4096));
         let local = LocalPlan::from_assessment(&s, "/m.gguf", &a, 11435);
 
-        let lp = DeploymentPlan {
-            id: "d1".into(),
-            model: s.clone(),
-            origin: ComputeOrigin::Local,
-            local: Some(local.clone()),
-            cloud: None,
-            assessment: a.clone(),
-            created_at: 0,
-            fallback_trail: vec![],
-        };
-        assert_eq!(lp.local_access_port(), Some(11435));
-        assert!(lp.respects_local_first());
-
         let cp = CloudPlan {
             download_url: None,
             download_bytes: None,
             remote_model: None,
             node_ip: None,
+            requested_spec_id: None,
+            node_ssh_port: None,
+            node_ssh_user: None,
+            device_id: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -433,35 +418,12 @@ mod tests {
                 provider: "autodl".into(),
                 instance_id: "i-9".into(),
             },
-            local: None,
             cloud: Some(cp),
             assessment: a,
             created_at: 0,
             fallback_trail: vec!["local:insufficient_vram".into()],
         };
         assert_eq!(cloud_plan.local_access_port(), Some(12000));
-        // 带降级原因 → 合规
-        assert!(cloud_plan.respects_local_first());
-    }
-
-    #[test]
-    fn cloud_plan_without_trail_violates_local_first() {
-        let s = spec();
-        let a = crate::estimate::assess(&s, &hw(24), &AssessRequest::default().with_context(4096));
-        let p = DeploymentPlan {
-            id: "d".into(),
-            model: s,
-            origin: ComputeOrigin::Cloud {
-                provider: "x".into(),
-                instance_id: "y".into(),
-            },
-            local: None,
-            cloud: None,
-            assessment: a,
-            created_at: 0,
-            fallback_trail: vec![],
-        };
-        assert!(!p.respects_local_first());
     }
 
     #[test]
@@ -477,9 +439,33 @@ mod tests {
         let plan = DeploymentPlan {
             id: "rt".into(),
             model: s.clone(),
-            origin: ComputeOrigin::Local,
-            local: Some(LocalPlan::from_assessment(&s, "/m.gguf", &a, 11435)),
-            cloud: None,
+            origin: ComputeOrigin::Cloud {
+                provider: "autodl".into(),
+                instance_id: "i-9".into(),
+            },
+            cloud: Some(CloudPlan {
+                download_url: None,
+                download_bytes: None,
+                remote_model: None,
+                node_ip: None,
+                requested_spec_id: None,
+                node_ssh_port: None,
+                node_ssh_user: None,
+                device_id: None,
+                provider: "autodl".into(),
+                gpu_model: "RTX 4090".into(),
+                gpu_count: 1,
+                vram_bytes_per_gpu: 24 << 30,
+                cpu_cores: 16,
+                memory_bytes: 60 << 30,
+                disk_bytes: 50 << 30,
+                image: "ubuntu22-cuda12".into(),
+                model_path: "/m.gguf".into(),
+                engine_port: 8080,
+                local_port: 12000,
+                engine: LocalPlan::from_assessment(&s, "/m.gguf", &a, 11435),
+                max_price_per_hour: None,
+            }),
             assessment: a,
             created_at: 1_700_000_000,
             fallback_trail: vec![],
