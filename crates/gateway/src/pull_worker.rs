@@ -67,8 +67,9 @@ pub type AbortHook =
     Arc<dyn Fn(Option<&str>, Option<&std::path::Path>) -> MnResult<()> + Send + Sync>;
 
 /// `(prepare, commit_cloud, abort)` 之外的上层装配入口，供 handlers 构造钩子时复用。
+pub type CancelHook = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type PrepareHook =
-    Arc<dyn Fn() -> MnResult<mangosteen_orchestration::PreparedDeployment> + Send + Sync>;
+    Arc<dyn Fn(CancelHook) -> MnResult<mangosteen_orchestration::PreparedDeployment> + Send + Sync>;
 
 /// 云端提交钩子：已准备好的节点 → 部署 ID（启动引擎并探活）。
 pub type CommitCloudHook =
@@ -145,22 +146,53 @@ pub fn spawn(
             if let Some(hooks) = deploy.as_ref() {
                 // 准备阶段开始前先看一次：用户可能在请求返回后就点了停止
                 if jobs.is_cancelled(&job_id) {
-                    (hooks.abort)(None, None).ok();
-                    jobs.set_note(&job_id, "已取消，未产生任何部署资源".to_string());
+                    let rollback = (hooks.abort)(None, None);
+                    jobs.set_note(
+                        &job_id,
+                        match rollback {
+                            Ok(()) => "已取消，未产生任何部署资源".to_string(),
+                            Err(e) => format!("已取消，但资源回滚失败，请检查实例与隧道：{e}"),
+                        },
+                    );
                     return;
                 }
-                match (hooks.prepare)() {
+                let cancel_check: CancelHook = {
+                    let jobs = jobs.clone();
+                    let id = job_id.clone();
+                    Arc::new(move || jobs.is_cancelled(&id))
+                };
+                match (hooks.prepare)(cancel_check) {
                     Ok(mangosteen_orchestration::PreparedDeployment::Cloud(p)) => {
+                        // prepare 可能包含节点创建、SSH 配置和远端下载；
+                        // 用户可在这段时间取消。必须在提交启动前再次检查，
+                        // 否则取消后仍会拉起引擎并留下计费实例。
+                        if jobs.is_cancelled(&job_id) {
+                            let rollback = (hooks.abort)(None, None);
+                            jobs.set_note(
+                                &job_id,
+                                match rollback {
+                                    Ok(()) => "已取消，节点、隧道和远端部署资源已回滚".to_string(),
+                                    Err(e) => {
+                                        format!("已取消，但资源回滚失败，请检查实例与隧道：{e}")
+                                    }
+                                },
+                            );
+                            return;
+                        }
                         // 云端路径：设备配置已完成（实例/隧道/权重）。
                         // 不需要本地下载，也没有本地文件可登记；
                         // 直接进入「启动模型」阶段。
                         match (hooks.commit_cloud)(*p) {
                             Ok(dep_id) => jobs.set_deployment(&job_id, Some(&dep_id), None),
-                            Err(e) => jobs.set_deployment(
-                                &job_id,
-                                None,
-                                Some(format!("节点已就绪，但启动推理引擎失败：{e}")),
-                            ),
+                            Err(e) => {
+                                // 启动失败必须终结任务状态：只改 deploy_state
+                                // 会让 job.state 永远停在 running，UI 轮询不停、
+                                // 「停止」按钮也一直亮着。阶段指针保持停留在
+                                // 故障发生的那一步，不自动跳转。
+                                let why = format!("节点已就绪，但启动推理引擎失败：{e}");
+                                jobs.mark_failed(&job_id, why.clone());
+                                jobs.set_deployment(&job_id, None, Some(why));
+                            }
                         }
                         return;
                     }
@@ -230,10 +262,16 @@ pub fn spawn(
                             // 只可能是纯下载任务（无本地部署计划可回滚）。
                             let dep_id: Option<String> = None;
                             // 这个文件是本次刚下完的，属于「本次部署产生的资源」
-                            (hooks.abort)(dep_id.as_deref(), Some(abort_file.as_path())).ok();
+                            let rollback =
+                                (hooks.abort)(dep_id.as_deref(), Some(abort_file.as_path()));
                             jobs.set_note(
                                 &job_id,
-                                "已取消，已删除本次下载的文件与部署记录".to_string(),
+                                match rollback {
+                                    Ok(()) => "已取消，已删除本次下载的文件与部署记录".to_string(),
+                                    Err(e) => {
+                                        format!("已取消，但资源回滚失败，请检查实例与隧道：{e}")
+                                    }
+                                },
                             );
                             return;
                         }
@@ -310,12 +348,23 @@ pub fn spawn(
                     if e.is_cancelled() {
                         if let Some(hooks) = deploy.as_ref() {
                             let dep_id: Option<String> = None;
-                            (hooks.abort)(dep_id.as_deref(), Some(abort_file.as_path())).ok();
+                            let rollback =
+                                (hooks.abort)(dep_id.as_deref(), Some(abort_file.as_path()));
+                            jobs.set_note(
+                                &job_id,
+                                match rollback {
+                                    Ok(()) => "已停止部署，下载残留与部署记录均已清理".to_string(),
+                                    Err(e) => {
+                                        format!("已停止部署，但资源回滚失败，请检查实例与隧道：{e}")
+                                    }
+                                },
+                            );
+                        } else {
+                            jobs.set_note(
+                                &job_id,
+                                "已停止下载任务，下载残留保留以便续传".to_string(),
+                            );
                         }
-                        jobs.set_note(
-                            &job_id,
-                            "已停止部署，下载残留与部署记录均已清理".to_string(),
-                        );
                         return;
                     }
 
@@ -330,7 +379,7 @@ pub fn spawn(
                     // 保留 `.part` 是为了下次续传。
                     if let Some(hooks) = deploy.as_ref() {
                         let dep_id: Option<String> = None;
-                        (hooks.abort)(dep_id.as_deref(), None).ok();
+                        let _ = (hooks.abort)(dep_id.as_deref(), None);
                     }
                     if tracked {
                         jobs.set_stage(

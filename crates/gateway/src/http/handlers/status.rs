@@ -28,7 +28,7 @@ impl GatewayServer {
             Ok(g) => g,
             Err(_) => return Response::text(500, "网关状态锁中毒"),
         };
-        let entries: Vec<(String, String)> = match gw.models().list() {
+        let mut entries: Vec<(String, String)> = match gw.models().list() {
             Ok(list) => list
                 .into_iter()
                 .map(|m| {
@@ -42,6 +42,18 @@ impl GatewayServer {
                 .collect(),
             Err(e) => return Response::error(&e),
         };
+        // 手动接入的远端推理服务没有本地模型台账记录，仍必须出现在
+        // OpenAI /v1/models 中，否则 UI 会认为没有可对话模型。
+        let cfg = gw.config();
+        let mut remotes = cfg.remote_inferences.clone();
+        if let Some(remote) = cfg.remote_inference.clone() {
+            remotes.push(remote);
+        }
+        for remote in remotes {
+            if !entries.iter().any(|(id, _)| id == &remote.model_id) {
+                entries.push((remote.model_id, "cloud".to_string()));
+            }
+        }
         let l = protocol::build_model_list(&entries, mangosteen_core::time::now_unix());
         Response::json(200, &l)
     }
@@ -52,28 +64,57 @@ impl GatewayServer {
         };
         match gw.status() {
             Ok(s) => {
+                let mut active: Vec<serde_json::Value> = s.active.iter().map(|a| serde_json::json!({
+                    "id": a.id,
+                    "model": a.model,
+                    "origin": a.origin.label(),
+                    "origin_kind": "cloud",
+                    "node_ip": match &a.origin {
+                        mangosteen_core::plan::ComputeOrigin::Cloud { .. } => gw
+                            .get_deployment(&a.id)
+                            .ok()
+                            .flatten()
+                            .and_then(|r| r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone())),
+                    },
+                    "remote_port": match &a.origin {
+                        mangosteen_core::plan::ComputeOrigin::Cloud { .. } => gw
+                            .get_deployment(&a.id)
+                            .ok()
+                            .flatten()
+                            .and_then(|r| r.plan.cloud.as_ref().map(|c| c.engine_port)),
+                    },
+                    "status": a.status.as_str(),
+                    "port": a.port,
+                    "ready": a.ready,
+                })).collect();
+                let mut remotes = gw.config().remote_inferences.clone();
+                if let Some(remote) = gw.config().remote_inference.clone() {
+                    remotes.push(remote);
+                }
+                for remote in remotes {
+                    if !active.iter().any(|item| {
+                        item.get("model").and_then(|v| v.as_str()) == Some(remote.model_id.as_str())
+                    }) {
+                        active.push(serde_json::json!({
+                            "id": format!("remote-{}", remote.model_id),
+                            "model": remote.model_id,
+                            "origin": "远端推理服务",
+                            "origin_kind": "cloud",
+                            "node_ip": remote.host,
+                            "remote_port": remote.remote_port,
+                            "status": "ready",
+                            "port": serde_json::Value::Null,
+                            "ready": true,
+                        }));
+                    }
+                }
                 let payload = serde_json::json!({
                     "version": s.version,
                     "hardware": s.hardware,
                     "providers": s.providers,
                     "engine_path": s.engine_path.map(|p| p.display().to_string()),
                     "engine_version": s.engine_version,
-                    "active": s.active.iter().map(|a| serde_json::json!({
-                        "id": a.id,
-                        "model": a.model,
-                        "origin": a.origin.label(),
-                        "origin_kind": "cloud",
-                        "node_ip": match &a.origin {
-                            mangosteen_core::plan::ComputeOrigin::Cloud { .. } => gw
-                                .get_deployment(&a.id)
-                                .ok()
-                                .flatten()
-                                .and_then(|r| r.plan.cloud.and_then(|c| c.node_ip)),
-                        },
-                        "status": a.status.as_str(),
-                        "port": a.port,
-                        "ready": a.ready,
-                    })).collect::<Vec<_>>(),
+                    "active": active,
                 });
                 Response::json(200, &payload)
             }

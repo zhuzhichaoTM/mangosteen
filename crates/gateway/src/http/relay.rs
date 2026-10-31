@@ -77,13 +77,7 @@ impl GatewayServer {
         let model = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
             .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(String::from));
-        let target = {
-            let mut gw = self
-                .gateway
-                .lock()
-                .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
-            gw.active_backend_for(model.as_deref())?
-        };
+        let target = self.backend_for_model(model.as_deref())?;
         let url = target.url_for(&req.path);
 
         // ---- 拉起 curl ----

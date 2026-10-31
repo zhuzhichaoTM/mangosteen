@@ -19,6 +19,7 @@ impl GatewayServer {
             .iter()
             .map(|d| serde_json::json!({
                 "id": d.id,
+                "name": d.name,
                 "host": d.host,
                 "port": d.port,
                 "user": d.user,
@@ -32,7 +33,12 @@ impl GatewayServer {
     pub(crate) fn add_device(&self, req: &ParsedRequest) -> Response {
         let body: serde_json::Value = match serde_json::from_str(&req.body_str()) {
             Ok(v) => v,
-            Err(e) => return Response::json(400, &ErrorResponse::bad_request(format!("请求体不是合法 JSON：{e}"), None)),
+            Err(e) => {
+                return Response::json(
+                    400,
+                    &ErrorResponse::bad_request(format!("请求体不是合法 JSON：{e}"), None),
+                )
+            }
         };
         let mut body = body;
         let password = body
@@ -41,7 +47,12 @@ impl GatewayServer {
             .and_then(|v| v.as_str().map(str::to_string));
         let mut device: mangosteen_core::config::RemoteDevice = match serde_json::from_value(body) {
             Ok(v) => v,
-            Err(e) => return Response::json(400, &ErrorResponse::bad_request(format!("设备参数无效：{e}"), None)),
+            Err(e) => {
+                return Response::json(
+                    400,
+                    &ErrorResponse::bad_request(format!("设备参数无效：{e}"), None),
+                )
+            }
         };
         if let Some(password) = password.filter(|v| !v.is_empty()) {
             device.password = mangosteen_core::config::SecretRef::Inline(password);
@@ -57,7 +68,10 @@ impl GatewayServer {
             Err(e) => return Response::error(&e),
         };
         let (mut cfg, store) = {
-            let gw = match self.gateway.lock() { Ok(g) => g, Err(_) => return Response::text(500, "网关状态锁中毒") };
+            let gw = match self.gateway.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::text(500, "网关状态锁中毒"),
+            };
             (gw.config().clone(), gw.config_store())
         };
         if let Some(slot) = cfg.remote_devices.iter_mut().find(|d| d.id == device.id) {
@@ -65,28 +79,76 @@ impl GatewayServer {
         } else {
             cfg.remote_devices.push(device.clone());
         }
-        if let Err(e) = cfg.validate() { return Response::error(&e); }
+        if let Err(e) = cfg.validate() {
+            return Response::error(&e);
+        }
         match store.save(&cfg) {
             Ok(path) => {
-                if let Ok(mut gw) = self.gateway.lock() { gw.replace_config(cfg); }
-                Response::json(200, &serde_json::json!({ "ok": true, "id": device.id, "host": device.host, "port": device.port, "user": device.user, "path": path.display().to_string() }))
+                if let Ok(mut gw) = self.gateway.lock() {
+                    gw.replace_config(cfg);
+                }
+                Response::json(
+                    200,
+                    &serde_json::json!({ "ok": true, "id": device.id, "host": device.host, "port": device.port, "user": device.user, "path": path.display().to_string() }),
+                )
             }
             Err(e) => Response::error(&e),
         }
     }
 
+    pub(crate) fn test_device(&self, id: &str) -> Response {
+        let id = percent_decode_path(id);
+        let device = {
+            let gw = match self.gateway.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::text(500, "网关状态锁中毒"),
+            };
+            gw.config()
+                .remote_devices
+                .iter()
+                .find(|d| d.id == id)
+                .cloned()
+        };
+        let Some(device) = device else {
+            return Response::json(404, &ErrorResponse::bad_request("设备不存在", Some("id")));
+        };
+        let target =
+            mangosteen_orchestration::DeviceTarget::from_config(&device, "/root/mangosteen");
+        match mangosteen_device::remote::ssh_exec(&target.ssh, "true", 30) {
+            Ok(_) => Response::json(
+                200,
+                &serde_json::json!({
+                    "ok": true,
+                    "message": format!("节点 {} 连接成功", device.name)
+                }),
+            ),
+            Err(e) => Response::error(&e),
+        }
+    }
     pub(crate) fn remove_device(&self, id: &str) -> Response {
         let id = percent_decode_path(id);
         let (mut cfg, store) = {
-            let gw = match self.gateway.lock() { Ok(g) => g, Err(_) => return Response::text(500, "网关状态锁中毒") };
+            let gw = match self.gateway.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::text(500, "网关状态锁中毒"),
+            };
             (gw.config().clone(), gw.config_store())
         };
         let before = cfg.remote_devices.len();
         cfg.remote_devices.retain(|d| d.id != id);
-        if before == cfg.remote_devices.len() { return Response::json(404, &ErrorResponse::bad_request("设备不存在", Some("id"))); }
-        if let Err(e) = cfg.validate() { return Response::error(&e); }
+        if before == cfg.remote_devices.len() {
+            return Response::json(404, &ErrorResponse::bad_request("设备不存在", Some("id")));
+        }
+        if let Err(e) = cfg.validate() {
+            return Response::error(&e);
+        }
         match store.save(&cfg) {
-            Ok(_) => { if let Ok(mut gw) = self.gateway.lock() { gw.replace_config(cfg); } Response::json(200, &serde_json::json!({"ok": true, "id": id})) }
+            Ok(_) => {
+                if let Ok(mut gw) = self.gateway.lock() {
+                    gw.replace_config(cfg);
+                }
+                Response::json(200, &serde_json::json!({"ok": true, "id": id}))
+            }
             Err(e) => Response::error(&e),
         }
     }
@@ -172,6 +234,7 @@ impl GatewayServer {
                 },
                 "providers": providers,
                 "model_sources": cfg.model_sources.keys().collect::<Vec<_>>(),
+                "model_whitelist": cfg.model_whitelist.iter().map(|(id, m)| serde_json::json!({"id": id, "display_name": m.display_name, "source_spec": m.source_spec, "template": m.template})).collect::<Vec<_>>(),
             }),
         )
     }

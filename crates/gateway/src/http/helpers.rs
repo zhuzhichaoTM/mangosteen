@@ -3,15 +3,6 @@
 //! 归属：**第二层 · API Server**。这些函数只做数据整形（任务状态 JSON、
 //! 查询串布尔标记、错误摘要），不触发任何部署或推理动作。
 
-/// 评估结果的单行摘要（含资源占用明细）。
-///
-/// 与 `gateway::assessed_detail` 同样的信息，但在 server 侧构造——
-/// 那边是 `pub(crate)` 之外的私有函数，且这里要用在**持有任务表锁**的
-/// 闭包里（不能再进网关锁拿数据）。
-pub(crate) fn probe_assessed_detail(ev: &mangosteen_orchestration::assess::Evaluated) -> String {
-    mangosteen_orchestration::deployment::assessed_detail(ev)
-}
-
 /// 从模型引用推一个人类可读的名字（用于粗估兜底）。
 ///
 /// 去掉 `.gguf` 后缀与量化尾缀，得到如 `qwen2.5-0.5b-instruct`。

@@ -30,9 +30,11 @@ pub fn llama_cpp_args(plan: &LocalPlan, bind_host: &str, port: u16) -> Vec<Strin
     if plan.flash_attention {
         args.push("--flash-attn".to_string());
     }
-    if plan.use_mmap {
-        args.push("--mmap".to_string());
-    }
+    // llama-server 当前版本默认启用 mmap，且部分远端发行包已经移除了
+    // 显式 `--mmap` 参数。不能把通用计划字段直接翻译成该参数，
+    // 否则服务会在加载模型前报 `invalid argument: --mmap`。
+    // `use_mmap=false` 也不追加 `--no-mmap`：不同版本的参数名不一致，
+    // 由运行时默认行为处理，避免因兼容性参数导致启动失败。
     if plan.use_mlock {
         args.push("--mlock".to_string());
     }

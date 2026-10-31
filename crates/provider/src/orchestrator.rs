@@ -577,6 +577,7 @@ impl CloudOrchestrator {
                 .ssh_password
                 .clone()
                 .or_else(|| self.config.ssh_password.clone()),
+            identity_file: None,
         })
     }
 
@@ -762,6 +763,97 @@ impl CloudOrchestrator {
 /// `Permission denied`，而错误信息看起来像「网络不通」。厂商已经下发了
 /// 密码就不用再设——AutoDL 直接给 `root_password`，再调一次「重置密码」
 /// 反而会把密码改成一个我们并不知道的值。
+fn vendor_password_target(
+    instance: &Instance,
+    config: &OrchestratorConfig,
+) -> MnResult<mangosteen_device::remote::SshTarget> {
+    let host = instance
+        .network
+        .ssh_host
+        .clone()
+        .ok_or_else(|| MnError::Network {
+            stage: "读取 SSH 信息".to_string(),
+            reason: format!(
+                "服务商 {} 未返回实例 {} 的 SSH 地址",
+                instance.provider, instance.id
+            ),
+        })?;
+    let port = instance.network.ssh_port.unwrap_or(22);
+    let password = config
+        .ssh_password
+        .clone()
+        .or_else(|| instance.network.ssh_password.clone());
+    if password.is_none() {
+        return Err(MnError::Network {
+            stage: "读取 SSH 信息".to_string(),
+            reason: "节点已运行但未返回可用 SSH 密码".to_string(),
+        });
+    }
+    Ok(mangosteen_device::remote::SshTarget {
+        host,
+        port,
+        user: "root".to_string(),
+        password,
+        identity_file: None,
+    })
+}
+
+/// 为用户自定义节点配置 SSH 免密登录。
+///
+/// 与云厂商节点不同：这里绝不调用密码重置接口，只使用用户保存的
+/// 原始密码完成首次 `ssh-copy-id`，随后切换到本机密钥登录。这样既
+/// 保留用户节点密码不变，又让节点配置、模型下载、隧道和启动阶段
+/// 统一使用免密 SSH。
+pub fn configure_existing_ssh_access(
+    target: &mangosteen_device::remote::SshTarget,
+) -> MnResult<mangosteen_device::remote::SshTarget> {
+    if target.password.is_none() {
+        return Err(MnError::Network {
+            stage: "节点配置环境 / SSH 免密登录".to_string(),
+            reason: "自定义节点未提供登录密码，无法安装 SSH 公钥".to_string(),
+        });
+    }
+
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        match mangosteen_device::remote::install_ssh_copy_id(target) {
+            Ok(identity_file) => {
+                let key_target = mangosteen_device::remote::SshTarget {
+                    host: target.host.clone(),
+                    port: target.port,
+                    user: target.user.clone(),
+                    password: None,
+                    identity_file: Some(identity_file),
+                };
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match mangosteen_device::remote::ssh_exec(&key_target, "true", 5) {
+                        Ok(_) => return Ok(key_target),
+                        Err(_e) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        Err(e) => {
+                            last_error = format!("第 {attempt} 次密钥确认失败：{e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = format!("第 {attempt} 次 ssh-copy-id 失败：{e}");
+            }
+        }
+        if attempt < 3 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    Err(MnError::Network {
+        stage: "节点配置环境 / SSH 免密登录".to_string(),
+        reason: format!("连续 3 次未能确认自定义节点 SSH 公钥登录成功：{last_error}"),
+    })
+}
+
 fn vendor_ssh_target(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
     instance: &Instance,
@@ -779,26 +871,67 @@ fn vendor_ssh_target(
             ),
         })?;
     let port = instance.network.ssh_port.unwrap_or(22);
-    let password = instance
-        .network
+    // 本次重置使用的密码必须与 ssh-copy-id/SSH 探测使用的密码完全一致。
+    // 配置密码优先；只有未配置重置密码时才使用厂商下发密码。
+    let password = config
         .ssh_password
         .clone()
-        .or_else(|| config.ssh_password.clone());
+        .or_else(|| instance.network.ssh_password.clone());
 
-    if instance.network.ssh_password.is_none() {
-        if let Some(pw) = config.ssh_password.as_deref() {
-            driver.reset_root_password(&instance.id, pw)?;
-            // 厂商改密码是异步下发到实例内的，sshd 生效有延迟。
-            // 等端口能连上再建隧道，比让 ssh 反复重试要稳。
-            wait_tcp(&host, port, config.start_timeout, config.poll_interval)?;
-        }
-    }
-
-    Ok(mangosteen_device::remote::SshTarget {
-        host,
+    let password_target = mangosteen_device::remote::SshTarget {
+        host: host.clone(),
         port,
         user: "root".to_string(),
-        password,
+        password: password.clone(),
+        identity_file: None,
+    };
+    if password.is_none() {
+        return Err(MnError::Network {
+            stage: "SSH 登录".to_string(),
+            reason: "节点未提供可用 SSH 密码，无法继续密码认证".to_string(),
+        });
+    }
+    // “重置密码 → 等待生效 → 清理目标指纹 → ssh-copy-id → 密钥确认”
+    // 是节点配置环境的一部分；每次尝试都重新执行，最多 3 次。
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        if let Some(pw) = config.ssh_password.as_deref() {
+            driver.reset_root_password(&instance.id, pw)?;
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        wait_tcp(&host, port, config.start_timeout, config.poll_interval)?;
+        match mangosteen_device::remote::install_ssh_copy_id(&password_target) {
+            Ok(key) => {
+                let key_target = mangosteen_device::remote::SshTarget {
+                    host: host.clone(),
+                    port,
+                    user: "root".to_string(),
+                    password: None,
+                    identity_file: Some(key),
+                };
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match mangosteen_device::remote::ssh_exec(&key_target, "true", 5) {
+                        Ok(_) => return Ok(key_target),
+                        Err(_e) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(250));
+                        }
+                        Err(e) => {
+                            last_error = format!("第 {attempt} 次密钥确认失败：{e}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => last_error = format!("第 {attempt} 次 ssh-copy-id 失败：{e}"),
+        }
+        if attempt < 3 {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+    Err(MnError::Network {
+        stage: "节点配置环境 / SSH 免密登录".to_string(),
+        reason: format!("连续 3 次未能确认 SSH 公钥登录成功：{last_error}"),
     })
 }
 
@@ -812,7 +945,7 @@ pub fn tunnel_spec_for(
         ssh_host: ssh.host.clone(),
         ssh_port: ssh.port,
         ssh_user: ssh.user.clone(),
-        identity_file: None,
+        identity_file: ssh.identity_file.clone(),
         forwards: vec![mangosteen_core::net::PortForward::loopback(0, remote_port)],
         control_master: true,
         // 两段式部署：设备配置阶段就建隧道，此时引擎还没起，
@@ -847,7 +980,7 @@ impl CloudOrchestrator {
         &mut self,
         constraints: &SelectionConstraints,
         plan: &CloudPlan,
-        on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+        _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> MnResult<ProvisionedResources> {
         let (_best, ranked, _all) = self.pick(constraints)?;
         let mut ordered: Vec<CreateCandidate> = ranked
@@ -868,16 +1001,15 @@ impl CloudOrchestrator {
         let driver = self.registry.get(&provider)?;
 
         let result = (|| -> MnResult<ProvisionedResources> {
-            let ssh = vendor_ssh_target(driver, &instance, &self.config)?;
-            prepare_node(
-                &ssh,
-                &self.config.remote_workdir,
-                plan,
-                &self.config.llama_server_url,
-                on_progress,
-            )?;
+            // 这里只确认实例 Running、正式 SSH IP/端口和厂商下发的密码信息。
+            // 密码重置、ssh-copy-id 和密钥登录属于后续“节点配置环境”。
+            let ssh = vendor_password_target(&instance, &self.config)?;
+            // 节点创建完成后只建立基础隧道；模型与引擎准备由编排层按阶段执行。
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
-            let local_port = self.tunnels.establish(&spec, self.config.tunnel_timeout)?.local_port;
+            let local_port = self
+                .tunnels
+                .establish(&spec, self.config.tunnel_timeout)?
+                .local_port;
             Ok(ProvisionedResources {
                 instance: Some(instance.clone()),
                 ssh,
@@ -893,6 +1025,14 @@ impl CloudOrchestrator {
                 Err(augment_with_cleanup(e, &instance, cleanup))
             }
         }
+    }
+
+    pub fn configure_ssh_access(
+        &self,
+        instance: &Instance,
+    ) -> MnResult<mangosteen_device::remote::SshTarget> {
+        let driver = self.registry.get(&instance.provider)?;
+        vendor_ssh_target(driver, instance, &self.config)
     }
 
     /// **启动模型阶段**：在已准备好的节点上拉起 `llama-server`。
@@ -915,6 +1055,28 @@ impl CloudOrchestrator {
         remote_port: u16,
     ) -> MnResult<u16> {
         let spec = tunnel_spec_for(ssh, remote_port, true);
+        Ok(self
+            .tunnels
+            .establish(&spec, self.config.tunnel_timeout)?
+            .local_port)
+    }
+
+    /// 在远端引擎启动后确认隧道仍然可用。
+    ///
+    /// 节点配置阶段允许远端端口尚未监听，因此当时建立的隧道可能在
+    /// SSH 转发通道真正打开前退出。启动模型阶段必须使用严格模式重新
+    /// 建立/复用隧道，确保远端端口确实已经转发，而不是继续使用旧的
+    /// `local_port` 假设。
+    pub fn ensure_tunnel_to(
+        &mut self,
+        ssh: &mangosteen_device::remote::SshTarget,
+        remote_port: u16,
+    ) -> MnResult<u16> {
+        let spec = tunnel_spec_for(ssh, remote_port, false);
+        // 严格模式前主动关闭同一目标的旧隧道。旧隧道可能是配置阶段
+        // 用 allow_unready_remote 建立的惰性转发：SSH 进程还活着，但
+        // 远端端口并未真正转发，继续复用会表现为本地 connection refused。
+        let _ = self.tunnels.close(&spec);
         Ok(self
             .tunnels
             .establish(&spec, self.config.tunnel_timeout)?
@@ -1019,6 +1181,95 @@ fn finish_provision(
 /// 3. 失败 → 直接报错（由调用方决定是否回滚实例）
 ///
 /// 刻意不做「本地上传兜底」：部署位置决定下载位置，选了云端就在云端下。
+/// 节点配置阶段：创建模型目录并准备推理引擎，不下载模型、不启动服务。
+pub fn configure_node(
+    target: &mangosteen_device::remote::SshTarget,
+    workdir: &str,
+    llama_server_url: &str,
+) -> MnResult<()> {
+    // SSH 免密登录确认成功后，先完成依赖安装并逐项验证；依赖不完整时
+    // 立即失败，不允许继续下载 llama.cpp。
+    let deps = mangosteen_device::remote::ensure_node_download_dependencies(target)?;
+    eprintln!("[node-config] 远端下载依赖已就绪：{}", deps.trim());
+    let workdir = workdir.trim_end_matches('/').to_string();
+    mangosteen_device::remote::ssh_exec(target, &format!("mkdir -p {workdir}/models"), 60)?;
+    // 依赖确认成功后才下载/准备 llama-server；函数返回成功路径后，
+    // 调用方才会把阶段推进到“模型下载”。
+    let llama_path = mangosteen_device::remote::ensure_llama_server_from_archive(
+        target,
+        &workdir,
+        llama_server_url,
+    )?;
+    mangosteen_device::remote::ssh_exec(
+        target,
+        &format!(
+            "test -x '{}' && '{}' --version >/dev/null 2>&1 || test -x '{}'",
+            llama_path, llama_path, llama_path
+        ),
+        60,
+    )?;
+    eprintln!("[node-config] llama-server 已确认可执行：{llama_path}");
+    Ok(())
+}
+
+/// 模型下载阶段：在节点配置完成后下载模型并返回远端路径。
+pub fn download_model_node(
+    target: &mangosteen_device::remote::SshTarget,
+    plan: &CloudPlan,
+    hf_token: Option<&str>,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> MnResult<String> {
+    let remote_model = &plan.model_path;
+    let remote_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
+    let want = plan.download_bytes;
+    let marked_complete =
+        mangosteen_device::remote::remote_download_completed(target, remote_model)?;
+    let ready = marked_complete
+        || match (remote_size, want) {
+            (got, Some(exp)) if exp > 0 => got == exp,
+            (got, _) => got > 0,
+        };
+    if !ready {
+        let url = plan
+            .download_url
+            .as_deref()
+            .ok_or_else(|| MnError::Network {
+                stage: "下载云端模型".to_string(),
+                reason: format!("没有可用的下载地址，无法获取模型 {}", plan.model_path),
+            })?;
+        mangosteen_device::remote::download_model_remote_with_progress(
+            target,
+            url,
+            remote_model,
+            want,
+            hf_token,
+            on_progress,
+            should_cancel,
+        )?;
+    }
+    // 下载函数返回后做最终核验，确认文件真的落到远端再进入下一阶段。
+    // 期望字节数只作参考：计划里的 `download_bytes` 可能来自预估，
+    // 与源站实际大小差几个字节时不应否定一次已完成的下载。
+    let final_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
+    if final_size == 0 {
+        return Err(MnError::Network {
+            stage: "云端下载模型".to_string(),
+            reason: format!("下载结束但远端文件为空：{remote_model}"),
+        });
+    }
+    if let Some(exp) = want.filter(|v| *v > 0) {
+        if final_size != exp {
+            eprintln!(
+                "[download] 远端文件大小 {} 与计划期望 {} 不一致，按远端实际大小继续部署",
+                final_size, exp
+            );
+        }
+    }
+    Ok(remote_model.clone())
+}
+
+/// 兼容旧调用：按“配置 → 下载”顺序执行，不负责启动引擎。
 pub fn prepare_node(
     target: &mangosteen_device::remote::SshTarget,
     workdir: &str,
@@ -1026,44 +1277,8 @@ pub fn prepare_node(
     llama_server_url: &str,
     on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> MnResult<()> {
-    let workdir = workdir.trim_end_matches('/').to_string();
-    let remote_model = &plan.model_path;
-
-    // ---- 1. 远端是否已就位 ----
-    let _ = mangosteen_device::remote::ssh_exec(target, &format!("mkdir -p {workdir}/models"), 60);
-    let remote_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
-    let want = plan.download_bytes;
-
-    let ready = match (remote_size, want) {
-        (got, Some(exp)) if exp > 0 => got == exp,
-        (got, _) => got > 0,
-    };
-    if !ready {
-        let url = plan
-            .download_url
-            .as_deref()
-            .ok_or_else(|| MnError::Network {
-                stage: "准备云端模型".to_string(),
-                reason: format!(
-                    "没有可用的下载地址，无法在云端获取模型 {}。\n\
-                     云端部署要求模型来自可下载的源（ModelScope / HuggingFace）。\
-                     若是本地自有文件，请把它放到镜像里或改用本地部署。",
-                    plan.model_path
-                ),
-            })?;
-        eprintln!("[cloud] 远端开始下载模型：{url}");
-        let n = mangosteen_device::remote::download_model_remote_with_progress(
-            target,
-            url,
-            remote_model,
-            want,
-            on_progress,
-        )?;
-        eprintln!("[cloud] ✓ 远端已下载模型（{n} 字节）");
-    }
-
-    // ---- 2. 备好 llama-server（不启动）----
-    mangosteen_device::remote::ensure_llama_server(target, &workdir, llama_server_url)?;
+    configure_node(target, workdir, llama_server_url)?;
+    let _ = download_model_node(target, plan, None, on_progress, None)?;
     Ok(())
 }
 
@@ -1087,14 +1302,44 @@ pub fn start_node_engine(
     } else if probe == "missing" || probe.is_empty() {
         return Err(MnError::Network {
             stage: "启动云端推理服务".to_string(),
-            reason: format!(
-                "远端找不到 llama-server（{bin}）。请重新执行部署以重新准备引擎。"
-            ),
+            reason: format!("远端找不到 llama-server（{bin}）。请重新执行部署以重新准备引擎。"),
         });
     } else {
         probe.to_string()
     };
-    mangosteen_device::remote::start_llama_server(target, &bin, &launch.args, &workdir)
+    // 启动命令包含动态库路径：官方压缩包中的 llama-server 依赖同目录的
+    // libllama-server-impl.so，不能假设远端系统已配置 ld.so.cache。
+    // 启动失败时清理残留进程并重试 3 次（初次尝试 + 3 次重试）。
+    const MAX_START_RETRIES: u32 = 3;
+    let mut last_error = None;
+    for attempt in 0..=MAX_START_RETRIES {
+        match mangosteen_device::remote::start_llama_server(target, &bin, &launch.args, &workdir) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_error = Some(e.to_string());
+                if attempt == MAX_START_RETRIES {
+                    break;
+                }
+                eprintln!(
+                    "[engine-start] 第 {} 次启动失败，{} 秒后重试（最多重试 {} 次）：{}",
+                    attempt + 1,
+                    2,
+                    MAX_START_RETRIES,
+                    last_error.as_deref().unwrap_or("未知错误")
+                );
+                let _ = mangosteen_device::remote::stop_llama_server(target, &workdir);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    }
+    Err(MnError::Network {
+        stage: "启动云端推理服务".to_string(),
+        reason: format!(
+            "启动推理引擎连续失败（初次尝试 + {} 次重试）：{}",
+            MAX_START_RETRIES,
+            last_error.unwrap_or_else(|| "未知错误".to_string())
+        ),
+    })
 }
 
 /// 把用户显式选定的规格排到最前。失败时保留原排序，由创建阶段尝试其它候选。

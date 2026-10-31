@@ -93,11 +93,20 @@ impl GatewayServer {
     }
     /// 取当前后端。
     pub(crate) fn backend(&self) -> MnResult<BackendTarget> {
+        if let Ok(snapshot) = self.backend_snapshot.read() {
+            if let Some(target) = snapshot.values().next() {
+                return Ok(target.clone());
+            }
+        }
         let mut gw = self
             .gateway
             .lock()
             .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
-        gw.active_backend()
+        let target = gw.active_backend()?;
+        if let Ok(mut snapshot) = self.backend_snapshot.write() {
+            snapshot.insert(target.model_id.clone(), target.clone());
+        }
+        Ok(target)
     }
     /// 按请求里的 `model` 选择后端。
     ///
@@ -107,11 +116,25 @@ impl GatewayServer {
     /// 这样 UI「模型信息」下拉的选择才真正生效——否则用户选了 A
     /// 却被路由到 B，回答不对劲却查不出原因。
     pub(crate) fn backend_for_model(&self, model: Option<&str>) -> MnResult<BackendTarget> {
+        let requested = model.filter(|m| !m.is_empty() && *m != "auto");
+        if let Ok(snapshot) = self.backend_snapshot.read() {
+            if let Some(id) = requested {
+                if let Some(target) = snapshot.get(id) {
+                    return Ok(target.clone());
+                }
+            } else if let Some(target) = snapshot.values().next() {
+                return Ok(target.clone());
+            }
+        }
         let mut gw = self
             .gateway
             .lock()
             .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
-        gw.active_backend_for(model)
+        let target = gw.active_backend_for(model)?;
+        if let Ok(mut snapshot) = self.backend_snapshot.write() {
+            snapshot.insert(target.model_id.clone(), target.clone());
+        }
+        Ok(target)
     }
     /// 转发 JSON 请求到上游，并把上游响应归一化。
     pub(crate) fn forward_json(&self, path: &str, body: &[u8], target: &BackendTarget) -> Response {

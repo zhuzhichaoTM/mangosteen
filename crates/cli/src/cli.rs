@@ -87,6 +87,7 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "delete-file",
     "prune",
     "no-open",
+    "foreground",
     "no-verify",
     // `cloud cheapest --create`：开关语义，不能当成带值选项。
     // 不加进这里的话 `--create --yes` 会把 `--yes` 吃成 create 的值，
@@ -222,7 +223,13 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
         "cloud" => crate::commands::cloud::run(args),
         "config" => crate::commands::config::run(args),
         "serve" => crate::commands::serve::run(args),
-        "ui" => crate::commands::ui::run(args),
+        "ui" => {
+            if args.pos(1).is_some() {
+                crate::commands::ui::run_lifecycle(args)
+            } else {
+                crate::commands::ui::run(args)
+            }
+        }
         "tui" => crate::tui::run(args),
         "doctor" => crate::commands::doctor::run(args),
         "engine" => crate::commands::engine::run(args),
@@ -282,6 +289,10 @@ fn print_help() {
     println!("  mangosteen deploy llama3.3-70b --allow-cloud    # 本地不足自动上云");
     println!("  mangosteen status                               # 看状态");
     println!("  mangosteen stop --all                           # 全部停止");
+    println!("  mangosteen ui start                             # 后台稳定启动 UI/API 网关");
+    println!("  mangosteen ui restart                           # 重启 UI/API 网关");
+    println!("  mangosteen ui stop                              # 关闭 UI/API 网关");
+    println!("  mangosteen ui status                            # 查看 UI/API 网关状态");
     println!();
     println!("{}", output::bold("全局选项"));
     println!("  --config <path>   指定配置文件");

@@ -365,6 +365,26 @@ fn send_graceful(child: &Child, pid: u32) {
     }
 }
 
+/// 查找监听指定端口的进程 PID。
+///
+/// 用途：PID 文件丢失或陈旧时，仍能确认「是谁占着这个端口」，
+/// 让停止/重启操作真正生效，而不是对着一个不存在的 PID 反复「成功」。
+pub fn find_listener_pid(port: u16) -> Option<u32> {
+    let out = Command::new("lsof")
+        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.parse::<u32>().ok())
+}
+
 /// 一次性探测 HTTP 端点是否返回 200。
 ///
 /// ## 与 [`wait_http_ready`] 的区别（重要）

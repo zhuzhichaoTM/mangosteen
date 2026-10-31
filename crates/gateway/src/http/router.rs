@@ -42,6 +42,10 @@ impl GatewayServer {
             ("PUT", "/api/settings") => self.put_settings(req),
             ("GET", "/api/devices") => self.get_devices(),
             ("POST", "/api/devices") => self.add_device(req),
+            ("POST", p) if p.starts_with("/api/devices/") && p.ends_with("/test") => {
+                let id = &p["/api/devices/".len()..p.len() - "/test".len()];
+                self.test_device(id)
+            }
             ("DELETE", p) if p.starts_with("/api/devices/") => {
                 self.remove_device(&p["/api/devices/".len()..])
             }

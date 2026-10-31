@@ -60,16 +60,14 @@ impl GatewayServer {
                 let (deployable, reason) = if !exists {
                     (false, Some("模型文件不存在或已被删除".to_string()))
                 } else {
-                    let cloud_available = !gw.config().providers.is_empty()
-                        || !gw.config().remote_devices.is_empty();
+                    let cloud_available =
+                        !gw.config().providers.is_empty() || !gw.config().remote_devices.is_empty();
                     if cloud_available {
                         (true, None)
                     } else {
                         (
                             false,
-                            Some(
-                                "未配置云服务商或远程设备，无法部署到远端节点".to_string(),
-                            ),
+                            Some("未配置云服务商或远程设备，无法部署到远端节点".to_string()),
                         )
                     }
                 };

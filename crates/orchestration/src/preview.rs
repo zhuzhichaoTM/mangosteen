@@ -26,7 +26,17 @@ impl Orchestrator {
     ///    此时不产生任何费用。
     /// 3. **费用给出区间而非单点**：推理时长无法预知，给「按 1 小时」口径。
     pub fn preview(&self, req: &DeploymentRequest) -> MnResult<DeploymentPreview> {
-        let evaluated = self.evaluate(req)?;
+        // 预览不要求模型已下载：若本地台账/文件不存在，按配置模板中的
+        // 白名单模型未下载时按其默认资产粗估，后续远端 Range 读取 GGUF 头部后再精确校正。
+        let evaluated = match self.evaluate(req) {
+            Ok(value) => value,
+            Err(_) => self.assessor.evaluate_estimated(
+                &req.model,
+                mangosteen_core::model::Quantization::Q4KM,
+                16_464_440_224,
+                req,
+            ),
+        };
 
         // 已保存设备（不含密码），交给前端渲染选择列表
         let devices: Vec<DeviceBrief> = self
@@ -70,7 +80,10 @@ impl Orchestrator {
             Err(e) => (Vec::new(), Some(e.to_string())),
         };
 
-        let best = self.pick_cloud(&constraints).ok().and_then(|c| c.into_iter().next());
+        let best = self
+            .pick_cloud(&constraints)
+            .ok()
+            .and_then(|c| c.into_iter().next());
 
         let cloud = best.map(|c| {
             let hours = default_estimate_hours();

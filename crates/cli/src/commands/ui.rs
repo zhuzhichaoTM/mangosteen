@@ -22,7 +22,10 @@
 //! 需要纯服务形态时用 `serve`。因此提供 `--no-open` 用于
 //! 远程/无桌面环境（如 SSH、容器）——那里打开浏览器会静默失败。
 
-use std::net::TcpListener;
+use std::fs;
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use mangosteen_core::MnResult;
@@ -32,12 +35,184 @@ use crate::commands::reject_unknown_options;
 use crate::output;
 
 /// 允许的选项。
-const ALLOWED: &[&str] = &["config", "port", "host", "no-open", "quiet"];
+const ALLOWED: &[&str] = &["config", "port", "host", "no-open", "quiet", "foreground"];
 
-/// 入口。
-pub fn run(args: Args) -> MnResult<i32> {
+/// UI 生命周期子命令：`start` / `restart` / `stop` / `status`。
+pub fn run_lifecycle(args: Args) -> MnResult<i32> {
     reject_unknown_options(&args, ALLOWED)?;
+    let action = args.pos(1).unwrap_or("start");
+    match action {
+        "start" => start_background(&args),
+        "restart" => {
+            let _ = stop_background(&args);
+            start_background(&args)
+        }
+        "stop" => stop_background(&args),
+        "status" => status_background(&args),
+        other => Err(mangosteen_core::MnError::bad_request(format!(
+            "未知 UI 操作 `{other}`。可用：start、restart、stop、status"
+        ))),
+    }
+}
 
+fn lifecycle_paths() -> (PathBuf, PathBuf) {
+    let env = &mangosteen_platform::paths::real_env;
+    (
+        mangosteen_platform::paths::gateway_pid_file(env),
+        mangosteen_platform::paths::gateway_log_file(env),
+    )
+}
+
+fn read_pid() -> Option<u32> {
+    let (pid, _) = lifecycle_paths();
+    fs::read_to_string(pid).ok()?.trim().parse().ok()
+}
+
+fn effective_pid(port: u16) -> Option<u32> {
+    read_pid()
+        .filter(|pid| mangosteen_platform::process::process_alive(*pid))
+        .or_else(|| mangosteen_platform::process::find_listener_pid(port))
+}
+
+fn healthy(port: u16) -> bool {
+    let Ok(addr) = format!("127.0.0.1:{port}").parse() else {
+        return false;
+    };
+    let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(300)) else {
+        return false;
+    };
+    use std::io::{Read, Write};
+    let _ = s.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let mut b = [0u8; 128];
+    s.read(&mut b)
+        .map(|n| String::from_utf8_lossy(&b[..n]).contains(" 200 "))
+        .unwrap_or(false)
+}
+
+fn start_background(args: &Args) -> MnResult<i32> {
+    let (pid_path, log_path) = lifecycle_paths();
+    let gw = crate::commands::build_gateway(args)?;
+    let port = args
+        .get_num::<u16>("port")?
+        .unwrap_or(gw.config().gateway.port);
+    if let Some(pid) = effective_pid(port) {
+        if mangosteen_platform::process::process_alive(pid) && healthy(port) {
+            output::print_info(&format!("UI 已运行（PID {pid}），无需重复启动"));
+            return Ok(0);
+        }
+    }
+    if let Some(parent) = pid_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| mangosteen_core::MnError::io("创建网关状态目录", &e))?;
+    }
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| mangosteen_core::MnError::io("创建网关日志目录", &e))?;
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| mangosteen_core::MnError::io("定位 mangosteen 可执行文件", &e))?;
+    #[cfg(unix)]
+    let mut cmd = {
+        // macOS 没有默认 `setsid`，使用系统 `nohup` 脱离终端挂断信号；
+        // stdout/stderr 已由下方重定向到持久日志。
+        let mut c = Command::new("nohup");
+        c.arg(&exe);
+        c
+    };
+    #[cfg(not(unix))]
+    let mut cmd = Command::new(&exe);
+    cmd.arg("ui").arg("--foreground").arg("--no-open");
+    // 后台网关必须脱离当前终端/对话会话，否则父命令退出后，
+    // 宿主环境可能回收同一进程组，表现为 start 成功但服务立即消失。
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.stdin(Stdio::null());
+    // 让子进程自己写 PID：包装命令（nohup/setsid）与实际监听进程的
+    // PID 未必一致，父进程猜一次就可能写错，导致「status 说没运行、
+    // 端口却被自己占着」。自注册后 PID 文件永远指向真实网关。
+    let (pid_path_env, _) = lifecycle_paths();
+    let _ = fs::remove_file(&pid_path_env);
+    cmd.env("MANGOSTEEN_GATEWAY_PIDFILE", &pid_path_env);
+    if let Some(v) = args.get("config") {
+        cmd.arg("--config").arg(v);
+    }
+    if let Some(v) = args.get("host") {
+        cmd.arg("--host").arg(v);
+    }
+    if let Some(v) = args.get("port") {
+        cmd.arg("--port").arg(v);
+    }
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| mangosteen_core::MnError::io("打开网关日志", &e))?;
+    let err = log
+        .try_clone()
+        .map_err(|e| mangosteen_core::MnError::io("复制网关日志句柄", &e))?;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(err))
+        .spawn()
+        .map_err(|e| mangosteen_core::MnError::io("启动后台 API 网关", &e))?;
+    // PID 由网关进程自注册；这里只做兜底（老版本/自注册失败时仍有记录）。
+    for _ in 0..30 {
+        if healthy(port) {
+            if read_pid().is_none() {
+                let _ = fs::write(&pid_path, child.id().to_string());
+            }
+            output::print_success(&format!("UI/API 网关已启动：http://127.0.0.1:{port}"));
+            return Ok(0);
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(mangosteen_core::MnError::Network {
+        stage: "启动 API 网关".to_string(),
+        reason: format!("服务未在 3 秒内就绪，日志：{}", log_path.display()),
+    })
+}
+
+fn stop_background(args: &Args) -> MnResult<i32> {
+    let (pid_path, _) = lifecycle_paths();
+    let gw = crate::commands::build_gateway(args)?;
+    let port = args
+        .get_num::<u16>("port")?
+        .unwrap_or(gw.config().gateway.port);
+    let Some(pid) = effective_pid(port) else {
+        output::print_info("UI/API 网关未运行");
+        return Ok(0);
+    };
+    mangosteen_platform::process::terminate_pid(pid, Duration::from_secs(3))?;
+    let _ = fs::remove_file(pid_path);
+    output::print_success("UI/API 网关已关闭（不影响已部署的推理服务）");
+    Ok(0)
+}
+
+fn status_background(args: &Args) -> MnResult<i32> {
+    let gw = crate::commands::build_gateway(args)?;
+    let port = args
+        .get_num::<u16>("port")?
+        .unwrap_or(gw.config().gateway.port);
+    match effective_pid(port) {
+        Some(pid) if mangosteen_platform::process::process_alive(pid) && healthy(port) => {
+            output::print_success(&format!("UI/API 网关运行中（PID {pid}，端口 {port}）"));
+            Ok(0)
+        }
+        _ => {
+            output::print_info("UI/API 网关未运行");
+            Ok(1)
+        }
+    }
+}
+/// 前台兼容入口：`ui --foreground --no-open`。
+pub fn run(args: Args) -> MnResult<i32> {
     let gw = crate::commands::build_gateway(&args)?;
     let cfg = gw.config().clone();
 
@@ -118,6 +293,16 @@ pub fn run(args: Args) -> MnResult<i32> {
 
     let shared = std::sync::Arc::new(std::sync::Mutex::new(gw));
 
+    // 后台模式（`ui start`）由本进程自注册 PID：包装命令与真实网关进程的
+    // PID 未必一致，只有进程自己写才是准确记录。
+    let self_pid_file = std::env::var_os("MANGOSTEEN_GATEWAY_PIDFILE").map(PathBuf::from);
+    if let Some(path) = &self_pid_file {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(path, std::process::id().to_string());
+    }
+
     // 后台预热引擎版本：`llama-server --version` 在部分安装上要 20~30 秒，
     // 若用户在首个请求里承担这段等待，页面会白屏半分钟。
     mangosteen_gateway::spawn_warm_up(std::sync::Arc::clone(&shared));
@@ -131,8 +316,11 @@ pub fn run(args: Args) -> MnResult<i32> {
     // 启用云端监控后台采集：设备页在「使用云端算力」时显示云端指标
     .with_cloud_monitor();
 
-    server.serve(listener)?;
-    Ok(0)
+    let result = server.serve(listener);
+    if let Some(path) = self_pid_file {
+        let _ = fs::remove_file(path);
+    }
+    result.map(|_| 0)
 }
 
 /// 浏览器要访问的地址。

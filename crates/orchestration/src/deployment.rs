@@ -72,6 +72,7 @@ impl DeviceTarget {
                 port: d.port,
                 user: d.user.clone(),
                 password,
+                identity_file: None,
             },
             workdir,
         }
@@ -83,6 +84,8 @@ impl DeviceTarget {
 pub struct DeviceBrief {
     /// 设备 ID
     pub id: String,
+    /// 设备名称
+    pub name: String,
     /// 主机名或 IP
     pub host: String,
     /// SSH 端口
@@ -103,6 +106,11 @@ impl DeviceBrief {
                 mangosteen_core::config::RemoteDevice::derive_id(&d.host, d.port)
             } else {
                 d.id.clone()
+            },
+            name: if d.name.trim().is_empty() {
+                format!("自定义节点 {}:{}", d.host, d.port)
+            } else {
+                d.name.clone()
             },
             host: d.host.clone(),
             port: d.port,

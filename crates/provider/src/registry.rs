@@ -300,6 +300,9 @@ mod tests {
             providers: BTreeMap::new(),
             model_sources: BTreeMap::new(),
             remote_devices: Vec::new(),
+            model_whitelist: BTreeMap::new(),
+            remote_inference: None,
+            remote_inferences: Vec::new(),
         }
     }
 

@@ -171,10 +171,36 @@ impl StateStore {
         match mangosteen_platform::fs::read_to_string_opt(&self.path)? {
             None => Ok(StateFile::default()),
             Some(t) if t.trim().is_empty() => Ok(StateFile::default()),
-            Some(t) => serde_json::from_str(&t).map_err(|e| MnError::ConfigIo {
-                path: self.path.clone(),
-                reason: format!("部署台账 JSON 解析失败：{e}"),
-            }),
+            Some(t) => {
+                // 兼容纯云端重构前的台账：旧记录的 origin.kind=local
+                // 已不再是有效部署来源，但历史记录（尤其 destroyed）不能阻塞
+                // 网关启动。将其归一为不可用的 legacy cloud 记录；旧 local
+                // 字段会由 serde 忽略，后续列表仍可展示/清理。
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&t).map_err(|e| MnError::ConfigIo {
+                        path: self.path.clone(),
+                        reason: format!("部署台账 JSON 解析失败：{e}"),
+                    })?;
+                if let Some(records) = value.get_mut("deployments").and_then(|v| v.as_array_mut()) {
+                    for record in records {
+                        if record.pointer("/plan/origin/kind").and_then(|v| v.as_str())
+                            == Some("local")
+                        {
+                            if let Some(origin) = record.pointer_mut("/plan/origin") {
+                                *origin = serde_json::json!({
+                                    "kind": "cloud",
+                                    "provider": "legacy-local",
+                                    "instance_id": ""
+                                });
+                            }
+                        }
+                    }
+                }
+                serde_json::from_value(value).map_err(|e| MnError::ConfigIo {
+                    path: self.path.clone(),
+                    reason: format!("部署台账 JSON 解析失败：{e}"),
+                })
+            }
         }
     }
 

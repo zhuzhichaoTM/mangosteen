@@ -302,7 +302,11 @@ impl TunnelManager {
                         reason: format!(
                             "ssh 在隧道建立前退出（退出码 {code:?}）。常见原因：密码/密钥错误、\
                              实例未就绪、安全组拦截。stderr：{}",
-                            if tail.trim().is_empty() { "（空）" } else { &tail }
+                            if tail.trim().is_empty() {
+                                "（空）"
+                            } else {
+                                &tail
+                            }
                         ),
                     });
                 }

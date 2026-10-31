@@ -90,16 +90,18 @@ impl Orchestrator {
         &self,
         constraints: &SelectionConstraints,
     ) -> MnResult<Vec<crate::deployment::CloudCandidateBrief>> {
-        let tiers = self.cloud_tiers(constraints)?;
         let o = self
             .cloud
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
             })?;
-        let (all, _) = o.collect_candidates()?;
+        // 这里必须返回本次厂商查询的完整排序结果，而不是 cloud_tiers
+        // 的三档摘要；部署 UI 需要展示所有实时可用/空闲规格。
+        let (all, latencies) = o.collect_candidates()?;
+        let ranked = o.rank(&all, &latencies, constraints);
 
-        Ok(tiers
+        Ok(ranked
             .into_iter()
             .map(|c| {
                 let spec = all
@@ -115,7 +117,7 @@ impl Orchestrator {
                     vram_bytes: c.vram_bytes,
                     latency_ms: c.latency_ms,
                     score_total: c.score_total,
-                    tier: c.tier.clone().unwrap_or_else(|| "balanced".to_string()),
+                    tier: "available".to_string(),
                     stock: spec.and_then(|s| s.stock),
                     cpu_cores: spec.map(|s| s.spec.cpu_cores).unwrap_or(0),
                     memory_bytes: spec.map(|s| s.spec.memory_bytes).unwrap_or(0),

@@ -20,8 +20,8 @@ use mangosteen_provider::TunnelManager;
 use crate::assess::{Assessor, DeploymentRequest, Evaluated};
 use crate::backend::BackendTarget;
 use crate::deployment::{
-    assessed_detail, default_estimate_hours, sanitize, CloudPreview,
-    DeploymentPreview, DeviceBrief, PreparedCloud, PreparedDeployment,
+    assessed_detail, default_estimate_hours, sanitize, CloudPreview, DeploymentPreview,
+    DeviceBrief, PreparedCloud, PreparedDeployment,
 };
 use crate::scheduler::{Decision, Scheduler};
 
@@ -127,6 +127,7 @@ pub struct Orchestrator {
     /// 与云端实例分开管理：自建设备不经过厂商接口，即使一个云服务商都
     /// 没配置（`cloud == None`），设备部署也要能用。
     device_tunnels: TunnelManager,
+    remote_inference_routes: std::collections::BTreeMap<String, u16>,
     state: StateStore,
     models: ModelStore,
     /// 请求 ID 序号
@@ -176,14 +177,39 @@ impl Orchestrator {
             }
         }
 
-        let device_tunnels = TunnelManager::new(
+        let mut device_tunnels = TunnelManager::new(
             config.local.port_range_start,
             config.local.port_range_end,
             "ssh",
             None,
         )?;
-        // 隧道本地端口与引擎端口共用同一段区间，但两者不会同时占用
-        // 同一个端口：分配器在真正绑定前会做可绑定性检查。
+        let mut remote_inference_routes = std::collections::BTreeMap::new();
+        let mut remotes = config.remote_inferences.clone();
+        if let Some(remote) = config.remote_inference.clone() {
+            remotes.push(remote);
+        }
+        for remote in remotes {
+            let password = remote
+                .password
+                .resolve(mangosteen_platform::paths::real_env)
+                .ok();
+            let target = mangosteen_device::remote::SshTarget {
+                host: remote.host,
+                port: remote.port,
+                user: remote.user,
+                password,
+                identity_file: None,
+            };
+            let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
+                &target,
+                remote.remote_port,
+                false,
+            );
+            let local = device_tunnels
+                .establish(&spec, Duration::from_secs(30))?
+                .local_port;
+            remote_inference_routes.insert(remote.model_id, local);
+        }
 
         Ok(Self {
             config,
@@ -198,6 +224,7 @@ impl Orchestrator {
             local_engine,
             cloud,
             device_tunnels,
+            remote_inference_routes,
             state,
             models,
             req_seq: std::sync::atomic::AtomicU64::new(0),

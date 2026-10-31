@@ -216,18 +216,9 @@ impl Orchestrator {
         };
         let device = self.resolve_device(req);
         let why = self.scheduler.explain_local_failure(&evaluated);
-        // 远端不需要本地文件：下载/量化阶段如实标注，
-        // 免得用户以为本地做了这些事。
-        sink(
-            DeployStage::Downloading,
-            StageOutcome::Skipped,
-            "远端部署：模型由节点侧下载，本地不下载".to_string(),
-        );
-        sink(
-            DeployStage::Quantizing,
-            StageOutcome::Skipped,
-            "远端部署无需本地量化".to_string(),
-        );
+        // 远端模型下载和节点配置由 prepare_cloud 按严格顺序执行：
+        // 先等待实例创建并完成节点配置，再在节点侧下载模型。这里不能提前
+        // 上报 Downloading/Quantizing，否则 UI 会在节点创建前跳到后续阶段。
         self.prepare_cloud(&evaluated, cloud_plan, trail, &why, device, sink)
     }
 

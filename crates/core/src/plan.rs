@@ -67,7 +67,9 @@ pub struct LocalPlan {
     pub kv_cache_type_v: KvCacheType,
     /// 启用 FlashAttention → `--flash-attn`
     pub flash_attention: bool,
-    /// 启用内存映射加载 → `--mmap`（默认开，节省内存；禁用则全量载入）
+    /// 保留内存映射意图供计划和资源评估使用；具体 llama.cpp CLI 适配器
+    /// 不再输出显式 `--mmap`，因为部分远端 llama-server 发行包已移除该参数，
+    /// 而 mmap 是其默认行为。
     pub use_mmap: bool,
     /// 锁定在内存中防止换出 → `--mlock`。内存充裕时开启可稳定延迟。
     pub use_mlock: bool,

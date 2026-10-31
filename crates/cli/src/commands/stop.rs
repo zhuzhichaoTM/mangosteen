@@ -55,9 +55,12 @@ pub fn run(args: Args) -> MnResult<i32> {
         output::print_table(&["部署 ID", "模型", "算力来源", "状态"], &rows);
 
         // 纯云端架构：所有部署都是云端部署，停止必然涉及实例销毁与计费停止。
-        let has_cloud = active
-            .iter()
-            .any(|r| matches!(r.plan.origin, mangosteen_core::plan::ComputeOrigin::Cloud { .. }));
+        let has_cloud = active.iter().any(|r| {
+            matches!(
+                r.plan.origin,
+                mangosteen_core::plan::ComputeOrigin::Cloud { .. }
+            )
+        });
         if has_cloud {
             println!();
             output::print_warning(

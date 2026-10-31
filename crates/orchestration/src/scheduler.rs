@@ -249,7 +249,7 @@ impl Scheduler {
         if req.target.forces_local() {
             return Ok(Decision::Reject {
                 reason: format!(
-                    "{}。你选择了「本地算力」，但本版本不再支持本地部署（本地推理交由 Ollama 承担）",
+                    "{}。你选择了「本地算力」，但本版本不再支持本地部署（本地推理交由 Ollama 承担），不会自动改用云端",
                     self.explain_local_failure(evaluated)
                 ),
             });
@@ -578,7 +578,10 @@ mod tests {
         assert!(d.is_cloud(), "纯云端：任何模型都走远端节点");
         let reason = d.fallback_reason().expect("云端方案必须有原因");
         assert!(!reason.trim().is_empty());
-        assert!(reason.contains("远端") || reason.contains("Ollama"), "原因应说明远端落位：{reason}");
+        assert!(
+            reason.contains("远端") || reason.contains("Ollama"),
+            "原因应说明远端落位：{reason}"
+        );
     }
 
     #[test]
@@ -604,7 +607,10 @@ mod tests {
         let d = s
             .decide(&e, &DeploymentRequest::for_model("m").with_context(8192))
             .unwrap();
-        assert!(d.is_cloud(), "纯云端下即使本机可跑也走远端节点，实际：{d:?}");
+        assert!(
+            d.is_cloud(),
+            "纯云端下即使本机可跑也走远端节点，实际：{d:?}"
+        );
     }
 
     #[test]
@@ -995,7 +1001,10 @@ mod tests {
         let d = s.decide(&e, &req).unwrap();
         assert!(d.is_cloud(), "选云端必须走云端：{d:?}");
         if let Decision::Cloud { reason, .. } = d {
-            assert!(reason.contains("远端") || reason.contains("Ollama"), "{reason}");
+            assert!(
+                reason.contains("远端") || reason.contains("Ollama"),
+                "{reason}"
+            );
         }
     }
 

@@ -80,13 +80,18 @@ impl Orchestrator {
     /// 纯云端架构下只取最近就绪的云端部署（本地推理由 Ollama 承担，
     /// 不在 Mangosteen 的部署编排范围内）。
     pub fn active_backend(&mut self) -> MnResult<BackendTarget> {
+        if let Some((model_id, port)) = self.remote_inference_routes.iter().next() {
+            return Ok(BackendTarget {
+                host: "127.0.0.1".to_string(),
+                port: *port,
+                model_id: model_id.clone(),
+                origin_label: "remote-inference".to_string(),
+            });
+        }
         let active = self.refresh()?;
 
         // 云端：取最近就绪且已分配端口的部署
-        if let Some(a) = active
-            .iter()
-            .find(|a| a.ready && a.port.is_some())
-        {
+        if let Some(a) = active.iter().find(|a| a.ready && a.port.is_some()) {
             return Ok(BackendTarget {
                 host: "127.0.0.1".to_string(),
                 port: a.port.unwrap(),
@@ -107,6 +112,23 @@ impl Orchestrator {
     /// 指定了具体模型却**没在运行**时必须明确报错，而不是悄悄退回自动：
     /// 静默换模型比报错更难排查（用户会以为「就是这个模型答的」）。
     pub fn active_backend_for(&mut self, want: Option<&str>) -> MnResult<BackendTarget> {
+        if let Some(id) = want.filter(|x| *x != "auto") {
+            if let Some(port) = self.remote_inference_routes.get(id) {
+                return Ok(BackendTarget {
+                    host: "127.0.0.1".to_string(),
+                    port: *port,
+                    model_id: id.to_string(),
+                    origin_label: "remote-inference".to_string(),
+                });
+            }
+        } else if let Some((model_id, port)) = self.remote_inference_routes.iter().next() {
+            return Ok(BackendTarget {
+                host: "127.0.0.1".to_string(),
+                port: *port,
+                model_id: model_id.clone(),
+                origin_label: "remote-inference".to_string(),
+            });
+        }
         let Some(id) = want
             .map(str::trim)
             .filter(|s| !s.is_empty() && *s != "auto")

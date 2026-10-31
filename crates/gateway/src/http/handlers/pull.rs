@@ -50,6 +50,12 @@ impl GatewayServer {
             .and_then(|v| v.as_str())
             .unwrap_or("cloud")
             .to_string();
+        // 用户选定的已保存自定义节点；有值时直接使用该节点，不创建云实例。
+        let device_id = parsed
+            .get("device_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         // 用户选定的云端 GPU 规格（空表示自动选点）
         let cloud_spec = parsed
             .get("cloud_spec")
@@ -179,6 +185,20 @@ impl GatewayServer {
         };
 
         let job_id = self.pull_jobs.create_with(spec, &file_name, deploy_after);
+        if deploy_after && cloud_spec.is_some() {
+            // UI 已完成模型评估并明确选择 GPU 规格；任务创建后从“节点选择”开始。
+            // 后台准备阶段仍可能重复做一次评估，但 PullJobs 会拒绝阶段回退，
+            // 因此用户不会看到流程重新跳回“模型评估”。
+            self.pull_jobs.set_stage(
+                &job_id,
+                mangosteen_orchestration::progress::DeployStage::Selecting,
+                mangosteen_orchestration::progress::StageOutcome::Running,
+                format!(
+                    "已选择 GPU 节点 {}，等待实例创建完成",
+                    cloud_spec.as_deref().unwrap_or("")
+                ),
+            );
+        }
 
         // 部署回调：把每个阶段实时写回任务表。
         //
@@ -235,7 +255,7 @@ impl GatewayServer {
                         None
                     }
                 };
-            let prepare: crate::pulljobs::PrepareHook = Arc::new(move || {
+            let prepare: crate::pulljobs::PrepareHook = Arc::new(move |should_cancel| {
                 // 评估：本地文件 > 远端真实元数据 > 按体积粗估
                 let req = {
                     let mut r =
@@ -244,6 +264,7 @@ impl GatewayServer {
                     // 云端要据此在远端下载；本地部署用不到，带着也无害
                     r.model_download = dl_spec.clone();
                     r.cloud_spec = cloud_spec.clone();
+                    r.device_id = device_id.clone();
                     r
                 };
 
@@ -268,7 +289,7 @@ impl GatewayServer {
                                 &jid_p,
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
                                 mangosteen_orchestration::progress::StageOutcome::Done,
-                                format!("{}（元数据来自本地文件）", probe_assessed_detail(&ev)),
+                                "模型元数据读取成功，评估阶段完成".to_string(),
                             );
                             ev
                         }
@@ -300,7 +321,7 @@ impl GatewayServer {
                                 &jid_p,
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
                                 mangosteen_orchestration::progress::StageOutcome::Done,
-                                format!("{}（元数据来自远端文件头）", probe_assessed_detail(&ev)),
+                                "远端模型元数据读取成功，评估阶段完成".to_string(),
                             );
                             ev
                         }
@@ -316,8 +337,7 @@ impl GatewayServer {
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
                                 mangosteen_orchestration::progress::StageOutcome::Done,
                                 format!(
-                                    "{}（⚠ 元数据预取失败，以下为按体积的估算值：{}）",
-                                    probe_assessed_detail(&ev),
+                                    "模型元数据预取失败，已明确使用估算值：{}",
                                     first_line(&e.to_string())
                                 ),
                             );
@@ -334,6 +354,11 @@ impl GatewayServer {
                                  detail: String| {
                     sink_jobs.set_stage(&sink_id, stage, outcome, detail);
                 };
+                if should_cancel() {
+                    return Err(MnError::Cancelled {
+                        stage: "节点配置环境".to_string(),
+                    });
+                }
                 let mut g = gw_p
                     .lock()
                     .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
@@ -417,30 +442,35 @@ impl GatewayServer {
                 // 已在本地 → 直接跑「准备 → 提交」，不经过下载。
                 // 准备里仍会做评估与设备选择，用户能看到同样的六步。
                 if let Some(hooks) = dep.as_ref() {
-                    match (hooks.prepare)() {
+                    let cancel_check: crate::pulljobs::CancelHook = {
+                        let jobs = self.pull_jobs.clone();
+                        let id = job_id.clone();
+                        Arc::new(move || jobs.is_cancelled(&id))
+                    };
+                    match (hooks.prepare)(cancel_check) {
                         Ok(crate::gateway::PreparedDeployment::Cloud(p)) => {
                             match (hooks.commit_cloud)(*p) {
                                 Ok(dep_id) => {
                                     self.pull_jobs.set_deployment(&job_id, Some(&dep_id), None)
                                 }
-                                Err(e) => self.pull_jobs.set_deployment(
-                                    &job_id,
-                                    None,
-                                    Some(format!(
+                                Err(e) => {
+                                    let why = format!(
                                         "节点已就绪，但启动推理引擎失败：{e}。\
                                          可在「已下载模型」里点「启动」重试"
-                                    )),
-                                ),
+                                    );
+                                    self.pull_jobs.mark_failed(&job_id, why.clone());
+                                    self.pull_jobs.set_deployment(&job_id, None, Some(why));
+                                }
                             }
                         }
-                        Err(e) => self.pull_jobs.set_deployment(
-                            &job_id,
-                            None,
-                            Some(format!(
+                        Err(e) => {
+                            let why = format!(
                                 "模型已就绪，但部署准备失败：{e}。\
                                  可在「已下载模型」里点「启动」重试"
-                            )),
-                        ),
+                            );
+                            self.pull_jobs.mark_failed(&job_id, why.clone());
+                            self.pull_jobs.set_deployment(&job_id, None, Some(why));
+                        }
                     }
                 }
             }

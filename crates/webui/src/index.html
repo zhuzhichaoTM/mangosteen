@@ -115,6 +115,19 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel3);
 .kv .k{color:var(--muted);flex:0 0 auto}
 .kv .v{font-family:var(--mono);font-size:12px;text-align:right;word-break:break-all}
 
+.model-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+#v-deploy .pane{display:flex;flex-direction:column;overflow:hidden}
+#v-deploy .pane-narrow{flex:1;min-height:0;width:100%;display:flex;flex-direction:column}
+.deploy-content{flex:1;min-height:0;overflow-y:auto;margin-bottom:12px}
+.deploy-config{flex:0 0 auto;margin-bottom:0}
+.dp-config-bar{display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
+.dp-config-bar label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted)}
+.dp-config-bar select{padding:3px 9px;font-size:12px;border-radius:6px;min-width:130px;min-height:26px}
+.dp-config-bar .pill{margin-bottom:7px;font-size:12px}
+.dp-config-bar label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted);white-space:nowrap}
+.dp-inline-value{display:inline-flex;align-items:center;min-height:26px;box-sizing:border-box}
+.dp-node-info{min-width:130px;max-width:220px;overflow:hidden;text-overflow:ellipsis;color:var(--text);font-size:12px;line-height:26px}
+@media(max-width:700px){.model-actions{margin-left:0!important}}.model-main{display:flex;flex-direction:column;gap:3px;min-width:145px;flex:1}.model-row select{width:100px}.model-actions{display:flex;gap:6px;white-space:nowrap}.gpu-confirm{margin-top:14px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--panel2)}.model-detail-row td{padding:0}.template-inline{padding:12px 0}.template-inline pre{max-height:360px;overflow:auto}
 /* ================= CHAT ================= */
 #v-chat .head{
   flex:0 0 auto;display:flex;align-items:center;gap:10px;
@@ -231,6 +244,10 @@ tr.picked{background:var(--accent-soft)}
    六步横排，节点用圆点 + 连接线。状态色只在「完成/进行中/失败」
    时出现，未开始保持灰——避免整条都在抢注意力。 */
 .dp-steps{display:flex;align-items:flex-start;margin:6px 0 0;overflow-x:auto;padding-bottom:2px}
+.template-group{border:1px solid var(--line);border-radius:8px;padding:9px 11px;margin-bottom:9px;background:var(--panel2)}
+.template-group h4,.template-section-title{margin:0 0 6px;color:var(--text);font-size:12px;font-weight:650}
+.template-section-title{margin-top:13px}
+.template-yaml{display:block;margin:0;max-height:55vh;overflow:auto;padding:14px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;font:12px/1.65 var(--mono);white-space:pre-wrap;color:var(--text)}
 .dp-step{flex:1 1 0;min-width:76px;position:relative;text-align:center;padding-top:24px}
 .dp-step::before{content:"";position:absolute;top:7px;left:50%;width:100%;height:2px;
   background:var(--line2)}
@@ -420,7 +437,14 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
   padding:11px 26px;display:flex;gap:10px;align-items:center;margin:18px -26px -22px;
 }
 
-/* ---------------- 弹窗 ---------------- */
+.node-card{padding:18px 20px;border:1px solid var(--line);border-radius:12px;background:var(--panel2);margin-bottom:12px}
+.node-card h3{margin:0 0 8px;font-size:13px;font-weight:650}
+.node-card .hint{line-height:1.6}
+.node-form{display:grid;grid-template-columns:1.4fr 1fr;gap:12px 14px}
+.node-form input{min-width:0}
+.node-actions{display:flex;align-items:center;gap:10px;margin-top:14px}
+@media (max-width:680px){.node-form{grid-template-columns:1fr}.node-actions{flex-wrap:wrap}}
+
 .ov{
   position:fixed;inset:0;background:rgba(10,10,12,.48);backdrop-filter:blur(2px);
   display:none;align-items:center;justify-content:center;padding:22px;z-index:50;
@@ -447,6 +471,10 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 .cost.warn{border-color:var(--warn-line);background:var(--warn-soft)}
 .cost.warn .num{color:var(--warn)}
 .gpu-pick{display:flex;flex-direction:column;gap:6px;margin-top:7px;max-height:250px;overflow-y:auto}
+.gi-reason{margin-top:6px;font-size:11.5px;color:var(--danger)}
+.gi-reason.warn{color:var(--muted)}
+.gpu-item.off{opacity:.55;cursor:not-allowed}
+.gpu-item.off:hover{border-color:var(--line)}
 .gpu-item{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);cursor:pointer;transition:.13s}
 .gpu-item:hover{border-color:var(--accent-line);background:var(--accent-soft)}
 .gpu-item.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 1px var(--accent-line)}
@@ -583,145 +611,72 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 
   <!-- ============================ 部署 ============================ -->
   <div class="view" id="v-deploy" hidden>
-    <div class="pane">
-      <div class="pane-narrow">
-        <h1>模型部署</h1>
-        <div class="sub">搜索并下载大模型文件，然后启动本地或云端部署</div>
-
-        <div class="card">
-          <h3>部署模型</h3>
-          <div class="row">
-            <input type="text" id="dp-repo" class="grow"
-                   placeholder="输入关键字（如 qwen2.5 gguf），或完整仓库名 owner/repo">
-            <button class="primary sm" id="dp-search">搜索</button>
-            <button class="primary sm" id="dp-deploy-picked" disabled
-                    title="下载并启动选中的模型">部署</button>
-            <button class="primary sm" id="dp-clear"
-                    title="清空搜索条件、结果与已勾选的模型">清空</button>
-            <button class="help" type="button" id="dp-search-help"
-                    aria-label="搜索说明">?</button>
+    <div class="pane"><div class="pane-narrow">
+      <h1>模型部署</h1>
+      <div class="sub">按链路完成模型评估、GPU 节点选择、配置、下载和加载</div>
+      <div class="card deploy-content">
+        <div id="dp-chain" hidden>
+          <div class="row" style="justify-content:space-between;align-items:flex-start">
+            <div class="sub" id="dp-chain-model" style="margin:0"></div>
+            <button class="danger sm" id="dp-chain-abort" hidden>取消</button>
           </div>
-          <div class="helpbox" id="dp-search-helpbox" hidden>
-            <b>关键字</b>：列出含 GGUF 文件的仓库（按下载量排序，最多 100 个）。<br>
-            <b>完整仓库名</b>（含 <code>/</code>）：直接列出该仓库可下载的文件。<br>
-            选中一个文件后点「<b>部署</b>」：若本地尚未下载，会先自动下载再启动。<br>
-            「<b>清空</b>」只清界面（条件、结果、勾选），不影响已下载的模型。
-          </div>
-          <div id="dp-picked" class="picked-bar" hidden></div>
-          <div id="dp-result" style="margin-top:12px"></div>
-          <div id="dp-pager" class="pager" hidden></div>
+          <div class="dp-steps" id="dp-chain-steps"></div>
+          <div class="banner info" id="dp-chain-note" style="margin-top:12px"></div>
         </div>
-
-        <div class="card" id="dp-progress" hidden>
-          <div class="card-head">
-            <h3>部署进度</h3>
-            <span class="pill" id="dp-progress-pill">—</span>
-            <button class="primary sm" id="dp-progress-toggle">详情</button>
-            <button class="danger sm" id="dp-progress-stop">停止</button>
-          </div>
-          <div class="sub" id="dp-progress-model" style="margin:-6px 0 10px"></div>
-
-          <!-- 精简视图：默认只显示当前步与整体进度条 -->
-          <div id="dp-compact">
-            <div class="dp-line">
-              <span class="now" id="dp-now">—</span>
-              <span class="pct" id="dp-pct">—</span>
-            </div>
-            <div class="dp-track"><div class="dp-fill" id="dp-fill"></div></div>
-            <div class="dp-hint" id="dp-hint"></div>
-          </div>
-
-          <!-- 详情视图：点击「详情」才展开 -->
-          <div id="dp-detail" hidden>
-            <div class="dp-steps" id="dp-steps"></div>
-            <div class="dp-step-log" id="dp-step-log"></div>
-          </div>
-
-          <div id="dp-progress-extra"></div>
-        </div>
-
-        <div class="card">
-          <h3>模型列表</h3>
-          <div id="dp-models"><div class="empty">加载中…</div></div>
-        </div>
-
+        <div id="dp-empty-content" class="empty">请选择模型并点击部署，部署链路将在此处显示。</div>
+        <div id="dp-detail" class="template-inline" hidden></div>
       </div>
-    </div>
+      <div class="card deploy-config">
+        <div class="dp-config-bar">
+          <label>模型
+            <select id="dp-model-sel"></select>
+          </label>
+          <label>配置模板
+            <select id="dp-template-sel">
+              <option value="default">default</option>
+              <option value="mode1">mode1</option>
+              <option value="mode2">mode2</option>
+            </select>
+          </label>
+          <label>节点信息
+            <span id="dp-node-info" class="dp-inline-value dp-node-info">-</span>
+          </label>
+          <span class="model-actions" style="margin-left:auto">
+            <button class="primary sm" id="dp-deploy-btn">部署</button>
+            <button class="sm" id="dp-remove-btn">卸载</button>
+            <button class="sm" id="dp-detail-btn">详情</button>
+          </span>
+        </div>
+      </div>
+    </div></div>
   </div>
 
   <!-- ============================ 设置 ============================ -->
   <div class="view" id="v-setting" hidden>
     <div class="pane">
       <div class="pane-narrow">
-        <h1>设置</h1>
-        <div class="sub">修改后写入配置文件；标注「需重启」的项在重启网关后生效</div>
+        <h1>设备列表</h1>
+        <div class="sub">添加自定义 GPU 节点。部署时会自动加入 GPU 节点选择。</div>
 
-        <div class="card">
-          <h3>部署位置</h3>
-          <div class="banner ok">默认使用云端节点：优先选择设备列表中的 SSH 节点；没有可用节点时自动创建云端实例。</div>
+        <div class="card node-card">
+          <h3>自定义节点列表</h3>
+          <div class="hint">已添加的节点会出现在部署页 GPU 节点选择中。密码只用于 SSH 连接，不会回显。</div>
+          <div id="se-devices" style="margin-top:14px"><div class="empty">加载中…</div></div>
         </div>
 
-        <div class="card">
-          <h3>设备列表</h3>
-          <div class="hint">添加后部署会优先使用该 SSH 节点。密码只用于连接，不会回显。</div>
-          <div id="se-devices"><div class="empty">加载中…</div></div>
-          <div class="field-grid" style="margin-top:12px">
-            <input id="se-dev-host" placeholder="主机名或 IP">
+        <div class="card node-card">
+          <h3>添加节点</h3>
+          <div class="node-form">
+            <input id="se-dev-name" placeholder="节点名称（GPU 节点选择中的标识）">
+            <input id="se-dev-host" placeholder="IP 地址">
             <input id="se-dev-port" type="number" value="22" min="1" max="65535" placeholder="SSH 端口">
             <input id="se-dev-user" value="root" placeholder="用户名">
             <input id="se-dev-password" type="password" placeholder="登录密码">
           </div>
-          <div class="row" style="margin-top:10px">
-            <input id="se-dev-workdir" value="/root/mangosteen" placeholder="远端工作目录" class="grow">
-            <button class="primary sm" id="se-dev-add">添加设备</button>
+          <div class="node-actions">
+            <button class="primary" id="se-dev-add">添加节点</button>
+            <span class="hint" id="se-msg"></span>
           </div>
-        </div>
-
-        <div class="card">
-          <h3>推理引擎</h3>
-          <div class="row">
-            <select id="se-engine" style="width:200px;flex:0 0 auto"></select>
-            <button class="help" type="button" id="se-engine-help"
-                    aria-label="推理引擎说明">?</button>
-          </div>
-          <div class="helpbox" id="se-engine-helpbox" hidden>
-            <b>llama.cpp</b>（默认）：本项目拉起 <code>llama-server</code> 进程，单文件 GGUF，开箱即用。<br>
-            <b>Ollama</b>：<b>复用</b>你已启动的 Ollama 服务（默认 11434 端口），
-            不由本项目另行拉起——请先打开 Ollama 应用或执行 <code>ollama serve</code>。<br>
-            <b>vLLM / SGLang / TensorRT-LLM</b>：需要 <code>safetensors</code> 或编译产物，
-            与本项目的模型台账不同，<b>尚未适配</b>——选中后部署会明确提示，不会静默失败。
-            <div class="cur" id="se-engine-note"></div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>存储</h3>
-          <div class="field-grid">
-            <div>
-              <label class="f">模型库目录</label>
-              <input type="text" id="se-models-dir" disabled>
-              <span class="hint">需重启生效</span>
-            </div>
-            <div>
-              <label class="f">默认模型源</label>
-              <input type="text" id="se-source" placeholder="modelscope / hf">
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>云服务商</h3>
-          <div id="se-providers"><div class="empty">加载中…</div></div>
-          <div class="hint" style="margin-top:9px">
-            凭证不会在界面中显示原文。配置凭证请编辑配置文件或用环境变量
-          </div>
-        </div>
-
-        <div class="savebar">
-          <span class="hint" id="se-msg"></span>
-          <span style="flex:1"></span>
-          <button id="se-reload">重新读取</button>
-          <button class="primary" id="se-save">保存</button>
         </div>
       </div>
     </div>
@@ -738,6 +693,7 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
       <span class="hint" id="dlg-hint"></span>
       <div class="grow"></div>
       <button id="dlg-cancel">取消</button>
+      <button class="danger" id="dlg-abort" hidden>打断</button>
       <button class="primary" id="dlg-ok" disabled>确认部署</button>
     </div>
   </div>
@@ -1264,7 +1220,9 @@ Tabs.register("chat", (() => {
         // 「下拉里有、实际用不了」是最误导人的状态。
         //
         // 数据源统一为 `/api/status.active`，两页永远一致。
-        const active = (st.active || []).filter((a) => a.ready);
+        const active = (st.active || []).filter((a) =>
+          a.ready && a.node_ip && a.remote_port
+        );
         ready = active.length > 0;
 
         const sel = $("chat-model");
@@ -1400,1305 +1358,310 @@ async function loadEngines() {
 
 
 /* ==================================================================== 部署 */
-
 Tabs.register("deploy", (() => {
-  let mounted = false;
   let timer = null;
-  let jobTimer = null;
+  let currentJob = null;
+  const templates = {
+    "qwen2.5-0.5b": {
+      default: `template: default
+model_id: qwen2.5-0.5b
+quantization: 4-bit (Q4_K_M)
+device: ssh
+source: https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF
+framework: llama.cpp
+binary: llama-server
+model: qwen2.5-0.5b-instruct-q4_k_m.gguf
+context: 8192
+gpu_layers: 99
+batch: 512
+ubatch: 128
+cache_k: q4_0
+cache_v: q4_0`,
+      mode1: "template: mode1\nbase: default\nprofile: low-memory",
+      mode2: "template: mode2\nbase: default\nprofile: high-throughput",
+    },
+    "qwen3.8-27b": {
+      default: `template: default
+model_id: qwen3.8-27b
+quantization: 4-bit (Q4_K_M)
+device: ssh
+source: https://hf-mirror.com/unsloth/Qwen3.8-27B-GGUF
+framework: llama.cpp
+binary: llama-server
+model: Qwen3.8-27B-UD-Q4_K_M.gguf
+context: 65536
+gpu_layers: 99
+batch: 2048
+ubatch: 512
+cache_k: q4_0
+cache_v: q4_0
+speculative: draft-mtp`,
+      mode1: "template: mode1\nbase: default\nprofile: low-memory",
+      mode2: "template: mode2\nbase: default\nprofile: high-throughput",
+    },
+  };
+  const models = [
+    { id: "qwen2.5-0.5b", name: "Qwen2.5-0.5B", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
+    { id: "qwen3.8-27b", name: "Qwen3.8-27B", source: "hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" },
+  ];
+  const stages = ["模型评估", "GPU 节点选择", "节点配置", "模型下载", "模型量化", "启动模型", "建立隧道"];
+  let registry = {};
+  let liveMap = {};
+  // 轮询短暂失败时保留最后一个已确认阶段，不能把流程重置为模型评估。
+  let lastChainIndex = 0;
+  let lastChainNote = "";
 
-  // 搜索结果里被勾选的文件。键是 "源|仓库|文件名"，
-  // 用键而不是对象引用，是因为重新搜索会重建 DOM。
-  let picked = new Map();
-  // 当前搜索结果（按仓库分组或单仓库文件）
-  let lastRepo = "";
+  // 候选只来自本次 preview 的实时云端接口，不再混入历史/参考节点。
+  const GPU_FALLBACK = [];
 
-  // 搜索固定使用 HuggingFace 生态的可搜索镜像接口。
-  //
-  // 下载时不再让用户选 hf-mirror / huggingface.co：worker 会实测两个
-  // 站点的可达性与延迟，自动选更快的那个。这里只保留搜索所需的 API 端点。
-  const SEARCH_SOURCE = "hf-mirror";
-
-  async function loadSources() { /* 源选择已移除：下载链路自动择优 */ }
-
-  function pickedKey(source, repo, file) {
-    return source + "|" + repo + "|" + file;
-  }
-
-  /* ---------------- 搜索 ---------------- */
-
-  async function search() {
-    const q = $("dp-repo").value.trim();
-    if (!q) { toast("请输入关键字或仓库名", "err"); return; }
-    const box = $("dp-result");
-    picked.clear();
-    renderPicked();
-    box.innerHTML = '<div class="hint"><span class="spin"></span> 查询中…</div>';
-    try {
-      const r = await api("/api/models/search", {
-        method: "POST",
-        body: JSON.stringify({ query: q, source: SEARCH_SOURCE }),
-      });
-      box.innerHTML = "";
-      // 每次新搜索都重置分页与结果集，避免残留上一次的页码
-      repoAll = [];
-      repoPage = 1;
-      hidePager();
-      if (r.mode === "repos") renderRepos(box, r);
-      else renderFiles(box, r);
-    } catch (e) {
-      box.innerHTML = '<div class="banner err">' + esc(e.message) + "</div>";
-    }
-  }
-
-  // ---- 仓库列表分页状态 ----
-  // 保留完整结果集，翻页只重绘当前页，不重新请求网络。
-  let repoAll = [];
-  let repoPage = 1;
-  const PAGE_SIZE = 20;
-
-  // 收起并清空分页条。切换视图（仓库列表 ↔ 文件列表）时必须调用，
-  // 否则残留的页码按钮会误导用户以为还有更多内容。
-  function hidePager() {
-    const pg = $("dp-pager");
-    if (!pg) return;
-    pg.hidden = true;
-    pg.innerHTML = "";
-  }
-
-  // 模式一：关键字 → 仓库列表（按下载量降序 + 分页）
-  function renderRepos(box, r) {
-    const repos = (r.repos || []).slice();
-    if (!repos.length) {
-      box.appendChild(el("div", "empty",
-        "没有匹配的仓库。换个关键字试试，或直接填完整仓库名（含 /）"));
-      return;
-    }
-    // **不按格式过滤**：用户可能用 vLLM / SGLang / TensorRT（要 safetensors
-    // 或编译产物），也可能只想拿原始权重。全部列出，由 `has_gguf` 决定
-    // 是否显示「GGUF」徽标，让用户自己判断。
-    //
-    // 这里曾经有一层 `has_gguf !== false` 的过滤（当时的需求是「只留 GGUF」），
-    // 后来需求改成「不过滤、没有任何限制」，后端已放开但前端漏改，
-    // 表现为「搜到的仓库比实际少」。两端必须一致。
-
-    // 按下载量降序：用户最关心「哪个模型真的有人在用」。
-    // 源未提供下载量时视为 0，排在后面（不是过滤掉——有些新仓库很有用）。
-    repos.sort((a, b) => (b.downloads || 0) - (a.downloads || 0));
-    repoAll = repos;
-    repoPage = 1;
-
-
-    box.appendChild(el("div", "", "")).id = "dp-repo-list";
-    drawRepoPage(r.source);
-  }
-
-  // 只重绘当前页，避免翻页时重建右侧 DOM
-  function drawRepoPage(source) {
-    const holder = $("dp-repo-list");
-    if (!holder) return;
-    holder.innerHTML = "";
-
-    const total = repoAll.length;
-    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-    if (repoPage > pages) repoPage = pages;
-    const start = (repoPage - 1) * PAGE_SIZE;
-    const slice = repoAll.slice(start, start + PAGE_SIZE);
-
-    const t = el("table", "t");
-    t.innerHTML = "<thead><tr><th style='width:1%'>#</th><th>仓库</th>" +
-      "<th>下载量</th><th style='width:1%'></th></tr></thead>";
-    const tb = el("tbody");
-    slice.forEach((rp, k) => {
-      const tr = el("tr");
-      const rank = start + k + 1;
-      const dl = rp.downloads != null ? fmtNum(rp.downloads) : "—";
-      const tag = rp.has_gguf
-        ? '<span class="pill ok" style="margin-left:6px">GGUF</span>'
-        : '<span class="pill" style="margin-left:6px">未确认</span>';
-      tr.innerHTML = '<td class="mono" style="color:var(--faint)">' + rank +
-        '</td><td class="mono" style="font-size:11.5px">' + esc(rp.repo) + tag +
-        "</td><td>" + dl + "</td>";
-      const td = el("td");
-      const b = el("button", "primary sm", "查看文件");
-      b.onclick = () => openRepo(source, rp.repo);
-      td.appendChild(b);
-      tr.appendChild(td);
-      tb.appendChild(tr);
+  function renderChain(active, note, failed) {
+    if (!failed && active < lastChainIndex) active = lastChainIndex;
+    if (!failed && active >= lastChainIndex) lastChainIndex = active;
+    if (note) lastChainNote = note;
+    $("dp-chain").hidden = false;
+    $("dp-empty-content").hidden = true;
+    const abort = $("dp-chain-abort"); if (abort) abort.hidden = false;
+    const box = $("dp-chain-steps"); box.innerHTML = "";
+    stages.forEach((name, i) => {
+      const state = failed && i === active ? "failed" : i < active ? "done" : i === active ? "running" : "pending";
+      const row = el("div", "dp-step " + state);
+      row.appendChild(el("div", "dot", state === "done" ? "✓" : state === "running" ? "●" : state === "failed" ? "✕" : ""));
+      row.appendChild(el("div", "lb", name)); box.appendChild(row);
     });
-    t.appendChild(tb);
-    holder.appendChild(t);
-
-    // 分页条
-    const pager = $("dp-pager");
-    pager.innerHTML = "";
-    if (pages <= 1) { pager.hidden = true; return; }
-    pager.hidden = false;
-
-    const info = el("span", "pinfo", repoPage + " / " + pages);
-    pager.appendChild(info);
-
-    const mk = (label, page, disabled, on) => {
-      const b = el("button", on ? "on" : "", label);
-      b.disabled = !!disabled;
-      b.onclick = () => { repoPage = page; drawRepoPage(source); };
-      return b;
-    };
-
-    pager.appendChild(mk("‹", repoPage - 1, repoPage === 1));
-
-    // 页码窗口：最多 7 个，避免 100 页时按钮撑爆
-    const win = 7;
-    let from = Math.max(1, repoPage - Math.floor(win / 2));
-    let to = Math.min(pages, from + win - 1);
-    from = Math.max(1, to - win + 1);
-    if (from > 1) {
-      pager.appendChild(mk("1", 1, false, repoPage === 1));
-      if (from > 2) pager.appendChild(el("span", "pinfo", "…"));
-    }
-    for (let p = from; p <= to; p++) {
-      pager.appendChild(mk(String(p), p, false, p === repoPage));
-    }
-    if (to < pages) {
-      if (to < pages - 1) pager.appendChild(el("span", "pinfo", "…"));
-      pager.appendChild(mk(String(pages), pages, false, repoPage === pages));
-    }
-
-    pager.appendChild(mk("›", repoPage + 1, repoPage === pages));
+    $("dp-chain-note").textContent = note || (failed ? "部署失败，请检查节点和配置" : "正在执行：" + (stages[active] || "部署"));
   }
 
-  // 当前文件列表的源与仓库，供「全选 / 取消」使用
-  let fileSource = "";
-  let fileRepo = "";
-  let fileList = [];
+  function stageIndex(stage) {
+    const id = stage && stage.id;
+    if (id === "ready") return stages.length;
+    const i = ["assessing", "selecting", "configuring", "downloading", "quantizing", "launching", "tunneling"].indexOf(id);
+    return i < 0 ? 0 : i;
+  }
 
-  // 模式二：完整仓库名 → 文件列表（可勾选 + 全选/取消）
-  function renderFiles(box, r) {
-    // 进入文件列表时必须收起仓库分页条。
-    // 否则从「仓库列表（有分页）」切过来时，旧页码会挂在文件表格下方，
-    // 看起来像「页面没切换成功」——用户点页码还会把仓库列表刷回来。
-    hidePager();
+  function stageSummary(j) {
+    const trail = j && j.deploy_trail || [];
+    const last = trail.length ? trail[trail.length - 1] : null;
+    return (j && j.deploy_detail) || (last && last.detail) || "正在等待后端返回阶段信息…";
+  }
 
-    const files = r.files || [];
-    fileSource = r.source;
-    fileRepo = r.repo;
-    fileList = files.slice().sort((a, b) => a.size - b.size);
-
-    if (!files.length) {
-      box.appendChild(el("div", "empty", "该仓库没有 GGUF 文件"));
-      return;
-    }
-
-    // 标题行：左侧说明，右侧「全选 / 取消」子按钮
-    const head = el("div", "files-head");
-    const info = el("span", "hint");
-    info.innerHTML = "仓库 <code>" + esc(r.repo) + "</code> 共 " + files.length +
-      " 个 GGUF 文件，勾选后点「下载」";
-    head.appendChild(info);
-    head.appendChild(el("span", "grow"));
-
-    // 与「部署」「搜索」「下载」同款：primary sm。
-    // 全项目统一一个主按钮样式，避免同屏出现多种按钮外观。
-    const bAll = el("button", "primary sm", "全选");
-    bAll.onclick = () => selectAllFiles(true);
-    head.appendChild(bAll);
-    const bNone = el("button", "primary sm", "取消");
-    bNone.onclick = () => selectAllFiles(false);
-    head.appendChild(bNone);
-
-    box.appendChild(head);
-
-    const t = el("table", "t");
-    t.innerHTML = "<thead><tr><th style='width:1%'></th><th>文件</th>" +
-      "<th style='width:1%'>格式</th><th style='width:1%'>大小</th>" +
-      "<th>SHA-256</th></tr></thead>";
-    const tb = el("tbody");
-    fileList.forEach((f) => {
-      const tr = el("tr");
-      const key = pickedKey(fileSource, fileRepo, f.name);
-
-      const tdChk = el("td");
-      const chk = document.createElement("input");
-      chk.type = "checkbox";
-      chk.dataset.key = key;
-      // 重绘后恢复勾选状态：翻页/刷新不应丢选择
-      chk.checked = picked.has(key);
-      if (chk.checked) tr.classList.add("picked");
-      chk.onchange = () => {
-        if (chk.checked) {
-          picked.set(key, { source: fileSource, repo: fileRepo, file: f.name, size: f.size });
-        } else {
-          picked.delete(key);
-        }
-        tr.classList.toggle("picked", chk.checked);
-        renderPicked();
+  async function loadModels() {
+    // 模型配置栏：模型下拉框 + 模板下拉框 + 状态 + 操作按钮
+    const msel = $("dp-model-sel");
+    if (!msel.dataset.built) {
+      msel.innerHTML = models.map(x => '<option value="' + esc(x.id) + '">' + esc(x.name) + "</option>").join("");
+      msel.dataset.built = "1";
+      msel.onchange = refreshStatus;
+      $("dp-template-sel").onchange = () => { if ($("dp-detail").hidden === false) showDetail($("dp-template-sel").value); };
+      $("dp-deploy-btn").onclick = () => { const mdef = currentModelDef(); begin(mdef, $("dp-template-sel").value, registry[mdef.id]); };
+      $("dp-chain-abort").onclick = cancelDeployment;
+      $("dp-remove-btn").onclick = () => { const mdef = currentModelDef(); const m = registry[mdef.id]; if (m) unload(m.id); };
+      $("dp-detail-btn").onclick = () => {
+        if ($("dp-detail").hidden) showDetail($("dp-template-sel").value, false);
+        else { $("dp-detail").hidden = true; $("dp-detail").innerHTML = ""; $("dp-detail-btn").textContent = "详情"; }
       };
-      tdChk.appendChild(chk);
-      tr.appendChild(tdChk);
-
-      const tdName = el("td");
-      tdName.className = "mono";
-      tdName.style.fontSize = "11.5px";
-      tdName.textContent = f.name;
-      tr.appendChild(tdName);
-
-      // 格式徽标：不同格式用不同颜色，辅助数据额外标注
-      const fmt = f.format || "其他";
-      const aux = fmt.indexOf("辅助数据") >= 0;
-      const badgeCls = aux ? "pill warn" : (fmt === "gguf" ? "pill ok" : "pill");
-      tr.insertAdjacentHTML("beforeend",
-        '<td><span class="' + badgeCls + '">' + esc(fmt) + "</span></td>" +
-        "<td>" + bytes(f.size) + "</td>" +
-        '<td class="mono">' + (f.sha256 ? esc(f.sha256.slice(0, 12)) + "…" : "—") + "</td>");
-
-      // 不再给每个文件单独的「下载」按钮：勾选后由顶部「下载」统一触发。
-      // 逐行按钮会让人误以为可以「只下这一个」，与批量语义冲突。
-      tb.appendChild(tr);
+    }
+    const r = await api("/api/models").catch(() => ({models:[]}));
+    const d = await api("/api/deployments").catch(() => ({deployments:[]}));
+    registry = {}; liveMap = {};
+    models.forEach((mdef) => {
+      registry[mdef.id] = (r.models || []).find(x => String(x.id || "").toLowerCase().includes(mdef.id)) || null;
+      liveMap[mdef.id] = (d.deployments || []).find(x => (x.status === "ready" || x.status === "provisioning") && String(x.model_id || x.model || "").toLowerCase().includes(mdef.id)) || null;
     });
-    t.appendChild(tb);
-    box.appendChild(t);
-
-    renderPicked();
+    refreshStatus();
   }
 
-  // 全选 / 取消：只作用于**当前仓库的全部文件**（不是当前页）
-  function selectAllFiles(on) {
-    fileList.forEach((f) => {
-      const key = pickedKey(fileSource, fileRepo, f.name);
-      if (on) picked.set(key, { source: fileSource, repo: fileRepo, file: f.name, size: f.size });
-      else picked.delete(key);
-    });
-    // 同步界面上的勾选框
-    document.querySelectorAll("#dp-result input[type=checkbox]").forEach((x) => {
-      x.checked = on;
-      const tr = x.closest("tr");
-      if (tr) tr.classList.toggle("picked", on);
-    });
-    renderPicked();
+  function currentModelDef() {
+    const id = $("dp-model-sel").value || models[0].id;
+    return models.find(x => x.id === id) || models[0];
   }
 
-  // 从仓库列表点进文件列表
-  async function openRepo(source, repo) {
-    $("dp-repo").value = repo;
-    const box = $("dp-result");
-    picked.clear();
-    renderPicked();
-    box.innerHTML = '<div class="hint"><span class="spin"></span> 读取文件列表…</div>';
-    try {
-      const r = await api("/api/models/search", {
-        method: "POST",
-        body: JSON.stringify({ query: repo, source }),
-      });
-      box.innerHTML = "";
-      renderFiles(box, r);
-    } catch (e) {
-      box.innerHTML = '<div class="banner err">' + esc(e.message) + "</div>";
-    }
-  }
-
-  /* ---------------- 勾选与部署 ----------------
-   *
-   * UI 不再提供独立的「下载」入口：下载只是部署的内部步骤。
-   * 因此这里的选择语义也收紧了——**只能选一个文件**。
-   *
-   * 理由：部署是「启动一个实例」，同时启动多个模型会立刻撞上
-   * 资源约束（显存/端口）与「同一模型只允许一个实例」的约束，
-   * 与其事后报错，不如在选择时就限制。
-   */
-
-  /// 从文件名推导「主模型名」（去掉量化后缀）。
-  ///
-  /// 用于识别「同一个模型的不同量化」：`Qwen2.5-7B-Q4_K_M.gguf` 与
-  /// `Qwen2.5-7B-Q8_0.gguf` 是同一主模型，只该选一个。
-  function baseModelName(file) {
-    let n = file.split("/").pop() || file;
-    n = n.replace(/\.gguf$/i, "");
-    // 去掉常见量化后缀（Q4_K_M / IQ4_XS / F16 / BF16 …）
-    n = n.replace(/[-._](i?q\d+([._][a-z0-9]+)*|f16|f32|bf16|fp16|q8_0|q4_0)$/i, "");
-    return n.toLowerCase();
-  }
-
-  function renderPicked() {
-    const bar = $("dp-picked");
-    const btn = $("dp-deploy-picked");
-    const n = picked.size;
-
-    if (!n) {
-      bar.hidden = true;
-      btn.disabled = true;
-      btn.textContent = "部署";
-      bar.innerHTML = "";
-      return;
-    }
-
-    const items = [...picked.values()];
-    let total = 0;
-    items.forEach((p) => { total += p.size || 0; });
-
-    // 跨仓库：不能一次部署（部署要指定引擎与设备，跨仓库分组只会更乱）
-    const repos = new Set(items.map((p) => p.source + "|" + p.repo));
-    // 同一主模型的不同量化：提示精准选择
-    const bases = new Set(items.map((p) => baseModelName(p.file)));
-
-    bar.hidden = false;
-    bar.innerHTML = "";
-
-    if (repos.size > 1) {
-      // 不同仓库 = 不同模型：明确报错
-      const w = el("span", "");
-      w.style.color = "#c0453b";
-      w.textContent = "不能同时部署多个不同仓库的模型（已选 " + repos.size +
-        " 个仓库的 " + n + " 个文件）。请只选一个。";
-      bar.appendChild(w);
-      btn.disabled = true;
-      btn.textContent = "部署";
-      return;
-    }
-
-    if (n > 1 && bases.size === 1) {
-      // 同一模型只是不同量化 → 精准选择提示
-      const w = el("span", "");
-      w.style.color = "#a8720f";
-      w.textContent = "这些是同一个模型的 " + n + " 个量化版本，请只选一个" +
-        "（如 " + items[0].file.split("/").pop() + " 或 " +
-        items[1].file.split("/").pop() + "）。";
-      bar.appendChild(w);
-      btn.disabled = true;
-      btn.textContent = "部署";
-      return;
-    }
-
-    if (n > 1) {
-      // 同仓库但既不同量化、也不是同一模型 → 仍是多个模型
-      const w = el("span", "");
-      w.style.color = "#c0453b";
-      w.textContent = "不能同时部署 " + n + " 个不同模型。请只选一个。";
-      bar.appendChild(w);
-      btn.disabled = true;
-      btn.textContent = "部署";
-      return;
-    }
-
-    // 单选 → 允许部署
-    bar.appendChild(el("span", "", "已选 " + items[0].file.split("/").pop() +
-      "（" + bytes(total) + "）"));
-    btn.disabled = false;
-    btn.textContent = "部署";
-  }
-
-  /// 取消全部选择。
-  ///
-  /// 单一入口很重要：文件列表的「取消」、下载完成后都要走这里，
-  /// 否则很容易出现「状态清了但勾选框还亮着」的不一致。
-  function clearSelection() {
-    picked.clear();
-    document.querySelectorAll("#dp-result input[type=checkbox]").forEach((x) => {
-      x.checked = false;
-      const tr = x.closest("tr");
-      if (tr) tr.classList.remove("picked");
-    });
-    // 立即刷新「已选 N 个 / 共 X」信息条与按钮状态
-    renderPicked();
-  }
-
-  /// 部署选中的那一个文件（UI 唯一的「下载+启动」入口）。
-  function deployPicked() {
-    const items = [...picked.values()];
-    if (items.length !== 1) return;
-    const it = items[0];
-    clearSelection();          // 先清选择，避免重复点击提交两遍
-    deployFromSearch(it);
-  }
-
-  /// 搜索结果的云端部署确认：候选为空时不允许进入下载/创建阶段。
-  function renderCloudPullConfirm(pv, spec, name) {
-    const body = $("dlg-body");
-    $("ov-deploy").classList.add("show");
-    $("dlg-title").textContent = "确认云端 GPU 部署";
-    $("dlg-sub").textContent = "请选择 GPU 型号并确认费用后才会创建实例";
-    body.innerHTML = "";
-    $("dlg-foot").style.display = "flex";
-    let selected = null;
-    const cands = pv.cloud_candidates || [];
-    const list = el("div", "gpu-pick");
-    const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "cb-confirm-pull";
-    const lb = document.createElement("label"); lb.htmlFor = "cb-confirm-pull";
-    const box = el("div", "confirm"); box.appendChild(cb); box.appendChild(lb);
-    const sync = () => {
-      list.querySelectorAll(".gpu-item").forEach(n => n.classList.toggle("on", n.dataset.spec === selected));
-      const x = cands.find(c => c.spec_id === selected);
-      lb.textContent = x ? "我已了解将创建 " + x.gpu_model + "（约 " + cny(x.price_per_hour) + "/小时）" : "请先选择 GPU 型号";
-      $("dlg-ok").disabled = !(x && cb.checked);
-    };
-    cands.forEach(x => {
-      const item = el("div", "gpu-item"); item.dataset.spec = x.spec_id;
-      item.innerHTML = '<div class="gi-main"><b>' + esc(x.tier || "候选") + " · " + esc(x.gpu_model) + '</b><span class="gi-sub">' + esc(x.provider) + " · " + esc(x.region) + '</span></div><div class="gi-meta"><span>' + gib(x.vram_bytes) + '</span><span class="price">' + cny(x.price_per_hour) + "/h</span></div>';
-      item.onclick = () => { selected = x.spec_id; sync(); }; list.appendChild(item);
-    });
-    body.appendChild(section("GPU 节点")); body.appendChild(list); body.appendChild(box);
-    $("dlg-ok").textContent = "确认并开始下载"; $("dlg-ok").disabled = true;
-    cb.onchange = sync;
-    $("dlg-ok").onclick = async () => {
-      $("dlg-ok").disabled = true; $("dlg-ok").innerHTML = '<span class="spin"></span> 提交中…';
-      try {
-        await api("/api/models/pull", { method: "POST", body: JSON.stringify({ model: spec, deploy: true, target: "cloud", cloud_spec: selected }), timeoutMs: 60000 });
-        $("ov-deploy").classList.remove("show"); $("dp-detail").hidden = true; $("dp-progress-toggle").textContent = "详情"; startJobPolling(); await refreshModelCards();
-      } catch (e) { $("dlg-ok").innerHTML = "重试"; $("dlg-ok").disabled = false; $("dlg-hint").textContent = e.message; }
-    };
-    $("dlg-cancel").onclick = () => $("ov-deploy").classList.remove("show");
-    void name;
-  }
-
-  /// 从搜索结果直接部署：下载（若没有）→ 自动启动。
-  ///
-  /// 为什么复用 `/api/models/pull` 而不是新增接口：下载链路已经有
-  /// 续传、SHA 校验、去重、磁盘预检，重写一遍只会引入不一致。
-  /// 这里只多传 `deploy: true`，让它下完继续启动。
-  async function deployFromSearch(it) {
-    const spec = it.source + ":" + it.repo + "/" + it.file;
-    const name = it.file.split("/").pop();
-    toast("正在准备 " + name + "…", "ok");
-    try {
-      // 与模型列表「部署/启动」统一：云端必须先拿到 GPU 候选并让用户确认。
-      // 不能直接 POST /pull，否则会绕过设备选择，后台静默创建计费实例。
-      if (currentTarget() === "cloud") {
-        const pv = await api("/api/preview", {
-          method: "POST",
-          body: JSON.stringify({ model: it.source + ":" + it.repo + "/" + it.file, target: "cloud" }),
-        });
-        if (!pv.cloud_candidates || !pv.cloud_candidates.length || pv.cloud_error) {
-          toast("没有可用的 GPU 节点：" + (pv.cloud_error || "请稍后重试"), "err");
-          return;
-        }
-        // 复用同一个 GPU/费用确认弹窗；确认回调会提交 pull。
-        renderCloudPullConfirm(pv, spec, name);
-        return;
-      }
-      const r = await api("/api/models/pull", {
-        method: "POST",
-        body: JSON.stringify({ model: spec, deploy: true, target: currentTarget() }),
-        timeoutMs: 60000,
-      });
-      // 下载与启动都在后台线程完成，这里只确认「已开始」
-      if (r.reused) toast(name + " 已在准备中", "ok");
-      // 新任务默认收起详情，保持界面简洁；用户想看再点「详情」
-      $("dp-detail").hidden = true;
-      $("dp-progress-toggle").textContent = "详情";
-      $("dp-progress-toggle").classList.remove("on");
-      // 立刻拉起进度轮询：用户点完按钮就该看到「第 1 步」，
-      // 而不是等下一次 3 秒轮询才发现任务已创建
-      startJobPolling();
-      await refreshModelCards();
-    } catch (e) {
-      toast("部署失败：" + e.message, "err");
-    }
-  }
-
-  /* ---------------- 部署进度展示 ----------------
-   *
-   * 数据源 `GET /api/models/jobs`。后端已经把「每步是完成/进行中/
-   * 跳过/失败」算好（含跳过原因），前端只负责画——把状态判定
-   * 放在两边各写一遍，一旦不一致最难查。
-   */
-
-  /// 从 `pull-12` 这样的 ID 取数字，用于按创建顺序排序。
-  function jobSeq(id) {
-    const m = String(id || "").match(/(\d+)/);
-    return m ? parseInt(m[1], 10) : 0;
-  }
-
-  function stepGlyph(outcome) {
-    if (outcome === "done") return "✓";
-    if (outcome === "running") return "●";
-    if (outcome === "skipped") return "–";
-    if (outcome === "failed") return "✕";
-    return "";
-  }
-
-  /// 画一个任务，返回它是否仍在进行中。
-  function renderJob(j) {
-    const st = j.deploy_stage || {};
-    const failed = st.id === "failed" || j.state === "failed";
-    const ready = st.id === "ready";
-    const cancelled = j.state === "cancelled";
-
-    $("dp-progress").hidden = false;
-
-    // ---- 标题行：状态胶囊 ----
-    const pill = $("dp-progress-pill");
-    if (cancelled) {
-      pill.textContent = "已停止";
-      pill.className = "pill warn";
-    } else if (ready) {
-      pill.textContent = "已就绪";
-      pill.className = "pill ok";
-    } else if (failed) {
-      pill.textContent = "失败";
-      pill.className = "pill err";
+  function refreshStatus() {
+    const mdef = currentModelDef();
+    const m = registry[mdef.id]; const live = liveMap[mdef.id];
+    const node = $("dp-node-info");
+    if (live) {
+      const host = live.node_ip || live.node_host || "";
+      const remotePort = live.remote_port || live.engine_port || "";
+      node.textContent = host ? host + (remotePort ? ":" + remotePort : "") : "-";
+      node.title = node.textContent === "-" ? "未部署" : node.textContent;
     } else {
-      pill.textContent = st.label
-        ? "第 " + st.index + "/" + st.total + " 步 · " + st.label
-        : "准备中";
-      pill.className = "pill";
+      node.textContent = "-";
+      node.title = "未部署";
     }
+    const deploy = $("dp-deploy-btn"); deploy.disabled = !!live; deploy.textContent = live ? "部署中" : "部署";
+    const remove = $("dp-remove-btn"); remove.disabled = !m || !!live;
+  }
 
-    $("dp-progress-model").textContent = j.model_id
-      ? j.model_id + "（" + (j.file || "") + "）"
-      : (j.file || j.spec || "");
-
-    // ---- 停止按钮：只有还在跑的任务才可点 ----
-    //
-    // 已终结（成功/失败/已停止）不给停止——点了也没意义，
-    // 还会让用户以为能撤销一个已经完成的部署。
-    const stopBtn = $("dp-progress-stop");
-    stopBtn.hidden = !j.can_abort;
-    stopBtn.disabled = !j.can_abort;
-    stopBtn.onclick = () => abortJob(j);
-
-    // ---- 精简视图：当前步 + 整体进度 ----
-    //
-    // 进度口径：已终结的步数 / 总步数；下载中则取下载百分比
-    // （那一段最耗时，用户真正关心的是「还差多少」）。
-    const steps = j.deploy_steps || [];
-    const settled = steps.filter(
-      (s) => s.outcome === "done" || s.outcome === "skipped" || s.outcome === "failed"
-    ).length;
-    const downloading = steps.some(
-      (s) => s.id === "downloading" && s.outcome === "running"
-    );
-
-    let pct;
-    if (ready) pct = 100;
-    else if (cancelled || failed) pct = settled / (steps.length || 6) * 100;
-    else if (downloading && j.percent != null) {
-      // 下载占 6 步里的 1 步：前 3 步已完成 → 50% 起步，下载段映射到 50~83%
-      pct = 50 + j.percent * (1 / 3);
-    } else pct = settled / (steps.length || 6) * 100;
-
-    const fill = $("dp-fill");
-    fill.style.width = Math.max(0, Math.min(100, pct)) + "%";
-    fill.className = "dp-fill" +
-      (ready ? " done" : (failed || cancelled) ? " err" : "");
-
-    $("dp-pct").textContent = Math.round(pct) + "%";
-
-    const now = $("dp-now");
-    const hint = $("dp-hint");
-    hint.className = "dp-hint";
-    if (cancelled) {
-      now.textContent = "已停止";
-      hint.className = "dp-hint err";
-      hint.textContent = j.note || "部署已中止，相关资源已回滚";
-    } else if (ready) {
-      now.textContent = "部署完成";
-      hint.className = "dp-hint ok";
-      hint.textContent = j.deployment_id
-        ? "模型已就绪，可以对话了（部署 ID " + j.deployment_id + "）"
-        : "模型已就绪，可以对话了";
-    } else if (failed) {
-      now.textContent = "部署失败";
-      hint.className = "dp-hint err";
-      hint.textContent = j.error || j.deploy_detail || "未知原因";
-    } else if (downloading && j.state === "running") {
-      now.textContent = "正在下载模型文件";
-      const sp = j.bytes_per_sec ? " · " + bytes(j.bytes_per_sec) + "/s" : "";
-      hint.textContent =
-        bytes(j.done_bytes || 0) + " / " +
-        (j.total_bytes ? bytes(j.total_bytes) : "未知") + sp;
-    } else {
-      now.textContent = st.label || "准备中";
-      hint.textContent = j.deploy_detail || "";
-    }
-
-    // ---- 详情视图：步骤条 + 每步结果 ----
-    const box = $("dp-steps");
+  /// 在上方部署内容文本区域中显示模板详情（纯文本 YAML）。
+  function showDetail(name) {
+    const modelTemplates = templates[currentModelDef().id] || templates["qwen2.5-0.5b"];
+    const text = modelTemplates[name] || modelTemplates.default;
+    const box = $("dp-detail");
     box.innerHTML = "";
-    steps.forEach((s) => {
-      const d = el("div", "dp-step " + (s.outcome || "pending"));
-      d.appendChild(el("div", "dot", stepGlyph(s.outcome)));
-      d.appendChild(el("div", "lb", s.label));
-      box.appendChild(d);
-    });
-
-    const log = $("dp-step-log");
-    log.innerHTML = "";
-    steps.forEach((s) => {
-      // 未开始的步骤不占版面：等它真的跑过再显示
-      if (s.outcome === "pending") return;
-      const row = el("div", "dp-log-row " + (s.outcome || ""));
-      row.appendChild(el("span", "mk", stepGlyph(s.outcome) || "·"));
-      row.appendChild(el("span", "nm", s.label));
-      row.appendChild(el("span", "tx", s.detail || ""));
-      log.appendChild(row);
-    });
-
-    // ---- 附加区：失败/警告横幅 + 下一步建议 ----
-    //
-    // 成功情形**不再画横幅**：上方 `dp-hint` 已经写了「模型已就绪，可以对话了
-    // （部署 ID …）」，再挂一条「部署成功 部署 ID …」是同一句话说两遍，
-    // 既占版面又让人以为还有额外信息没看。失败/警告必须留——那是可操作内容。
-    const extra = $("dp-progress-extra");
-    extra.innerHTML = "";
-
-    // 生成阶段错误只显示进度区的单一提示；不要再叠加 toast/第二个弹窗。
-    if (failed) {
-      const tip = el("div", "sub");
-      tip.style.marginTop = "8px";
-      tip.textContent = j.model_id
-        ? "模型文件已就位，可在下方「模型列表」里点「启动」重试；" +
-          "若反复失败，请到设置页确认推理引擎与设备配置。"
-        : "请检查模型文件、推理引擎与设备配置后重试。";
-      extra.appendChild(tip);
-    } else if (j.warning) {
-      const w = el("div", "banner info");
-      w.textContent = j.warning;
-      extra.appendChild(w);
-    }
-
-    return !(ready || failed || cancelled || j.state === "failed");
+    const pre = document.createElement("pre");
+    pre.className = "template-yaml";
+    pre.textContent = text;
+    box.appendChild(pre);
+    box.hidden = false;
+    $("dp-empty-content").hidden = true;
+    $("dp-detail-btn").textContent = "收起";
   }
 
-  /// 停止部署并回滚。
-  ///
-  /// 后端会：停引擎 → 删台账记录 → 释放端口 → 按需删本次下载的文件。
-  /// 所以确认框必须说清「下载的文件也会被删」，否则用户以为只是暂停。
-  async function abortJob(j) {
-    const name = j.model_id || j.file || j.spec || "该模型";
-    if (!confirm("停止部署 " + name + "？\n\n" +
-                 "将回滚这次部署：关闭已启动的引擎、删除部署记录、" +
-                 "释放占用的端口，并删除本次下载的文件（不可恢复）。\n" +
-                 "若只是想暂停，请等下载完成后用「模型列表」里的「停止」。")) {
+  /// 判断节点是否空闲、可部署；不可用时返回具体原因。
+  function availability(x) {
+    if (x.reference) return { ok: false, reason: "参考节点：未接入厂商实时库存，无法确认空闲状态" };
+    if (x.stock === 0) return { ok: false, reason: "库存不足：厂商实时库存为 0" };
+    if (x.stock == null) return { ok: false, reason: "库存未知：厂商未提供实时库存，无法确认空闲状态" };
+    return { ok: true, reason: "" };
+  }
+
+  async function begin(mdef, template, model) {
+    // 新部署从第一步开始；上次失败留下的阶段指针必须清零，
+    // 否则新任务会被 renderChain 的「只前进」逻辑直接顶到旧位置。
+    lastChainIndex = 0;
+    lastChainNote = "";
+    renderChain(0, "正在读取模型规格；随后会等待云端节点创建完成");
+    $("dp-chain-model").textContent = mdef.name + " · 模板 " + template;
+    const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, target:"cloud", config_template:template})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
+    renderChain(1, "模型评估完成，请选择 GPU 节点后继续");
+    const saved = (pv.devices || []).map(d => ({
+      id: d.id, custom: true, gpu_model: d.name || "自定义 GPU 节点", provider: "本地自定义",
+      region: "SSH", spec_id: d.id, vram_bytes: 0, memory_bytes: 0, disk_bytes: 0,
+      cpu_cores: 0, stock: 1, host: d.host, port: d.port, user: d.user,
+      label: d.host + ":" + d.port + " · " + d.user
+    }));
+    const candidates = saved.concat((pv.cloud_candidates || []).filter(x => x.stock == null || x.stock > 0));
+    if (!candidates.length && pv.cloud) candidates.push(pv.cloud);
+    const chosen = await chooseGpu(candidates);
+    if (!chosen) { renderChain(1, "已取消：未确认 GPU 节点", true); return; }
+    const source = mdef.source;
+    const payload = {model:source, deploy:true, target:"cloud", config_template:template};
+    if (chosen.startsWith("dev-")) payload.device_id = chosen;
+    else payload.cloud_spec = chosen;
+    renderChain(1, "已选择 " + chosen + "，正在提交节点创建任务");
+    const r = await api("/api/models/pull", {
+      method:"POST", timeoutMs:30000,
+      body:JSON.stringify(payload)
+    }).catch(e => ({error:e.message}));
+    if (r.error) { renderChain(1, r.error.message || r.error, true); return; }
+    currentJob = r.job_id;
+    if (!currentJob) { renderChain(1, "部署任务未返回有效任务 ID", true); return; }
+    pollChain();
+  }
+
+  function chooseGpu(cands) {
+    const usable = cands.filter(x => availability(x).ok);
+    return new Promise(resolve => {
+      const box = el("div", "gpu-confirm");
+      box.innerHTML = '<h3>确认 GPU 节点</h3><div class="hint">仅列出空闲、可部署的节点；不可部署节点会标注具体原因。</div>';
+      const list = el("div", "gpu-pick"); let selected = null;
+      cands.forEach((x, i) => {
+        const av = availability(x);
+        const item = el("div", "gpu-item" + (av.ok ? "" : " off")); const id = x.spec_id || x.gpu_model || ("candidate-" + i); item.dataset.spec = id;
+        item.innerHTML = '<div class="gi-main"><b>' + esc(x.gpu_model || "GPU") + ' × ' + (x.gpu_count || 1) + '</b><span class="gi-sub">' + esc(x.provider || "云厂商") + ' · ' + esc(x.region || "未知") + ' · ' + esc(id) + '</span></div><div class="gi-meta"><span>显存 ' + gib(x.vram_bytes || 0) + '</span><span>CPU ' + (x.cpu_cores || "—") + ' 核</span><span>内存 ' + gib(x.memory_bytes || 0) + '</span><span>磁盘 ' + gib(x.disk_bytes || 0) + '</span><span>' + (x.reference ? "参考（价格待报价）" : cny(x.price_per_hour || 0) + "/h") + '</span></div>' +
+          (av.ok ? (av.warn ? '<div class="gi-reason warn">' + esc(av.reason) + '</div>' : "") : '<div class="gi-reason">' + esc(av.reason) + '</div>');
+        if (av.ok) {
+          item.onclick = () => { selected = id; list.querySelectorAll(".gpu-item").forEach(n => n.classList.toggle("on", n === item)); };
+        } else {
+          item.title = av.reason;
+        }
+        list.appendChild(item);
+      });
+      box.appendChild(list); const foot = el("div", "row"); const cancel = el("button", "", "取消"); const ok = el("button", "primary", "确认节点"); ok.disabled = usable.length === 0; list.onclick = () => { ok.disabled = !selected; };
+      if (!usable.length) box.appendChild(el("div", "banner err", "实时接口未返回空闲可部署节点：" + cands.map(x => (x.gpu_model || "?") + "（" + availability(x).reason + "）").join("；")));
+      cancel.onclick = () => { box.remove(); resolve(null); }; ok.onclick = () => { box.remove(); resolve(selected); }; foot.append(cancel, ok); box.appendChild(foot); $("dp-chain").appendChild(box);
+    });
+  }
+
+  function resetDeploymentView() {
+    lastChainIndex = 0;
+    lastChainNote = "";
+    currentJob = null;
+    $("dp-chain").hidden = true;
+    $("dp-empty-content").hidden = false;
+    $("dp-chain-abort").hidden = true;
+    $("dp-chain-abort").disabled = false;
+    $("dp-chain-steps").innerHTML = "";
+    $("dp-chain-note").textContent = "";
+    $("dp-deploy-btn").disabled = false;
+    $("dp-deploy-btn").textContent = "部署";
+    $("dp-model-sel").selectedIndex = 0;
+    $("dp-template-sel").selectedIndex = 0;
+  }
+
+  async function cancelDeployment() {
+    const id = currentJob;
+    if (!id) {
+      $("dp-chain-note").textContent = "当前没有可取消的部署任务";
       return;
     }
-    const btn = $("dp-progress-stop");
-    btn.disabled = true;
-    btn.textContent = "正在停止…";
+    const abort = $("dp-chain-abort");
+    abort.disabled = true;
+    $("dp-chain-note").textContent = "已请求取消，正在停止下载并回滚节点、隧道和部署记录…";
     try {
-      await api("/api/models/jobs/" + encodeURIComponent(j.id) + "/cancel",
-                { method: "POST" });
-      toast("已停止 " + name + "，正在回滚", "ok");
-      // 立刻刷一次：让用户看到「已停止」而不是等 1 秒
-      await loadJobs();
-      await refreshModelCards();
+      await api("/api/models/jobs/" + encodeURIComponent(id) + "/cancel", {method:"POST"});
+      // 保留 currentJob，继续轮询，直到后端完成清理；否则立即清空会让用户看不到回滚结果。
+      await waitCancellation(id, Date.now());
     } catch (e) {
-      toast("停止失败：" + e.message, "err");
-    } finally {
-      btn.textContent = "停止";
-      btn.disabled = false;
+      $("dp-chain-note").textContent = "取消请求失败：" + e.message;
+      abort.disabled = false;
     }
   }
 
-  /// 拉一次任务表并渲染最近一个「部署型」任务。
-  ///
-  /// 返回是否仍有进行中的任务（供轮询决定要不要继续）。
-  async function loadJobs() {
-    let jobs = [];
-    try {
-      const r = await api("/api/models/jobs");
-      // 只关心「下载完自动部署」的任务：纯下载任务不该在部署页出现
-      jobs = (r.jobs || []).filter((x) => x.deploy_after);
-    } catch (e) {
-      return false;
+  async function waitCancellation(id, startedAt) {
+    const j = await api("/api/models/jobs?id=" + encodeURIComponent(id)).catch(() => null);
+    const age = Date.now() - (startedAt || Date.now());
+    const cleanupPending = j && j.note && j.note.indexOf("已发出取消请求") >= 0;
+    if (j && (cleanupPending || !["cancelled", "failed", "done"].includes(j.state)) && age < 120000) {
+      $("dp-chain-note").textContent = j.note || "正在停止下载并回滚资源…";
+      setTimeout(() => waitCancellation(id, startedAt || Date.now()), 1000);
+      return;
     }
-    if (!jobs.length) {
-      $("dp-progress").hidden = true;
-      return false;
-    }
-    jobs.sort((a, b) => jobSeq(b.id) - jobSeq(a.id));
-    return renderJob(jobs[0]);
-  }
-
-  /// 刷新模型列表（活跃部署索引用于按钮状态）。
-  async function refreshModelCards() {
+    currentJob = null;
+    resetDeploymentView();
     await loadModels();
   }
-
-  /// 启动进度轮询：1 秒一刷，任务终结后自动停。
-  ///
-  /// 自动停很重要：部署页开着不动时不该一直打接口——
-  /// 「UI 轮询把线程池耗尽」是踩过的坑。
-  function startJobPolling() {
-    if (jobTimer) { clearInterval(jobTimer); jobTimer = null; }
-    const tick = async () => {
-      const active = await loadJobs();
-      if (!active && jobTimer) {
-        clearInterval(jobTimer);
-        jobTimer = null;
-        // 任务刚终结（部署完成 / 失败 / 已停止）→ 两张卡片都要对齐一次：
-        // 新模型可能刚登记进台账、实例刚就绪，按钮该从「启动」变「停止」。
-        await refreshModelCards();
-      }
-    };
-    tick();
-    jobTimer = setInterval(tick, 1000);
-  }
-
-  function bindOnce() {
-    $("dp-search").onclick = search;
-    $("dp-deploy-picked").onclick = deployPicked;
-    $("dp-clear").onclick = clearSearch;
-    bindHelp("dp-search-help", "dp-search-helpbox");
-
-    // 「详情」切换：默认收起，只显示精简进度条。
-    // 用户日常只关心「到哪了、还差多久」，六步全摊开会把页面撑得很长。
-    $("dp-progress-toggle").onclick = () => {
-      const box = $("dp-detail");
-      const open = box.hidden;
-      box.hidden = !open;
-      $("dp-progress-toggle").textContent = open ? "收起" : "详情";
-      $("dp-progress-toggle").classList.toggle("on", open);
-    };
-
-    $("dp-repo").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") search();
-    });
-    // 部署确认弹窗的取消按钮（弹窗逻辑沿用原有实现）
-    const cancel = $("dlg-cancel");
-    if (cancel) cancel.onclick = () => $("ov-deploy").classList.remove("show");
-  }
-
-  /// 清空搜索条件、结果与勾选。
-  ///
-  /// **只清界面**，不动已下载的模型、不动正在跑的实例——
-  /// 用户点「清空」通常是想换个模型搜，不是想删东西。
-  /// 真要删模型请用「模型列表」里的「卸载」。
-  function clearSearch() {
-    $("dp-repo").value = "";
-    $("dp-result").innerHTML = "";
-    repoAll = [];
-    repoPage = 1;
-    hidePager();
-    clearSelection();
-    // 结果区清空后，把焦点还给输入框，省一次点击
-    $("dp-repo").focus();
-  }
-
-  return {
-    async mount() {
-      if (!mounted) { bindOnce(); mounted = true; }
-      await loadSources();
-      await loadModels();
-      renderPicked();
-      // 活跃部署状态 3s 一刷：模型列表的「启动 ⇄ 停止」按钮由它决定。
-      // 部署页不再单独展示「模型实例」卡片，实例查询仍可通过 CLI 完成。
-      timer = setInterval(async () => {
-        await loadModels();
-      }, 3000);
-      // 部署进度：先渲染一次（页面刷新后要能接上正在跑的任务），
-      // 有进行中的任务才继续轮询。
-      if (await loadJobs()) startJobPolling();
-    },
-    unmount() {
-      // 切换页签必须清定时器，否则来回切几次就会叠加出多个轮询
-      if (timer) { clearInterval(timer); timer = null; }
-      if (jobTimer) { clearInterval(jobTimer); jobTimer = null; }
-    },
-
-  };
-  async function loadModels() {
-    const box = $("dp-models");
-    try {
-      // 并行取：模型台账 + 活跃部署（用来决定按钮显示「部署」还是「停止」）
-      const [r, d] = await Promise.all([
-        api("/api/models"),
-        api("/api/deployments").catch(() => ({ deployments: [] })),
-      ]);
-      const items = r.models || [];
-
-      // 两个索引：
-      //  · liveByModel：正在运行的实例 → 按钮显示「停止」
-      //  · lastByModel：每个模型最近一次部署记录 → 未运行时可直接启动
-      //    （复用已保存的方案，不再重新做资源评估）
-      const liveByModel = {};
-      const lastByModel = {};
-      (d.deployments || []).forEach((x) => {
-        const mid = x.model_id || x.model;
-        if (x.status === "ready" || x.status === "provisioning") {
-          liveByModel[mid] = x;
-        }
-        // 已销毁（destroyed）的记录不能直接重启：状态机不允许
-        // destroyed → provisioning，且资源已回收。跳过它，让 UI 走
-        // 「评估 → 部署」的正路，而不是点了启动必然失败。
-        if (x.status === "destroyed") return;
-        const prev = lastByModel[mid];
-        if (!prev || (x.updated_at || 0) >= (prev.updated_at || 0)) {
-          lastByModel[mid] = x;
-        }
-      });
-
-      if (!items.length) {
-        box.innerHTML = '<div class="empty">还没有模型。用上方「部署模型」，' +
-          '或在命令行执行 <code>mangosteen models pull …</code> 下载</div>';
+  async function pollChain() {
+    if (!currentJob) return;
+    const id = currentJob;
+    const j = await api("/api/models/jobs?id=" + encodeURIComponent(id)).catch(() => null);
+    if (!j) {
+      renderChain(lastChainIndex, lastChainNote || "正在等待部署任务状态…");
+      setTimeout(pollChain, 1000);
+      return;
+    }
+    if (j.state === "cancelled") {
+      $("dp-chain-note").textContent = j.note || "部署已取消，正在确认资源清理结果…";
+      if (j.note && j.note.indexOf("已发出取消请求") < 0) {
+        resetDeploymentView();
         return;
       }
-      box.innerHTML = "";
-      const t = el("table", "t");
-      // 两列即可：模型 ID 与大小合并在同一格（大小作为紧随其后的淡色注记）。
-      // 分成两列时，表格 100% 宽会把 ID 列拉得很长、大小飘到右侧，
-      // 中间留出大片空白——这才是「太分开」的根源。
-      // 列宽按内容重要性分配：模型 ID 占主要宽度，来源与节点 IP 紧随其后，
-      // 操作列贴右。早先用 width:1% 让中间列全挤到右侧，视觉上像悬空。
-      t.innerHTML = "<thead><tr><th>模型 ID</th>" +
-        "<th style='width:15%;white-space:nowrap'>来源</th>" +
-        "<th style='width:17%;white-space:nowrap'>节点 IP</th>" +
-        "<th style='width:20%;white-space:nowrap;text-align:right'>操作</th></tr></thead>";
-      const tb = el("tbody");
-      items.forEach((m) => {
-        const tr = el("tr");
-
-        // ---- 模型 ID + 大小（同一格，紧挨着）----
-        const tdId = el("td");
-        const idSpan = el("span", "mono");
-        idSpan.style.fontSize = "11.5px";
-        idSpan.textContent = m.id;
-        tdId.appendChild(idSpan);
-
-        if (m.size_bytes) {
-          const sz = el("span", "");
-          sz.style.cssText = "margin-left:8px;font-size:11px;color:var(--faint);" +
-            "font-family:var(--mono)";
-          sz.textContent = bytes(m.size_bytes);
-          tdId.appendChild(sz);
-        }
-        tr.appendChild(tdId);
-
-        // ---- 来源（算力来源）----
-        // 用户关心的是「这个模型属于本地还是云端」，不是下载站点。
-        // 下载来源（modelscope / hf-mirror）作为淡色后缀附在后面，便于排障。
-        const isCloud = m.origin_kind === "cloud";
-        const tdSrc = el("td");
-        tdSrc.style.cssText = "font-size:11.5px;white-space:nowrap";
-        const originSpan = el("span", "", isCloud ? "云端算力" : "本地算力");
-        if (isCloud) originSpan.style.color = "var(--info)";
-        tdSrc.appendChild(originSpan);
-        if (m.source) {
-          const srcSpan = el("span", "");
-          srcSpan.style.cssText = "margin-left:6px;font-size:10.5px;color:var(--faint);" +
-            "font-family:var(--mono)";
-          srcSpan.textContent = "· " + m.source;
-          srcSpan.title = "下载时使用的模型源";
-          tdSrc.appendChild(srcSpan);
-        }
-        tr.appendChild(tdSrc);
-
-        // ---- 节点 IP ----
-        // 本地实例固定 127.0.0.1；云端实例显示创建时回填的公网地址；
-        // 未运行/旧台账无地址时显示占位符，绝不猜测。
-        const tdIp = el("td", "mono");
-        tdIp.style.cssText = "font-size:11.5px;white-space:nowrap";
-        tdIp.textContent = m.node_ip || "—";
-        tdIp.title = m.node_ip
-          ? (m.origin_kind === "cloud" ? "云端节点公网 IP" : "本地回环地址")
-          : "没有活跃实例或旧台账未记录节点地址";
-        tr.appendChild(tdIp);
-
-        // ---- 操作 ----
-        const td = el("td");
-        td.style.cssText = "white-space:nowrap;text-align:right";
-
-        if (m.file_exists === false) {
-          const warn = el("span", "pill warn", "文件缺失");
-          warn.style.marginRight = "6px";
-          td.appendChild(warn);
-        }
-
-        const live = liveByModel[m.id];
-        const missing = m.file_exists === false;
-
-        const mk = (label, title, enabled, fn) => {
-          const b = el("button", enabled ? "primary sm" : "sm", label);
-          b.style.marginRight = "6px";
-          b.title = title;
-          if (enabled) b.onclick = fn;
-          else b.disabled = true;
-          return b;
-        };
-
-        // 启动 ⇄ 停止：同一个按钮二态切换。
-        //
-        // 默认显示「启动」；启动后变「停止」，点击即停回「启动」。
-        // 这样一列里只有一个动作按钮，视线不用在三个按钮间挑，
-        // 也不会出现「启动和停止同时亮着」这种自相矛盾的状态。
-        if (live) {
-          const bs = el("button", "primary sm", "停止");
-          bs.style.marginRight = "6px";
-          bs.title = "停止该实例并释放端口" +
-            (live.port ? "（当前端口 " + live.port + "）" : "");
-          bs.onclick = () => stopFromList(m.id, live.id);
-          td.appendChild(bs);
-        } else {
-          // 未运行：区分「已部署过」与「首次部署」。
-          //
-          //  · 有历史部署记录 → 直接按保存的方案启动，**不再评估资源**
-          //    （评估只在部署前做一次，模型已下载到本地后启动是确定动作）
-          //  · 首次部署 → 仍走评估弹窗（用户要据此决定本地/云端与费用）
-          const last = lastByModel[m.id];
-          if (last && !missing) {
-            const cloudRec = last.origin_kind === "cloud";
-            td.appendChild(mk(
-              "启动",
-              cloudRec
-                ? "按已保存的云端方案重新开机"
-                : "直接启动已保存的部署方案（不重新评估）",
-              true,
-              () => startFromList(m.id, last)
-            ));
-          } else {
-            const canStart = !missing && m.deployable;
-            td.appendChild(mk(
-              "启动",
-              missing ? "模型文件缺失，无法启动"
-                : m.deployable ? "评估资源并启动该模型"
-                : (m.deploy_blocked_reason || "当前不可启动"),
-              canStart,
-              () => openDeployDialog(m.id)
-            ));
-          }
-        }
-
-        // 卸载：运行中不允许直接卸载（先停止再卸载），避免留下孤儿进程
-        td.appendChild(mk(
-          "卸载",
-          live ? "请先停止该模型，再卸载"
-               : "移除登记并删除磁盘文件",
-          !live,
-          () => removeModel(m.id)
-        ));
-        tr.appendChild(td);
-
-        tb.appendChild(tr);
-      });
-      t.appendChild(tb);
-      box.appendChild(t);
-
-      const totalBytes = items.reduce((s2, m) => s2 + (m.size_bytes || 0), 0);
-      if (totalBytes > 0) {
-        const sum = el("div", "hint");
-        sum.style.marginTop = "9px";
-        sum.textContent = items.length + " 个模型，共占用磁盘 " + bytes(totalBytes);
-        box.appendChild(sum);
-      }
-    } catch (e) {
-      box.innerHTML = '<div class="banner err">' + esc(e.message) + "</div>";
+      setTimeout(pollChain, 1000); return;
     }
-  }
-
-  /// 从模型列表启动一个已有部署记录的模型。
-  ///
-  /// 本地：调用 `/start-model`，直接复用台账里的本地方案（不评估资源）。
-  /// 云端：复用 `/start-service`（开机 + 起推理进程 + 重建隧道）。
-  async function startFromList(modelId, dep) {
-    const cloud = dep.origin_kind === "cloud";
-    toast(cloud ? "正在启动云端实例…" : "正在启动 " + modelId + "…", "ok");
-    // 注意：本地启动按钮只在「有历史部署记录且未运行」时出现，
-    // 记录可能处于 stopped / failed —— 两者都允许重新启动。
-    try {
-      await api("/api/deployments/" + encodeURIComponent(dep.id) +
-                (cloud ? "/start-service" : "/start-model"), { method: "POST" });
-      toast("已启动 " + modelId, "ok");
-      await refreshModelCards();
-    } catch (e) {
-      toast("启动失败：" + e.message, "err");
-    }
-  }
-
-  /// 从模型列表直接停止该实例（部署/停止按钮合一后的入口）。
-  ///
-  /// 用 `stop-service` 而不是 `DELETE`：前者保留部署方案（状态 stopped），
-  /// 之后再点「启动」可以按原方案直接拉起；DELETE 会销毁记录，
-  /// 用户想再用就只能重新部署。真正回收资源仍可用 CLI 或卸载。
-  async function stopFromList(modelId, depId) {
-    if (!confirm("停止模型 " + modelId + " 的实例？\n\n" +
-                 "本地会释放端口与内存；云端实例会立即停止计费。")) return;
-    try {
-      await api("/api/deployments/" + encodeURIComponent(depId) + "/stop-service",
-                { method: "POST" });
-      toast("已停止 " + modelId, "ok");
-      await refreshModelCards();
-    } catch (e) { toast("停止失败：" + e.message, "err"); }
-  }
-
-  async function removeModel(id) {
-    // 默认连磁盘文件一起删：用户点「删除」的意图就是「不想要了」，
-    // 留下几百兆到几 GB 的孤儿文件只会白占空间。
-    // 但这是不可撤销的，所以确认框必须写清后果（重下代价高）。
-    if (!confirm("删除模型 " + id + "？\n\n" +
-                 "将从台账移除，并删除磁盘上的模型文件（不可恢复，重新使用需重新下载）。")) {
-      return;
-    }
-    try {
-      const r = await api("/api/models/" + encodeURIComponent(id) + "?delete_file=1",
-                          { method: "DELETE" });
-      // 以**后端核实结果**为准：文件可能因不在授权范围而没被删掉，
-      // 这时必须如实告知并给出残留路径，不能一律报「已删除」。
-      if (r.file_deleted) {
-        toast("已删除 " + id + "（含磁盘文件）", "ok");
-      } else {
-        toast("已从台账移除 " + id + "，但磁盘文件未删除" +
-              (r.leftover ? "：" + r.leftover : "（原因未知）"), "err");
-      }
+    if (j.state === "failed" || (j.deploy_stage && j.deploy_stage.id === "failed")) {
+      // 失败必须停在真实故障阶段：后端保证 deploy_stage 停留在故障
+      // 发生的那一步；若阶段信息缺失，用 UI 记录的最后阶段兜底，
+      // 绝不退回「模型评估」。
+      const fi = Math.max(stageIndex(j.deploy_stage), lastChainIndex);
+      renderChain(Math.min(stages.length - 1, fi), j.error || stageSummary(j) || "部署失败", true);
+      // 任务已终结：停止按钮没有意义，隐藏并允许重新部署。
+      const abortBtn = $("dp-chain-abort"); if (abortBtn) abortBtn.hidden = true;
+      currentJob = null;
       await loadModels();
-    } catch (e) {
-      toast("删除失败：" + e.message, "err");
-    }
-  }
-
-  /* ------- 部署确认弹窗 ------- */
-  async function openDeployDialog(modelId) {
-    $("ov-deploy").classList.add("show");
-    $("dlg-title").textContent = "确认部署";
-    $("dlg-sub").textContent = "正在评估资源需求与费用…";
-    $("dlg-body").innerHTML =
-      '<div style="padding:20px 0;text-align:center"><span class="spin"></span> 评估中…</div>';
-    $("dlg-foot").style.display = "none";
-    let pv;
-    try {
-      pv = await api("/api/preview", {
-        method: "POST",
-        body: JSON.stringify({ model: modelId, target: currentTarget() }),
-      });
-    } catch (e) {
-      $("dlg-body").innerHTML = '<div class="banner err"><b>无法评估</b><br>' + esc(e.message) + "</div>";
-      $("dlg-sub").textContent = "评估失败";
-      $("dlg-foot").style.display = "flex";
-      $("dlg-ok").disabled = true;
       return;
     }
-    renderPreview(pv, modelId);
+    if (j.deploy_stage && j.deploy_stage.id === "ready") {
+      const endpoint = j.deployment_id ? "部署已完成，节点实例已创建并建立隧道" : "模型已加载，可以开始对话";
+      renderChain(stages.length, endpoint + "。" + stageSummary(j));
+      currentJob = null; await loadModels(); return;
+    }
+    const idx = stageIndex(j.deploy_stage);
+    renderChain(idx, stageSummary(j));
+    setTimeout(pollChain, 1000);
   }
-
-  function kvBlock(pairs) {
-    const box = el("div");
-    pairs.forEach(([k, v]) => {
-      const r = el("div", "kv");
-      r.innerHTML = '<span class="k">' + esc(k) + '</span><span class="v">' + esc(v) + "</span>";
-      box.appendChild(r);
-    });
-    return box;
-  }
-
-  function section(t) {
-    const d = el("div");
-    d.style.cssText = "font-size:11px;letter-spacing:.7px;text-transform:uppercase;" +
-      "color:var(--faint);font-weight:650;margin:15px 0 6px";
-    d.textContent = t;
-    return d;
-  }
-
-  function renderPreview(pv, modelId) {
-    const body = $("dlg-body");
-    body.innerHTML = "";
-    $("dlg-foot").style.display = "flex";
-    $("dlg-ok").disabled = false;
-
-    // 当前确认弹窗里用户选定的云端规格 ID。默认第一项，仅在用户确认
-    // 费用与 GPU 型号后才写入 /api/deploy。
-    let selectedCloudSpec = null;
-
-    // ---- 选了「本地」但资源不足：停止部署，绝不静默上云 ----
-    //
-    // 这个分支必须放在最前面：此时 `pv.cloud` 也可能有值（我们算了报价
-    // 供用户参考），若先命中云端分支，用户会以为点确认就上云。
-    if (pv.blocked) {
-      $("dlg-sub").textContent = "本地资源不足，已按你的选择停止部署";
-      const b = el("div", "banner err");
-      b.innerHTML = "<b>不会部署</b><br>" +
-        esc(pv.local_reason || "本机资源不足以承载该模型") +
-        "<br><br>你选择了「本地算力」，因此不会自动改用云端（避免意外计费）。" +
-        "可以：减小上下文长度、换更小的量化，或把「算力来源」改为「云端」。";
-      body.appendChild(b);
-
-      if (pv.cloud) {
-        body.appendChild(section("如果改选云端（仅供参考，不会自动执行）"));
-        body.appendChild(kvBlock([
-          ["服务商", pv.cloud.provider],
-          ["GPU", pv.cloud.gpu_model + " × " + pv.cloud.gpu_count],
-          ["时价", cny(pv.cloud.price_per_hour) + " / 小时"],
-          ["预估 1 小时", cny(pv.cloud.estimate_total)],
-        ]));
-      }
-      // 主按钮直接禁用：这里没有「确认部署」这个动作
-      $("dlg-ok").textContent = "无法部署";
-      $("dlg-ok").disabled = true;
-      $("dlg-ok").onclick = null;
-      return;
-    }
-
-    // ---- 本地可行：无费用 ----
-    if (pv.local_viable && pv.local) {
-      $("dlg-sub").textContent = "本地资源充足，不会产生云端费用";
-      body.innerHTML = '<div class="banner ok"><b>本地可以运行</b> · 不涉及任何云端费用</div>';
-      body.appendChild(section("配置"));
-      body.appendChild(kvBlock([
-        ["模型", pv.model_id],
-        ["落位形态", pv.local.placement],
-        ["上下文 / KV", pv.local.context_len + " / " + pv.local.kv_cache],
-        ["量化", pv.local.quant],
-        ["线程", String(pv.local.threads)],
-      ]));
-      body.appendChild(section("资源占用"));
-      body.appendChild(kvBlock([
-        ["模型权重", gib(pv.local.weights_bytes)],
-        ["KV 缓存", gib(pv.local.kv_cache_bytes)],
-        ["计算缓冲", gib(pv.local.compute_bytes)],
-        ["运行时开销", gib(pv.local.overhead_bytes)],
-        ["合计", gib(pv.local.total_bytes)],
-      ]));
-      if (pv.local.warnings && pv.local.warnings.length) {
-        const w = el("div", "banner");
-        w.innerHTML = "<b>注意</b><br>" + pv.local.warnings.map(esc).join("<br>");
-        body.appendChild(w);
-      }
-      $("dlg-ok").textContent = "确认部署";
-      $("dlg-ok").onclick = () => doDeploy(modelId);
-      return;
-    }
-
-    // ---- 需要云端：必须提示费用 ----
-    $("dlg-sub").textContent = "本地不可用，将使用云端算力（会产生费用）";
-    if (pv.local_reason) {
-      const b = el("div", "banner err");
-      b.innerHTML = "<b>为什么必须上云</b><br>" + esc(pv.local_reason);
-      body.appendChild(b);
-    }
-    if (!pv.cloud) {
-      const b = el("div", "banner err");
-      b.innerHTML = "<b>没有可用的云端节点</b><br>" +
-        esc(pv.cloud_error || "未配置云服务商或没有满足条件的规格") +
-        "<br><br>请先在「设置」页启用服务商，或配置凭证";
-      body.appendChild(b);
-      $("dlg-ok").disabled = true;
-      $("dlg-ok").textContent = "无法部署";
-      return;
-    }
-
-    const c = pv.cloud;
-    const cost = el("div", "cost warn");
-    cost.innerHTML =
-      '<div style="font-size:11px;letter-spacing:.7px;text-transform:uppercase;' +
-      'color:var(--muted);font-weight:650">预估费用</div>' +
-      '<div class="num">' + cny(c.estimate_total) +
-      "<small>／ " + c.estimate_hours + " 小时</small></div>" +
-      '<div class="dt">' + cny(c.price_per_hour) + " / 小时 × " + c.estimate_hours +
-      " 小时　·　实际按秒计费，停止后立即停止累积</div>";
-    body.appendChild(cost);
-
-    body.appendChild(section("算力规格"));
-    body.appendChild(kvBlock([
-      ["服务商", c.provider],
-      ["GPU", c.gpu_model + " × " + c.gpu_count],
-      ["显存", gib(c.vram_bytes)],
-      ["地域", c.region || "—"],
-      ["延迟", c.latency_ms != null ? c.latency_ms + " ms" : "未探测"],
-      ["规格 ID", c.spec_id],
-    ]));
-
-    body.appendChild(section("资源需求"));
-    body.appendChild(kvBlock([
-      ["模型需要显存", gib(c.required_vram_bytes)],
-      ["节点提供显存", gib(c.vram_bytes)],
-      ["是否充足", c.vram_bytes >= c.required_vram_bytes ? "充足" : "不足（可能启动失败）"],
-    ]));
-
-    // ---- GPU 型号选择：必须由用户明确确认 ----
-    //
-    // 云端会按小时计费，且不同卡型价格差十几倍（P40 ¥0.38 vs 5090 ¥3.79）。
-    // 所以不自动替用户决定：列出候选，默认选第一项，用户点选后
-    // 才允许继续；未选择时确认按钮保持禁用。
-    const cands = pv.cloud_candidates || [];
-    selectedCloudSpec = cands.length ? (cands[0].spec_id || null) : null;
-
-    body.appendChild(section("选择 GPU 型号"));
-    const list = el("div", "gpu-pick");
-
-    function paintGpu() {
-      list.querySelectorAll(".gpu-item").forEach((n) => {
-        n.classList.toggle("on", n.dataset.spec === selectedCloudSpec);
-      });
-      const hit = cands.find((x) => x.spec_id === selectedCloudSpec);
-      if (hit) {
-        $("dlg-sub").textContent =
-          "将创建 " + hit.gpu_model + " · " + cny(hit.price_per_hour) + "/小时";
-      }
-      syncConfirm();
-    }
-
-    cands.forEach((x) => {
-      const item = el("div", "gpu-item");
-      item.dataset.spec = x.spec_id || x.gpu_model;
-      item.innerHTML =
-        '<div class="gi-main"><b>' + esc(x.gpu_model) + "</b>" +
-        '<span class="gi-sub">' + esc(x.provider) + " · " + esc(x.region) + "</span></div>" +
-        '<div class="gi-meta"><span class="mono">' + gib(x.vram_bytes) + "</span>" +
-        "<span>" + (x.latency_ms != null ? x.latency_ms + " ms" : "延迟未知") + "</span>" +
-        '<span class="price">' + cny(x.price_per_hour) + "/h</span></div>";
-      item.onclick = () => { selectedCloudSpec = x.spec_id || x.gpu_model; paintGpu(); };
-      list.appendChild(item);
-    });
-    body.appendChild(list);
-
-    const cbox = el("div", "confirm");
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.id = "cb-confirm";
-    const lb = document.createElement("label");
-    lb.htmlFor = "cb-confirm";
-    cbox.appendChild(cb);
-    cbox.appendChild(lb);
-    body.appendChild(cbox);
-
-    function syncConfirm() {
-      const hit = cands.find((x) => x.spec_id === selectedCloudSpec);
-      lb.textContent = hit
-        ? "我已了解将创建 " + hit.gpu_model + " 实例（约 " +
-          cny(hit.price_per_hour) + "/小时），并会在用完后及时停止。"
-        : "请先选择 GPU 型号";
-      const ok = !!hit && cb.checked;
-      $("dlg-ok").disabled = !ok;
-    }
-
-    paintGpu();
-    $("dlg-ok").disabled = true;
-    cb.onchange = () => { syncConfirm(); };
-    $("dlg-ok").textContent = "确认并开始计费";
-    $("dlg-ok").onclick = () => doDeploy(modelId, () => selectedCloudSpec);
-  }
-
-  async function doDeploy(modelId, specOf) {
-    $("dlg-ok").disabled = true;
-    $("dlg-ok").innerHTML = '<span class="spin"></span> 部署中…';
-    const cloud = currentTarget() === "cloud";
-    const cloudSpec = cloud && typeof specOf === "function" ? specOf() : null;
-    $("dlg-hint").textContent = cloud ? "正在创建云端实例…" : "正在启动本地引擎…";
-    try {
-      const r = await api("/api/deploy", {
-        method: "POST",
-        body: JSON.stringify({
-          model: modelId,
-          context_len: 4096,
-          target: currentTarget(),
-          // 云端：用户确认过的 GPU 规格。空值由服务端按策略自动选。
-          cloud_spec: cloudSpec || undefined,
-        }),
-        // 云端要走「建实例 → 等 Running → 建隧道 → 拉模型」四步，
-        // 分钟级很正常。默认 3 分钟会中途判超时，而服务端其实还在跑，
-        // 用户会以为失败并重试——那就真的开出两台机器了。
-        timeoutMs: cloud ? 900000 : undefined,
-      });
-      $("ov-deploy").classList.remove("show");
-      toast("部署完成：" + (r.id || modelId), "ok");
-      // 刷新模型列表：按钮要从「启动」变「停止」。
-      await refreshModelCards();
-    } catch (e) {
-      $("dlg-hint").textContent = "";
-      $("dlg-ok").innerHTML = "重试";
-      $("dlg-ok").disabled = false;
-      const b = el("div", "banner err");
-      b.innerHTML = "<b>部署失败</b><br>" + esc(e.message);
-      $("dlg-body").appendChild(b);
-    }
-  }
+  async function unload(id) { if (!confirm("确定卸载该模型？")) return; await api("/api/models/" + encodeURIComponent(id) + "?delete_file=1", {method:"DELETE"}); await loadModels(); }
+  return { async mount() { await loadModels(); }, unmount() { if (timer) clearInterval(timer); } };
 })());
-
 
 /* ==================================================================== 设置 */
 
@@ -2706,44 +1669,7 @@ Tabs.register("setting", (() => {
   let mounted = false;
 
   async function load() {
-    $("se-msg").textContent = "读取中…";
-    try {
-      const s = await api("/api/settings");
-      $("se-max-price").value =
-        s.scheduler.max_price_per_hour == null ? "" : s.scheduler.max_price_per_hour;
-      $("se-engine").value = s.local.engine_path || "（自动查找 PATH）";
-      $("se-models-dir").value = s.storage.models_dir;
-      $("se-source").value = s.storage.default_source;
-      await loadDevices();
-
-      const box = $("se-providers");
-      box.innerHTML = "";
-      if (!s.providers.length) {
-        box.innerHTML = '<div class="empty">未配置服务商</div>';
-      } else {
-        s.providers.forEach((p) => {
-          const row = el("label", "switch");
-          const cb = document.createElement("input");
-          cb.type = "checkbox";
-          cb.checked = p.enabled;
-          cb.dataset.provider = p.name;
-          const sp = el("span");
-          sp.innerHTML = '<span class="lbl">' + esc(p.display_name || p.name) + "</span>" +
-            '<span class="desc">' + esc(p.secret_kind) +
-            (p.secret_configured
-              ? '　<span style="color:var(--accent)">✓ 凭证可用</span>'
-              : '　<span style="color:var(--danger)">✗ 凭证缺失</span>') +
-            "</span>";
-          row.appendChild(cb);
-          row.appendChild(sp);
-          box.appendChild(row);
-        });
-      }
-      $("se-msg").textContent = "已读取当前配置";
-    } catch (e) {
-      $("se-msg").textContent = "";
-      toast("读取设置失败：" + e.message, "err");
-    }
+    await loadDevices();
   }
 
   async function loadDevices() {
@@ -2751,12 +1677,20 @@ Tabs.register("setting", (() => {
     try {
       const r = await api("/api/devices");
       box.innerHTML = "";
-      if (!r.devices.length) { box.innerHTML = '<div class="empty">暂无手动设备，部署时将自动创建云端节点</div>'; return; }
+      if (!r.devices.length) { box.innerHTML = '<div class="empty">暂无自定义 GPU 节点</div>'; return; }
       r.devices.forEach((d) => {
         const row = el("div", "kv");
-        row.innerHTML = '<span class="k">' + esc(d.host) + ':' + d.port + ' · ' + esc(d.user) + '</span>' +
-          '<span class="v"><button class="danger sm">删除</button></span>';
-        row.querySelector("button").onclick = async () => { await api("/api/devices/" + encodeURIComponent(d.id), {method:"DELETE"}); await loadDevices(); };
+        row.innerHTML = '<span class="k"><b>' + esc(d.name || "自定义节点") + '</b> · ' + esc(d.host) + ':' + d.port + ' · ' + esc(d.user) + '</span>' +
+          '<span class="v"><button class="ghost sm test-device">连接测试</button> <button class="danger sm delete-device">删除</button></span>';
+        row.querySelector(".test-device").onclick = async () => {
+          const b = row.querySelector(".test-device"); b.disabled = true; b.textContent = "测试中…";
+          try {
+            const r = await api("/api/devices/" + encodeURIComponent(d.id) + "/test", {method:"POST", timeoutMs:30000});
+            toast(r.message || "节点连接成功", "ok");
+          } catch (e) { toast("连接测试失败：" + e.message, "err"); }
+          b.disabled = false; b.textContent = "连接测试";
+        };
+        row.querySelector(".delete-device").onclick = async () => { await api("/api/devices/" + encodeURIComponent(d.id), {method:"DELETE"}); await loadDevices(); };
         box.appendChild(row);
       });
     } catch (e) { box.innerHTML = '<div class="empty">设备列表读取失败：' + esc(e.message) + '</div>'; }
@@ -2765,48 +1699,21 @@ Tabs.register("setting", (() => {
   async function addDevice() {
     try {
       await api("/api/devices", { method: "POST", body: JSON.stringify({
+        name: $("se-dev-name").value.trim(),
         host: $("se-dev-host").value.trim(), port: Number($("se-dev-port").value),
-        user: $("se-dev-user").value.trim(), password: $("se-dev-password").value,
-        workdir: $("se-dev-workdir").value.trim()
+        user: $("se-dev-user").value.trim(), password: $("se-dev-password").value
       })});
-      $("se-dev-password").value = ""; await loadDevices(); toast("设备已保存", "ok");
+      $("se-dev-password").value = ""; $("se-dev-name").value = ""; $("se-dev-host").value = ""; await loadDevices(); toast("节点已保存", "ok");
     } catch (e) { toast("保存设备失败：" + e.message, "err"); }
-  }
-
-  async function save() {
-    const patch = {
-      storage: { default_source: $("se-source").value.trim() },
-      providers: {},
-    };
-    const pv = $("se-max-price").value.trim();
-    if (pv !== "") patch.scheduler.max_price_per_hour = Number(pv);
-
-    document.querySelectorAll("#se-providers input[data-provider]").forEach((cb) => {
-      patch.providers[cb.dataset.provider] = { enabled: cb.checked };
-    });
-
-    $("se-msg").textContent = "保存中…";
-    try {
-      const r = await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
-      $("se-msg").textContent = "已保存到 " + r.path + "（" + r.applied.length + " 项）";
-      toast("设置已保存", "ok");
-    } catch (e) {
-      $("se-msg").textContent = "";
-      toast("保存失败：" + e.message, "err");
-    }
   }
 
   return {
     async mount() {
       if (!mounted) {
-        $("se-save").onclick = save;
-        $("se-reload").onclick = load;
-        bindHelp("se-engine-help", "se-engine-helpbox");
         $("se-dev-add").onclick = addDevice;
         mounted = true;
       }
       await load();
-      await loadEngines();
     },
     unmount() { /* 无定时器 */ },
   };

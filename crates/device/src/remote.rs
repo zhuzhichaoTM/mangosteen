@@ -238,12 +238,11 @@ pub fn wait_http_ready(url: &str, budget: Duration, interval: Duration) -> MnRes
     Err(MnError::Network {
         stage: "等待云端推理服务".to_string(),
         reason: format!(
-            "{} 在 {}s 内未就绪（最后状态：{}）。可能原因：镜像内服务未随实例启动、\
-             隧道端口未转发到 {}，或实例仍在初始化",
+            "{} 在 {}s 内未就绪（最后状态：{}）。可能原因：远端推理服务未监听目标端口、\
+             SSH 隧道未转发到远端引擎端口，或实例仍在初始化",
             url,
             budget.as_secs(),
-            if last.is_empty() { "无响应" } else { &last },
-            OLLAMA_PORT
+            if last.is_empty() { "无响应" } else { &last }
         ),
     })
 }
@@ -432,9 +431,45 @@ pub struct SshTarget {
     pub user: String,
     /// 密码（`None` 表示走密钥/agent）
     pub password: Option<String>,
+    /// 已安装到远端后的本地私钥路径；为空时使用 ssh 默认密钥/agent。
+    pub identity_file: Option<PathBuf>,
 }
 
 impl SshTarget {
+    /// 仅删除本次目标节点的 known_hosts 指纹，不影响其他 SSH 主机。
+    fn remove_known_host_entry(&self) -> MnResult<()> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| MnError::config("HOME", "无法确定本机 HOME 目录"))?;
+        let known_hosts = home.join(".ssh").join("known_hosts");
+        if !known_hosts.is_file() {
+            return Ok(());
+        }
+        let host = if self.port == 22 {
+            self.host.clone()
+        } else {
+            format!("[{}]:{}", self.host, self.port)
+        };
+        let status = Command::new("ssh-keygen")
+            .args(["-f"])
+            .arg(&known_hosts)
+            .args(["-R", &host])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .map_err(|e| MnError::Network {
+                stage: "清理 SSH 主机指纹".to_string(),
+                reason: format!("无法执行 ssh-keygen：{e}"),
+            })?;
+        if !status.success() {
+            return Err(MnError::Network {
+                stage: "清理 SSH 主机指纹".to_string(),
+                reason: format!("无法清理目标节点 {} 的 known_hosts 记录", host),
+            });
+        }
+        Ok(())
+    }
+
     /// 生成一个临时 askpass 脚本，返回路径。
     ///
     /// 脚本权限 0700、内容只有 `printf '%s\n' '<密码>'`。调用方必须在
@@ -464,19 +499,132 @@ impl SshTarget {
             "StrictHostKeyChecking=accept-new".to_string(),
             "-o".to_string(),
             "UserKnownHostsFile=/dev/null".to_string(),
+            // /dev/null 不保存指纹时，OpenSSH 会把首次连接提示写到
+            // stderr；这是正常现象，但会污染远端命令错误信息。
+            "-o".to_string(),
+            "LogLevel=ERROR".to_string(),
             "-o".to_string(),
             "ConnectTimeout=15".to_string(),
             "-p".to_string(),
             self.port.to_string(),
         ];
+        if let Some(identity) = &self.identity_file {
+            a.push("-i".to_string());
+            a.push(identity.display().to_string());
+            a.push("-o".to_string());
+            a.push("IdentitiesOnly=yes".to_string());
+        }
         if self.password.is_some() {
             a.push("-o".to_string());
-            a.push("PreferredAuthentications=password".to_string());
+            a.push("PreferredAuthentications=keyboard-interactive,password".to_string());
+            a.push("-o".to_string());
+            a.push("PasswordAuthentication=yes".to_string());
+            a.push("-o".to_string());
+            a.push("KbdInteractiveAuthentication=yes".to_string());
             a.push("-o".to_string());
             a.push("PubkeyAuthentication=no".to_string());
         }
         a
     }
+}
+
+/// 在节点配置环境中安装 SSH 公钥；调用方负责按节点生命周期重试。
+pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| MnError::config("HOME", "无法确定本机 HOME 目录"))?;
+    let ssh_dir = home.join(".ssh");
+    std::fs::create_dir_all(&ssh_dir)
+        .map_err(|e| MnError::io(format!("创建 SSH 目录 {}", ssh_dir.display()), &e))?;
+    let key = ssh_dir.join("id_ed25519");
+    let pub_key = ssh_dir.join("id_ed25519.pub");
+    if !key.is_file() || !pub_key.is_file() {
+        let status = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .map_err(|e| MnError::Network {
+                stage: "生成 SSH 密钥".to_string(),
+                reason: e.to_string(),
+            })?;
+        if !status.success() || !key.is_file() || !pub_key.is_file() {
+            return Err(MnError::Network {
+                stage: "生成 SSH 密钥".to_string(),
+                reason: "本机没有默认公钥且 ssh-keygen 无法无交互生成密钥".to_string(),
+            });
+        }
+    }
+    // 只清理当前目标节点，避免旧指纹导致 ssh-copy-id 拒绝连接。
+    target.remove_known_host_entry()?;
+    let askpass = target.write_askpass()?;
+    let mut args = target.base_opts();
+    // ssh-copy-id 的 `-i` 是待安装的公钥；同时显式确保内部 ssh
+    // 使用密码认证完成首次登录，而不是被本机 ssh-agent/默认密钥干扰。
+    args.extend([
+        "-i".to_string(),
+        pub_key.display().to_string(),
+        "-o".to_string(),
+        "PreferredAuthentications=keyboard-interactive,password".to_string(),
+        "-o".to_string(),
+        "PasswordAuthentication=yes".to_string(),
+        "-o".to_string(),
+        "KbdInteractiveAuthentication=yes".to_string(),
+        "-o".to_string(),
+        "PubkeyAuthentication=no".to_string(),
+        "-o".to_string(),
+        "NumberOfPasswordPrompts=3".to_string(),
+    ]);
+    args.push(format!("{}@{}", target.user, target.host));
+    let mut command = Command::new("ssh-copy-id");
+    // stdin 关闭，所有密码交互通过 SSH_ASKPASS 完成；适配 macOS/Linux
+    // 的 OpenSSH。Windows 使用系统 OpenSSH 时同样走环境变量路径。
+    command.args(&args).stdin(Stdio::null());
+    if let Some(path) = &askpass {
+        command
+            .env("SSH_ASKPASS", path.display().to_string())
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0");
+    }
+    // ssh-copy-id 内部可能在首次握手后才触发 askpass，保留脚本直到
+    // 子进程退出；output() 本身会等待完整退出，避免过早删除。
+    let output = command.output();
+    if let Some(path) = askpass {
+        let _ = std::fs::remove_file(path);
+    }
+    let output = output.map_err(|e| MnError::Network {
+        stage: "安装 SSH 公钥".to_string(),
+        reason: format!("无法启动 ssh-copy-id：{e}"),
+    })?;
+    // ssh-copy-id 返回成功码但没有实际安装输出时，不能继续使用密钥登录；
+    // 必须确认其输出包含标准字段，避免把“命令执行完”误判为“公钥已安装”。
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    let added_marker = combined.contains("Number of key(s) added");
+    if !output.status.success() || !added_marker {
+        return Err(MnError::Network {
+            stage: "安装 SSH 公钥".to_string(),
+            reason: if !output.status.success() {
+                format!(
+                    "ssh-copy-id 执行失败（退出码 {:?}）：{}",
+                    output.status.code(),
+                    stderr.trim()
+                )
+            } else {
+                format!(
+                    "ssh-copy-id 未返回 `Number of key(s) added`，实际输出：{}",
+                    combined.trim()
+                )
+            },
+        });
+    }
+    // 已确认 ssh-copy-id 完成后，再等待 sshd/authorized_keys 生效，避免立即
+    // 用密钥探测得到假失败。
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    Ok(key)
 }
 
 /// 在远端执行一条命令，返回 stdout。
@@ -504,16 +652,43 @@ pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<St
         reason: format!("无法启动 ssh：{e}"),
     })?;
 
+    // UserKnownHostsFile=/dev/null + accept-new：每次连接都会往 stderr
+    // 打一条指纹 Warning。它是 SSH 的正常提示，不是命令的失败原因，
+    // 不能原样当成错误展示——否则真实故障（如远端 shell 被杀导致
+    // 退出码 255）会被这条无害提示掩盖，用户看到的是一脸懵的
+    // "Warning: Permanently added ..."。
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(MnError::Network {
-            stage: "远端执行命令".to_string(),
-            reason: format!(
+        let real: Vec<&str> = err
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("Warning: Permanently added"))
+            .collect();
+        let reason = if real.is_empty() {
+            if out.status.code() == Some(255) {
+                format!(
+                    "`{}` 失败：SSH 连接层中断（退出码 255），远端命令未执行完。\
+                     常见原因：网络中断、承载命令的远端会话被终止、节点重启",
+                    truncate_cmd(cmd)
+                )
+            } else {
+                format!(
+                    "`{}` 失败（退出码 {:?}）：远端命令没有输出错误信息",
+                    truncate_cmd(cmd),
+                    out.status.code()
+                )
+            }
+        } else {
+            format!(
                 "`{}` 失败（退出码 {:?}）：{}",
                 truncate_cmd(cmd),
                 out.status.code(),
-                err.lines().take(3).collect::<Vec<_>>().join(" / ")
-            ),
+                real.iter().take(3).cloned().collect::<Vec<_>>().join(" / ")
+            )
+        };
+        return Err(MnError::Network {
+            stage: "远端执行命令".to_string(),
+            reason,
         });
     }
     let _ = timeout_secs;
@@ -530,6 +705,42 @@ fn truncate_cmd(cmd: &str) -> String {
     } else {
         one_line
     }
+}
+
+/* removed local archive upload path */
+pub fn scp_upload(target: &SshTarget, local: &std::path::Path, remote: &str) -> MnResult<()> {
+    if !local.is_file() {
+        return Err(MnError::Network {
+            stage: "上传云端推理引擎".to_string(),
+            reason: format!("本地引擎归档不存在：{}", local.display()),
+        });
+    }
+    let askpass = target.write_askpass()?;
+    let mut args = target.base_opts();
+    args.push(local.display().to_string());
+    args.push(format!("{}@{}:{}", target.user, target.host, remote));
+    let mut c = Command::new("scp");
+    c.args(&args).stdin(Stdio::null());
+    if let Some(p) = &askpass {
+        c.env("SSH_ASKPASS", p.display().to_string())
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", ":0");
+    }
+    let out = c.output();
+    if let Some(p) = &askpass {
+        let _ = std::fs::remove_file(p);
+    }
+    let out = out.map_err(|e| MnError::Network {
+        stage: "上传云端推理引擎".to_string(),
+        reason: format!("无法启动 scp：{e}"),
+    })?;
+    if !out.status.success() {
+        return Err(MnError::Network {
+            stage: "上传云端推理引擎".to_string(),
+            reason: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------ 云端 llama.cpp 引导
@@ -549,6 +760,34 @@ fn truncate_cmd(cmd: &str) -> String {
 ///
 /// 三种都不成，返回明确的错误——**不尝试在远端编译**：那要十几分钟且
 /// 依赖 cmake/nvcc 齐全，失败面太大，不如让用户配一个可用的下载地址。
+pub fn ensure_llama_server_from_archive(
+    target: &SshTarget,
+    workdir: &str,
+    download_url: &str,
+) -> MnResult<String> {
+    let installed = format!("{workdir}/bin/llama-server");
+    let probe = ssh_exec(
+        target,
+        &format!("if command -v llama-server >/dev/null 2>&1; then command -v llama-server; elif [ -x {installed} ] && [ -f {workdir}/bin/libllama-server-impl.so ]; then echo {installed}; fi"),
+        60,
+    )?;
+    if !probe.trim().is_empty() {
+        return Ok(probe.trim().to_string());
+    }
+    ensure_llama_server(target, workdir, download_url)
+}
+
+/// 节点配置阶段安装模型下载与解压依赖。
+///
+/// 只在缺失时安装，已存在的工具保持不变；优先使用 apt-get，其次 yum/dnf。
+/// `curl`、`wget` 至少安装一个，`aria2c` 用于多连接模型下载，`unzip`/`tar`
+/// 用于 llama-server 发布包解压。
+pub fn ensure_node_download_dependencies(target: &SshTarget) -> MnResult<String> {
+    let script = "set -e; need=''; command -v curl >/dev/null 2>&1 || need=\"$need curl\"; command -v wget >/dev/null 2>&1 || need=\"$need wget\"; command -v aria2c >/dev/null 2>&1 || need=\"$need aria2\"; command -v unzip >/dev/null 2>&1 || need=\"$need unzip\"; command -v tar >/dev/null 2>&1 || need=\"$need tar\"; if [ -n \"$need\" ]; then if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 && apt-get install -y $need; elif command -v dnf >/dev/null 2>&1; then dnf install -y $need; elif command -v yum >/dev/null 2>&1; then yum install -y $need; else echo \"无法找到 apt-get/dnf/yum，缺少依赖:$need\" >&2; exit 1; fi; fi; printf 'deps:'; command -v curl >/dev/null 2>&1 && printf ' curl'; command -v wget >/dev/null 2>&1 && printf ' wget'; command -v aria2c >/dev/null 2>&1 && printf ' aria2c'; command -v unzip >/dev/null 2>&1 && printf ' unzip'; command -v tar >/dev/null 2>&1 && printf ' tar'; echo"
+        .to_string();
+    ssh_exec(target, &script, 600)
+}
+
 pub fn ensure_llama_server(
     target: &SshTarget,
     workdir: &str,
@@ -601,7 +840,9 @@ pub fn ensure_llama_server(
          d=$(dirname $(find . -name llama-server -type f | head -1)); \
          cp -a \"$d\"/. {workdir}/bin/; \
          chmod +x {workdir}/bin/llama-server; \
+         test -f {workdir}/bin/libllama-server-impl.so || find {workdir}/bin -maxdepth 2 -name 'libllama-server-impl.so' -type f -exec cp -f {{}} {workdir}/bin/\\; || true; \
          rm -rf {workdir}/tmp; \
+         test -f {workdir}/bin/libllama-server-impl.so || {{ echo '缺少 libllama-server-impl.so' >&2; exit 1; }}; \
          echo {installed}"
     );
     let out = ssh_exec(target, &script, 900)?;
@@ -647,10 +888,18 @@ pub fn start_llama_server(
     let log = format!("{workdir}/llama-server.log");
     let pid_file = format!("{workdir}/llama-server.pid");
     let quoted: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
+    // 清理旧实例绝不使用 `pkill -f '<bin>'`：承载本命令的远端 shell
+    // 命令行里就带着 `<bin>` 文本（见下方 nohup 一段），朴素模式必然
+    // 匹配到自己并当场杀掉当前会话（客户端表现为退出码 255）。
+    // 改为：pid 文件杀进程组 + 括号守卫兜底 + 排除当前 shell PID。
+    let bin_dir = bin.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(".");
+    let library_path = format!("{bin_dir}:$LD_LIBRARY_PATH");
     let script = format!(
         "set -e; mkdir -p {workdir}; \
-         pkill -f '{bin}' 2>/dev/null || true; \
-         setsid nohup {bin} {args} > {log} 2>&1 < /dev/null & \
+         if [ -f {pid_file} ]; then kill -- -$(cat {pid_file}) 2>/dev/null || kill $(cat {pid_file}) 2>/dev/null || true; fi; \
+         test -x {bin}; \
+         LD_LIBRARY_PATH={library_path} {bin} --version >/dev/null 2>&1 || true; \
+         setsid env LD_LIBRARY_PATH={library_path} nohup {bin} {args} > {log} 2>&1 < /dev/null & \
          echo $! > {pid_file}; \
          sleep 1; \
          if ! kill -0 $(cat {pid_file}) 2>/dev/null; then \
@@ -704,8 +953,8 @@ pub fn llama_server_running(target: &SshTarget, workdir: &str) -> MnResult<bool>
     let out = ssh_exec(
         target,
         &format!(
-            "if pgrep -f '{workdir}/bin/llama-server' >/dev/null 2>&1 \
-                || pgrep -x llama-server >/dev/null 2>&1; then echo yes; else echo no; fi"
+            "if [ -f {workdir}/llama-server.pid ] && kill -0 $(cat {workdir}/llama-server.pid) 2>/dev/null; then echo yes; \
+             elif pgrep -x llama-server >/dev/null 2>&1; then echo yes; else echo no; fi"
         ),
         60,
     )?;
@@ -725,16 +974,26 @@ pub fn llama_server_running(target: &SshTarget, workdir: &str) -> MnResult<bool>
 pub fn stop_llama_server(target: &SshTarget, workdir: &str) -> MnResult<()> {
     // 先 TERM 给机会优雅退出（它会自己释放显存），等不到再 KILL。
     // 只 TERM 就返回是不行的：端口没释放，重启会报 address in use。
+    //
+    // 只用 pid 文件和精确进程名，不按完整命令行扫描；完整命令行扫描
+    // 会把当前 SSH shell 自身也纳入匹配范围。
+    let term_all = format!(
+        "if [ -f {workdir}/llama-server.pid ]; then kill -TERM -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -TERM $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; \
+         pkill -TERM -x llama-server 2>/dev/null || true"
+    );
+    let kill_all = format!(
+        "if [ -f {workdir}/llama-server.pid ]; then kill -KILL -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -KILL $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; \
+         pkill -KILL -x llama-server 2>/dev/null || true"
+    );
     let out = ssh_exec(
         target,
         &format!(
-            "pkill -TERM -f '{workdir}/bin/llama-server' 2>/dev/null; \
-             pkill -TERM -x llama-server 2>/dev/null; \
+            "{term_all}; \
              for i in $(seq 1 20); do \
                if ! pgrep -x llama-server >/dev/null 2>&1; then echo stopped; exit 0; fi; \
                sleep 0.5; \
              done; \
-             pkill -KILL -x llama-server 2>/dev/null; sleep 1; \
+             {kill_all}; sleep 1; \
              if pgrep -x llama-server >/dev/null 2>&1; then echo still-running; exit 1; fi; \
              echo stopped",
         ),
@@ -779,7 +1038,7 @@ pub fn download_model_remote(
     dest: &str,
     expected_bytes: Option<u64>,
 ) -> MnResult<u64> {
-    download_model_remote_with_progress(target, url, dest, expected_bytes, None)
+    download_model_remote_with_progress(target, url, dest, expected_bytes, None, None, None)
 }
 
 /// 带进度回调的远端下载。
@@ -791,7 +1050,9 @@ pub fn download_model_remote_with_progress(
     url: &str,
     dest: &str,
     expected_bytes: Option<u64>,
+    hf_token: Option<&str>,
     on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> MnResult<u64> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(MnError::Network {
@@ -803,25 +1064,138 @@ pub fn download_model_remote_with_progress(
         .rsplit_once('/')
         .map(|(d, _)| d.to_string())
         .unwrap_or_else(|| "/root".to_string());
-    let log = format!("{dest}.curl.log");
-    let pid_file = format!("{dest}.curl.pid");
+    let log = format!("{dest}.download.log");
+    let pid_file = format!("{dest}.download.pid");
+    let file_name = dest.rsplit('/').next().unwrap_or(dest);
+    let q_dest = shell_quote(dest);
+    let q_file_name = shell_quote(file_name);
+    let q_url = shell_quote(url);
+    let q_log = shell_quote(&log);
+    let q_pid = shell_quote(&pid_file);
+    let auth = hf_token
+        .filter(|token| !token.trim().is_empty())
+        .map(|token| {
+            format!(
+                "--header {}",
+                shell_quote(&format!("Authorization: Bearer {token}"))
+            )
+        })
+        .unwrap_or_default();
 
-    // 先清掉上次可能残留的半截文件？**不清**——`-C -` 要靠它续传。
-    // 但要把日志清空，否则这次看不到新错误。
+    // aria2c 是首选：多连接、多分片、可续传；aria2c 不存在或启动失败时，
+    // 同一份 .part/目标文件回退到原有 curl，避免改变既有下载契约。
+    //
+    // ## 为什么最后写一个 `.download.ok` 标记
+    //
+    // 原先只用「文件大小 == 计划里的期望字节数」判定完成。实测踩到：
+    // 计划里的 `download_bytes` 来自预估或另一路元数据，与源站实际字节
+    // 数差几个字节时，aria2c 明明已经 `OK` 下完，轮询仍认为「没完成」；
+    // 等下载进程退出，又因为大小不再增长被判成「下载中断且无法续传」，
+    // 部署因此卡死在「模型下载」。
+    //
+    // 现在由下载器自己声明成功：只有下载命令以 0 退出时才写标记，
+    // 标记内容就是当时的真实文件大小。轮询以标记为**权威完成信号**，
+    // 期望字节数退化为参考值。
+    let ok_file = format!("{dest}.download.ok");
+    let q_ok = shell_quote(&ok_file);
+    let downloader = format!(
+        "if command -v aria2c >/dev/null 2>&1 && aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url}; then status=0; else curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 --speed-limit 1024 -o {q_dest} {q_url}; status=$?; fi; \
+         if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\""
+    );
+    // ## 为什么先把下载器写成脚本文件，再用一条短命令启动
+    //
+    // 旧做法把下载器全文塞进启动命令：承载该命令的远端 shell 命令行里
+    // 因此同时含有 `aria2c`、`curl` 与目标路径文本，前置的
+    // `pkill -f 'aria2c.*<dest>'` 按完整命令行匹配，**必然命中自己**，
+    // 当场杀掉当前 SSH 会话——客户端只看到退出码 255，以及一条与本案
+    // 无关的 known_hosts Warning（实测踩过）。
+    //
+    // 拆成两步后，启动命令的命令行里只剩脚本路径，清理逻辑改为：
+    // 1. pid 文件杀进程组（setsid 启动使 `$!` 恰为组长 PID）；
+    // 2. 括号守卫 + 排除 `$$` 的模式兜底，专杀孤儿下载进程。
+    let script_path = format!("{dest}.download.sh");
+    let q_script = shell_quote(&script_path);
+
+    let write_cmd = format!(
+        "set -e; mkdir -p {workdir}; printf '%s\\n' {} > {q_script}; chmod 700 {q_script}",
+        shell_quote(&downloader),
+    );
+    ssh_exec(target, &write_cmd, 60)?;
+
     let start_cmd = format!(
-        "set -e; mkdir -p '{workdir}';          : > '{log}';          pkill -f 'curl.*{dest}' 2>/dev/null || true;          nohup curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20               --speed-time 60 --speed-limit 1024               -o '{dest}' '{url}' > '{log}' 2>&1 < /dev/null &          echo $! > '{pid_file}';          echo started"
+        "set -e; : > {q_log}; rm -f {q_ok}; \
+         if [ -f {q_pid} ]; then kill -- -$(cat {q_pid}) 2>/dev/null || kill $(cat {q_pid}) 2>/dev/null || true; fi; \
+         setsid nohup sh {q_script} > {q_log} 2>&1 < /dev/null & echo $! > {q_pid}; echo started"
     );
     ssh_exec(target, &start_cmd, 60)?;
 
-    // 轮询：每条连接都是新的短连接，不受网关时长限制
+    // 统一的续传命令：重新跑同一份脚本（aria2c 优先，`--continue`
+    // / `curl -C -` 都从断点接着下），并刷新 pid 文件。
+    let resume_cmd = format!(
+        "setsid nohup sh {q_script} >> {q_log} 2>&1 < /dev/null & echo $! > {q_pid}; echo resumed"
+    );
+    // 统一的进程组终止：setsid 启动的下载器 `$!` 即组长 PID，
+    // 杀进程组才能把 aria2c/curl 子进程一并带走；旧版 pid 文件退化
+    // 为单 PID kill。
+    let stop_cmd = format!(
+        "if [ -f {q_pid} ]; then kill -- -$(cat {q_pid}) 2>/dev/null || kill $(cat {q_pid}) 2>/dev/null || true; fi"
+    );
+
+    // 轮询 + 断点续传重试。
+    //
+    // ## 重试模型（三层）
+    //
+    // 1. **单轮**：远端下载器进程退出/停滞时，重新拉起下载命令，
+    //    从文件上次落地的断点接着下。单轮最多 `ATTEMPTS_PER_ROUND` 次。
+    // 2. **轮次**：单轮内所有续传均未恢复（大小仍不增长）→ 等待
+    //    `RETRY_WAIT_SECS` 秒后开启下一轮，最多 `MAX_ROUNDS` 轮。
+    // 3. **判失败**：`MAX_ROUNDS * ATTEMPTS_PER_ROUND` 次续传全部用尽，
+    //    仍无进展才返回错误。
+    //
+    // 这比旧逻辑「进程退出就最多 2 次续传」要更有韧性：网络短暂抖动、
+    // SSH 网关切断等只会触发单轮重试，并不直接终结部署；
+    // 只有多轮均被击垮时才判定为真正的下载失败。
+    const ATTEMPTS_PER_ROUND: u32 = 5;
+    const MAX_ROUNDS: u32 = 3;
+    const RETRY_WAIT_SECS: u64 = 2;
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
-    let mut last_size = 0u64;
-    let mut stalled = 0u32;
+    let mut last_size: u64 = 0;
+    let mut stalled: u32 = 0;
+    // 当前轮次（1 起）与本轮已执行的续传次数（0 起）
+    let mut round: u32 = 1;
+    let mut attempts_in_round: u32 = 0;
+    // 最近一次采样文件是否仍在增长（失败原因里要如实说明）
+    let mut growing: bool;
+
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(5));
+        if should_cancel.map(|check| check()).unwrap_or(false) {
+            let _ = ssh_exec(target, &format!("{stop_cmd}; rm -f '{pid_file}'"), 30);
+            return Err(MnError::Cancelled {
+                stage: "云端模型下载".to_string(),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
         let size = remote_file_size(target, dest)?;
         if let Some(cb) = on_progress {
             cb(size, expected_bytes);
+        }
+        growing = size > last_size;
+        // 完成判定优先看远端写的成功标记（仅下载器自身以 0 退出时才写）。
+        // 这样就不需要「大小 == 计划里的期望字节数」这个容易误判的前提。
+        let completed = match ssh_exec(
+            target,
+            &format!("if [ -f '{q_ok}' ]; then cat '{q_ok}'; fi"),
+            60,
+        ) {
+            Ok(out) => {
+                let s = out.trim();
+                !s.is_empty() && s != "0"
+            }
+            Err(_) => false,
+        };
+        if completed && size > 0 {
+            return Ok(size);
         }
         if let Some(exp) = expected_bytes {
             if exp > 0 && size == exp {
@@ -836,61 +1210,100 @@ pub fn download_model_remote_with_progress(
             ),
             60,
         )?;
-        if alive.contains("dead") {
-            // 进程结束但大小没到 → 看日志、决定是否续传一次
-            if size > last_size {
-                // 还在长，可能只是刚退出，再等一轮
-                last_size = size;
-                continue;
-            }
-            let tail = ssh_exec(target, &format!("tail -5 '{log}' 2>/dev/null"), 60)?;
-            if stalled >= 2 {
-                // 连续两次没有进展 → 判失败（不清文件，保留续传可能）
-                return Err(MnError::Network {
-                    stage: "云端下载模型".to_string(),
-                    reason: format!(
-                        "下载中断且无法续传（已下 {} 字节）：{}",
-                        size,
-                        tail.lines().take(3).collect::<Vec<_>>().join(" / ")
-                    ),
-                });
-            }
-            // 重新拉起续传
+        let is_dead = alive.contains("dead");
+
+        // 停滞计数：进程活着但连续多轮采样大小不变（约 12s 无增长）
+        if !is_dead && !growing {
             stalled += 1;
-            last_size = size;
-            let resume = format!(
-                "nohup curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20                       -o '{dest}' '{url}' >> '{log}' 2>&1 < /dev/null &                  echo $! > '{pid_file}'; echo resumed"
-            );
-            ssh_exec(target, &resume, 60)?;
-            continue;
-        }
-        // 活着但长时间不增长 → 网络卡死，杀掉重来（`-C -` 会续传）
-        if size == last_size {
-            stalled += 1;
-            if stalled >= 6 {
-                ssh_exec(
-                    target,
-                    &format!("kill $(cat '{pid_file}') 2>/dev/null || true"),
-                    30,
-                )?;
-                let resume = format!(
-                    "nohup curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20                           -o '{dest}' '{url}' >> '{log}' 2>&1 < /dev/null &                      echo $! > '{pid_file}'; echo resumed"
-                );
-                ssh_exec(target, &resume, 60)?;
-                stalled = 0;
-            }
         } else {
             stalled = 0;
         }
+
+        // 需要续传：进程已退出，或活着但已停滞
+        if is_dead || stalled >= 6 {
+            attempts_in_round += 1;
+
+            // 单轮次数用尽 → 判断是否还有轮次预算
+            if attempts_in_round > ATTEMPTS_PER_ROUND {
+                if round >= MAX_ROUNDS {
+                    let tail = ssh_exec(target, &format!("tail -5 '{log}' 2>/dev/null"), 60)
+                        .unwrap_or_default();
+                    let total_attempts = MAX_ROUNDS * ATTEMPTS_PER_ROUND;
+                    return Err(MnError::Network {
+                        stage: "云端下载模型".to_string(),
+                        reason: format!(
+                            "下载最终失败：已完成 {} 轮、共 {} 次断点续传（每轮上限 {} 次，轮间等待 {} 秒），\
+                             仍无法恢复。当前已下载 {} 字节，文件大小{}。远端日志尾部：{}",
+                            MAX_ROUNDS,
+                            total_attempts,
+                            ATTEMPTS_PER_ROUND,
+                            RETRY_WAIT_SECS,
+                            size,
+                            if growing { "仍在增长" } else { "已不再增长" },
+                            tail.lines()
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .join(" / ")
+                        ),
+                    });
+                }
+                // 开启新一轮：等待固定间隔，给网络/源站恢复时间
+                round += 1;
+                attempts_in_round = 1;
+                eprintln!(
+                    "[download] 第 {} 轮续传耗尽（{} 次），等待 {} 秒后开始第 {} 轮",
+                    round - 1,
+                    ATTEMPTS_PER_ROUND,
+                    RETRY_WAIT_SECS,
+                    round
+                );
+                std::thread::sleep(std::time::Duration::from_secs(RETRY_WAIT_SECS));
+            } else {
+                eprintln!(
+                    "[download] 第 {} 轮第 {} 次续传（已下载 {} 字节，大小{}）",
+                    round,
+                    attempts_in_round,
+                    size,
+                    if growing { "仍在增长" } else { "已停滞" }
+                );
+            }
+
+            // 进程活着但卡死时必须先杀掉，否则新旧下载器会争抢同一文件
+            if !is_dead {
+                let _ = ssh_exec(target, &stop_cmd, 30);
+            }
+            ssh_exec(target, &resume_cmd, 60)?;
+            last_size = size;
+            stalled = 0;
+            continue;
+        }
+
         last_size = size;
 
         if std::time::Instant::now() >= deadline {
             return Err(MnError::Network {
                 stage: "云端下载模型".to_string(),
-                reason: format!("下载超时（已下 {} 字节）", size),
+                reason: format!(
+                    "下载超时（已进行到第 {} 轮第 {} 次续传，已下 {} 字节）",
+                    round, attempts_in_round, size
+                ),
             });
         }
     }
+}
+
+/// 判断远端下载是否已由下载器完整成功结束。
+///
+/// `.download.ok` 只在 aria2c/curl 以成功码退出后写入；它比单纯比较
+/// 计划大小可靠，因为计划大小可能来自预估，与源站实际字节数不完全一致。
+pub fn remote_download_completed(target: &SshTarget, path: &str) -> MnResult<bool> {
+    let marker = format!("{path}.download.ok");
+    let out = ssh_exec(
+        target,
+        &format!("if [ -s '{marker}' ]; then echo yes; else echo no; fi"),
+        60,
+    )?;
+    Ok(out.trim() == "yes")
 }
 
 /// 查远端文件大小；不存在返回 `Ok(0)`。
@@ -908,4 +1321,49 @@ pub fn remote_file_size(target: &SshTarget, path: &str) -> MnResult<u64> {
         .trim()
         .parse()
         .unwrap_or(0))
+}
+
+#[cfg(test)]
+mod ssh_e2e_tests {
+    use super::*;
+
+    /// 手动运行：
+    /// `MN_SSH_E2E_HOST=... MN_SSH_E2E_PORT=23 MN_SSH_E2E_USER=root \
+    ///  MN_SSH_E2E_PASSWORD=... cargo test -p mangosteen-device \
+    ///  ssh_e2e_tests::password_copy_id_then_key_login -- --ignored --nocapture`
+    ///
+    /// 密码只从环境变量读取，不写入源码；成功安装公钥后验证 BatchMode
+    /// 密钥登录。ssh-copy-id 失败时，测试回退验证已有本机密钥；不会把密码
+    /// 打印到输出。
+    #[test]
+    #[ignore = "需要用户提供的真实 SSH 节点和凭据"]
+    fn password_copy_id_then_key_login() {
+        let host = std::env::var("MN_SSH_E2E_HOST").expect("MN_SSH_E2E_HOST");
+        let port = std::env::var("MN_SSH_E2E_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(22);
+        let user = std::env::var("MN_SSH_E2E_USER").unwrap_or_else(|_| "root".to_string());
+        let password = std::env::var("MN_SSH_E2E_PASSWORD").expect("MN_SSH_E2E_PASSWORD");
+        let password_target = SshTarget {
+            host,
+            port,
+            user,
+            password: Some(password),
+            identity_file: None,
+        };
+        let key =
+            install_ssh_copy_id(&password_target).expect("ssh-copy-id 或密码 SSH 公钥兜底安装失败");
+        let key_target = SshTarget {
+            host: password_target.host.clone(),
+            port: password_target.port,
+            user: password_target.user.clone(),
+            password: None,
+            identity_file: Some(key),
+        };
+        let out = ssh_exec(&key_target, "echo KEY_AUTH_OK; id -u; uname -s", 5)
+            .expect("公钥免密 SSH 验证失败");
+        assert!(out.contains("KEY_AUTH_OK"));
+        assert!(out.lines().any(|line| line.trim() == "0"));
+    }
 }

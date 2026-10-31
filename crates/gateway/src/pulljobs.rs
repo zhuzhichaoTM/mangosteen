@@ -319,7 +319,8 @@ impl PullJobs {
                 }
                 j.state = JobState::Cancelled;
                 j.finished_ms = Some(mangosteen_core::time::now_unix_millis() as u64);
-                j.note = Some("已取消。已下载的部分保留，重新下载会续传".to_string());
+                j.note = Some("已发出取消请求，正在停止远端任务并回滚资源".to_string());
+                j.deploy_detail = Some("正在停止下载并回滚节点、隧道、端口和部署记录".to_string());
                 return true;
             }
         }
@@ -389,12 +390,24 @@ impl PullJobs {
                         stage, outcome, &detail,
                     ));
 
-                // 只在「前进或同级」时更新指针
+                // 只在「前进或同级」时更新当前阶段；部署任务的内部准备阶段
+                // 可能仍会执行一次模型评估，但用户已完成评估并选择节点后，
+                // UI 不能因此回退到“模型评估”。回退事件只保留在轨迹中，
+                // 不覆盖当前阶段和当前阶段说明。
+                //
+                // 失败（Failed）事件**例外地不推进指针**：`Failed` 的序号
+                // 排在所有步骤之后，一旦写入 `deploy_stage`，UI 的步骤条
+                // 会把失败标记打到「模型评估」上（"failed" 不在步骤表里，
+                // 换算出的序号是 0）。正确语义是**停在故障发生的那一步**，
+                // 错误详情照常进入轨迹与当前阶段说明，资源状态留给用户
+                // 排查，不自动跳转到其他阶段。
                 let cur_idx = j.deploy_stage.map(|s| s.index()).unwrap_or(0);
-                if stage.index() >= cur_idx {
+                if stage == DeployStage::Failed {
+                    j.deploy_detail = Some(detail);
+                } else if stage.index() >= cur_idx {
                     j.deploy_stage = Some(stage);
+                    j.deploy_detail = Some(detail);
                 }
-                j.deploy_detail = Some(detail);
 
                 j.deploy_state = Some(match (stage, outcome) {
                     (DeployStage::Ready, _) => "已启动".to_string(),
@@ -428,9 +441,14 @@ impl PullJobs {
                             "部署完成，模型已就绪",
                         ));
                 } else {
-                    j.deploy_stage = Some(DeployStage::Failed);
+                    // 失败时**不推进** `deploy_stage`：保持指针停留在故障
+                    // 发生的那一步（如「启动模型」），让 UI 把失败标记
+                    // 显示在真实故障阶段，而不是跳到其他步骤。
                     let why = note.clone().unwrap_or_else(|| "自动启动失败".to_string());
                     j.deploy_detail = Some(why.clone());
+                    if j.deploy_stage.is_none() {
+                        j.deploy_stage = Some(DeployStage::Assessing);
+                    }
                     // 网关内部通常已经上报过一条 Failed 事件；
                     // 这里只在「还没报过」时补一条，避免轨迹里出现两条
                     // 内容几乎相同的失败记录。
@@ -487,7 +505,7 @@ impl PullJobs {
 /// 后台 worker 的公开契约位于 [`pull_worker`]；此处保留 re-export，
 /// 兼容已有 gateway 调用方。
 pub use crate::pull_worker::{
-    spawn, AbortHook, CommitCloudHook, DeployHooks, PrepareHook, RegisterHook,
+    spawn, AbortHook, CancelHook, CommitCloudHook, DeployHooks, PrepareHook, RegisterHook,
 };
 
 #[cfg(test)]
@@ -710,13 +728,29 @@ mod tests {
         let j = PullJobs::new();
         let id = j.create_with("s:o/r/f.gguf", "f.gguf", true);
 
-        // 网关内部先报失败
+        // 部署推进到「启动模型」后网关报失败
+        j.set_stage(
+            &id,
+            DeployStage::Launching,
+            StageOutcome::Running,
+            "正在启动",
+        );
         j.set_stage(&id, DeployStage::Failed, StageOutcome::Failed, "端口被占用");
         // 任务层收尾再报一次
         j.set_deployment(&id, None, Some("端口被占用".into()));
 
         let job = j.get(&id).unwrap();
-        assert_eq!(job.deploy_stage, Some(DeployStage::Failed));
+        // 失败后阶段指针**停留在故障发生的那一步**（启动模型），
+        // 不能被 Failed 终态覆盖——否则 UI 会把失败标记打到错误的步骤上。
+        assert_eq!(job.deploy_stage, Some(DeployStage::Launching));
+        assert!(
+            job.deploy_detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("端口被占用"),
+            "失败详情必须进入当前阶段说明：{:?}",
+            job.deploy_detail
+        );
         let fails = job
             .deploy_trail
             .iter()
@@ -724,5 +758,81 @@ mod tests {
             .count();
         assert_eq!(fails, 1, "失败事件不应重复：{:?}", job.deploy_trail);
         assert_eq!(job.deploy_state.as_deref(), Some("未启动"));
+    }
+
+    /// 失败必须冻结在故障阶段：评估完成后在「模型下载」失败，
+    /// 指针不得跳回「模型评估」，也不得被 Failed 终态覆盖。
+    #[test]
+    fn failure_freezes_at_the_stage_where_it_happened() {
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
+        let j = PullJobs::new();
+        let id = j.create_with("s:o/r/f.gguf", "f.gguf", true);
+
+        j.set_stage(
+            &id,
+            DeployStage::Selecting,
+            StageOutcome::Done,
+            "节点已选定",
+        );
+        j.set_stage(
+            &id,
+            DeployStage::Configuring,
+            StageOutcome::Done,
+            "节点配置完成",
+        );
+        j.set_stage(
+            &id,
+            DeployStage::Downloading,
+            StageOutcome::Running,
+            "开始下载",
+        );
+        // 下载阶段失败
+        j.set_stage(
+            &id,
+            DeployStage::Failed,
+            StageOutcome::Failed,
+            "下载中断且无法续传",
+        );
+
+        let job = j.get(&id).unwrap();
+        assert_eq!(
+            job.deploy_stage,
+            Some(DeployStage::Downloading),
+            "失败必须停在模型下载阶段"
+        );
+        assert!(job
+            .deploy_detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("下载中断"));
+        // 轨迹里必须有失败事件，供 UI 展示错误详情
+        assert!(job
+            .deploy_trail
+            .iter()
+            .any(|e| e.outcome == StageOutcome::Failed && e.detail.contains("下载中断")));
+    }
+
+    /// 任务刚创建、还没推进过任何阶段就失败（如评估阶段直接失败）：
+    /// 指针保持初始的「模型评估」，失败标记落在第一步上。
+    #[test]
+    fn early_failure_stays_on_first_stage() {
+        use mangosteen_orchestration::progress::{DeployStage, StageOutcome};
+        let j = PullJobs::new();
+        let id = j.create_with("s:o/r/f.gguf", "f.gguf", true);
+
+        j.set_stage(
+            &id,
+            DeployStage::Failed,
+            StageOutcome::Failed,
+            "元数据无法解析",
+        );
+
+        let job = j.get(&id).unwrap();
+        assert_eq!(job.deploy_stage, Some(DeployStage::Assessing));
+        assert!(job
+            .deploy_detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("元数据"));
     }
 }

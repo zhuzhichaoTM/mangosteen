@@ -54,7 +54,12 @@ impl Orchestrator {
                 .find(|d| d.id == id)
                 .map(|d| DeviceTarget::from_config(d, &self.config.cloud.remote_workdir))
         };
-        if let Some(id) = req.device_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(id) = req
+            .device_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return find(id);
         }
         if req.cloud_spec.is_some() {
@@ -124,20 +129,20 @@ impl Orchestrator {
 
         sink(
             DeployStage::Selecting,
-            StageOutcome::Done,
+            StageOutcome::Running,
             match &device {
                 Some(d) => format!(
-                    "已选择设备：{}@{}:{} · 工作目录 {}",
-                    d.device.user, d.device.host, d.device.port, d.workdir
+                    "进入节点选择：评估资源需求已确定，等待节点连接：{}:{}",
+                    d.device.host, d.device.port
                 ),
-                None => format!("已选择云端节点（显存 ≥ {}）", mangosteen_platform::fs::human_bytes(required)),
+                None => format!(
+                    "进入节点选择：评估资源需求已确定，等待创建满足显存 ≥ {} 的 GPU 节点",
+                    mangosteen_platform::fs::human_bytes(required)
+                ),
             },
         );
-        sink(
-            DeployStage::Configuring,
-            StageOutcome::Running,
-            "正在完成设备配置：连接节点、准备推理引擎、下载模型、建立隧道".to_string(),
-        );
+        // 远端节点配置和模型下载必须在对应的节点创建阶段完成后才开始。
+        // 不在这里提前写 Downloading，避免 UI 在实例创建期间跳过配置阶段。
 
         // 远端下载进度 → 阶段说明（回调来自轮询线程，只做内存写入）
         let total = cloud_plan.download_bytes;
@@ -157,21 +162,22 @@ impl Orchestrator {
             );
         };
 
-        let engine_port = cloud_plan.engine_port;
         let prepared = match device {
-            Some(d) => self.prepare_device_node(&id, plan, d, &progress),
-            None => self.prepare_vendor_node(&id, plan, &progress, why_cloud),
+            Some(d) => self.prepare_device_node(&id, plan, d, &progress, sink),
+            None => self.prepare_vendor_node(&id, plan, &progress, why_cloud, sink),
         };
 
         match prepared {
             Ok(p) => {
                 sink(
+                    DeployStage::Selecting,
+                    StageOutcome::Done,
+                    format!("节点创建完成，节点 IP：{}", p.ssh.host),
+                );
+                sink(
                     DeployStage::Configuring,
                     StageOutcome::Done,
-                    format!(
-                        "设备已就绪：{}@{}:{} · 隧道 127.0.0.1:{} → 远端 {}",
-                        p.ssh.user, p.ssh.host, p.ssh.port, p.plan.cloud.as_ref().map(|c| c.local_port).unwrap_or(0), engine_port
-                    ),
+                    format!("节点配置完成：{}@{}:{}", p.ssh.user, p.ssh.host, p.ssh.port),
                 );
                 Ok(PreparedDeployment::Cloud(Box::new(p)))
             }
@@ -190,28 +196,64 @@ impl Orchestrator {
         mut plan: DeploymentPlan,
         device: DeviceTarget,
         progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedCloud> {
-        // 连通性先验：密码错/端口不通要在这里就报出来，而不是等到下载时
-        mangosteen_device::remote::ssh_exec(&device.ssh, "true", 30)?;
+        // 自定义节点不重置远端密码，但节点配置阶段仍必须完成 SSH 免密：
+        // 先用用户保存的原始密码安装公钥，确认密钥登录成功后，后续
+        // 依赖安装、引擎准备、模型下载和隧道全部改用密钥认证。
+        let ssh = mangosteen_provider::orchestrator::configure_existing_ssh_access(&device.ssh)?;
 
         let cloud_plan = plan
             .cloud
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
 
-        mangosteen_provider::orchestrator::prepare_node(
-            &device.ssh,
-            &device.workdir,
-            &cloud_plan,
-            &self.config.cloud.llama_server_url,
-            Some(progress),
-        )?;
-
-        let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
-            &device.ssh,
-            cloud_plan.engine_port,
-            true,
+        sink(
+            crate::progress::DeployStage::Selecting,
+            crate::progress::StageOutcome::Done,
+            format!("节点已连接，节点 IP：{}", device.ssh.host),
         );
+        sink(
+            crate::progress::DeployStage::Configuring,
+            crate::progress::StageOutcome::Running,
+            "正在配置目标节点的运行环境".to_string(),
+        );
+        mangosteen_provider::orchestrator::configure_node(
+            &ssh,
+            &device.workdir,
+            &self.config.cloud.llama_server_url,
+        )?;
+        // 节点配置完成后才开始模型下载。
+        sink(
+            crate::progress::DeployStage::Configuring,
+            crate::progress::StageOutcome::Done,
+            format!("节点配置完成：{}", device.ssh.host),
+        );
+        sink(
+            crate::progress::DeployStage::Downloading,
+            crate::progress::StageOutcome::Running,
+            "开始在目标节点下载模型".to_string(),
+        );
+        let downloaded = mangosteen_provider::orchestrator::download_model_node(
+            &ssh,
+            &cloud_plan,
+            self.config
+                .cloud
+                .hf_token
+                .as_ref()
+                .and_then(|token| token.resolve(mangosteen_platform::paths::real_env).ok())
+                .as_deref(),
+            Some(progress),
+            None,
+        )?;
+        sink(
+            crate::progress::DeployStage::Downloading,
+            crate::progress::StageOutcome::Done,
+            format!("模型下载完成：{}", downloaded),
+        );
+
+        let spec =
+            mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true);
         let local_port = self
             .device_tunnels
             .establish(&spec, Duration::from_secs(30))?
@@ -226,7 +268,7 @@ impl Orchestrator {
         Ok(PreparedCloud {
             id: id.to_string(),
             plan,
-            ssh: device.ssh,
+            ssh,
             workdir: device.workdir,
         })
     }
@@ -238,6 +280,7 @@ impl Orchestrator {
         mut plan: DeploymentPlan,
         progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
         why_cloud: &str,
+        sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedCloud> {
         if self.cloud.is_none() {
             return Err(MnError::NoViableCandidate {
@@ -262,11 +305,44 @@ impl Orchestrator {
             require_stock: self.config.scheduler.require_stock,
         };
 
+        // provision_resources 内部会等待实例 Running，并确认正式 SSH 地址、
+        // 密码认证和 ssh-copy-id 密钥登录。此期间仍属于“GPU 节点选择”，
+        // 不能提前进入节点配置；只有 provision_resources 成功返回后，才有
+        // 可靠 SSH 登录方式可以开始配置环境。
+        sink(
+            crate::progress::DeployStage::Selecting,
+            crate::progress::StageOutcome::Running,
+            "GPU 节点创建中：等待实例 Running、SSH 地址和登录方式确认".to_string(),
+        );
         let orchestrator = self.cloud.as_mut().expect("checked above");
         let p = orchestrator.provision_resources(&constraints, &cloud_plan, Some(progress))?;
         let instance = p
             .instance
+            .clone()
             .ok_or_else(|| MnError::bad_request("云端编排未返回实例信息".to_string()))?;
+        let node_ip = instance
+            .network
+            .ssh_host
+            .clone()
+            .unwrap_or_else(|| "未知 IP".to_string());
+        let node_ssh_port = instance.network.ssh_port.unwrap_or(22);
+        // provider 已等待实例进入 Running；先把正式 IP 告知 UI，再进行节点配置。
+        sink(
+            crate::progress::DeployStage::Selecting,
+            crate::progress::StageOutcome::Done,
+            format!(
+                "GPU 节点实例已创建并运行：{}:{} · {}",
+                node_ip, node_ssh_port, instance.id
+            ),
+        );
+        sink(
+            crate::progress::DeployStage::Configuring,
+            crate::progress::StageOutcome::Running,
+            format!(
+                "正在配置节点 {}:{}：准备推理框架与运行环境",
+                node_ip, node_ssh_port
+            ),
+        );
 
         if let Some(c) = plan.cloud.as_mut() {
             Scheduler::apply_selection(
@@ -287,11 +363,73 @@ impl Orchestrator {
         };
         self.state
             .upsert(DeploymentRecord::from_plan(plan.clone()))?;
+        sink(
+            crate::progress::DeployStage::Selecting,
+            crate::progress::StageOutcome::Done,
+            format!(
+                "GPU 节点创建完成，SSH 登录已确认：{}:{} · 实例 {}",
+                node_ip, node_ssh_port, instance.id
+            ),
+        );
+        sink(
+            crate::progress::DeployStage::Configuring,
+            crate::progress::StageOutcome::Running,
+            format!(
+                "进入节点配置环境：{}:{}，开始 SSH 密码与免密登录配置",
+                node_ip, node_ssh_port
+            ),
+        );
+        let ssh = self
+            .cloud
+            .as_mut()
+            .expect("cloud orchestrator exists")
+            .configure_ssh_access(&instance)?;
+        // 节点配置内部严格执行：依赖安装与验证 → llama-server 下载与可执行性验证。
+        // 只有整个函数成功返回，才允许推进到模型下载。
+        mangosteen_provider::orchestrator::configure_node(
+            &ssh,
+            &p.workdir,
+            &self.config.cloud.llama_server_url,
+        )?;
+        sink(
+            crate::progress::DeployStage::Configuring,
+            crate::progress::StageOutcome::Done,
+            format!(
+                "节点配置完成：依赖已验证，llama-server 可执行程序已确认：{}:{}",
+                node_ip, node_ssh_port
+            ),
+        );
+        sink(
+            crate::progress::DeployStage::Downloading,
+            crate::progress::StageOutcome::Running,
+            format!(
+                "llama-server 配置完成，立即进入模型下载：{}",
+                cloud_plan.model_path
+            ),
+        );
+        let hf_token = self
+            .config
+            .cloud
+            .hf_token
+            .as_ref()
+            .and_then(|token| token.resolve(mangosteen_platform::paths::real_env).ok());
+        let downloaded = mangosteen_provider::orchestrator::download_model_node(
+            &ssh,
+            &cloud_plan,
+            hf_token.as_deref(),
+            Some(progress),
+            None,
+        )?;
+        sink(
+            crate::progress::DeployStage::Downloading,
+            crate::progress::StageOutcome::Done,
+            format!("模型下载完成：{}", downloaded),
+        );
 
         Ok(PreparedCloud {
             id: id.to_string(),
             plan,
-            ssh: p.ssh,
+            ssh,
             workdir: p.workdir,
         })
     }
@@ -331,8 +469,6 @@ impl Orchestrator {
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
         let launch_config = self.cloud_launch_config(&cloud_plan)?;
-        let local_port = cloud_plan.local_port;
-
         sink(
             DeployStage::Launching,
             StageOutcome::Running,
@@ -345,24 +481,55 @@ impl Orchestrator {
             ),
         );
 
-        let started = mangosteen_provider::orchestrator::start_node_engine(
-            &ssh,
-            &workdir,
-            &launch_config,
-        );
+        let started =
+            mangosteen_provider::orchestrator::start_node_engine(&ssh, &workdir, &launch_config);
         if let Err(e) = started {
             self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
             return Err(e);
         }
 
         // 经隧道确认端到端可用。少了这一步，台账会标 Ready 而对话直接 502。
+        //
+        // prepare 阶段建立的是「远端端口尚未监听也允许存在」的引导隧道。
+        // 启动模型后必须关闭并严格重建一次，否则 SSH 进程可能看似存在，
+        // 但本地端口实际已经断开，最终只得到 curl (7) connection refused。
+        let local_port = if cloud_plan.device_id.is_some() {
+            let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
+                &ssh,
+                cloud_plan.engine_port,
+                false,
+            );
+            let _ = self.device_tunnels.close(&spec);
+            self.device_tunnels
+                .establish(&spec, Duration::from_secs(30))?
+                .local_port
+        } else {
+            let o = self.cloud.as_mut().ok_or_else(|| {
+                MnError::bad_request("未配置云端能力，无法重建模型隧道".to_string())
+            })?;
+            o.ensure_tunnel_to(&ssh, cloud_plan.engine_port)?
+        };
+        if let Some(c) = self
+            .state
+            .get(&id)?
+            .and_then(|r| r.plan.cloud)
+            .map(|mut c| {
+                c.local_port = local_port;
+                c
+            })
+        {
+            let mut updated = self
+                .state
+                .get(&id)?
+                .ok_or_else(|| MnError::bad_request("启动模型前台账记录已丢失".to_string()))?;
+            updated.plan.cloud = Some(c);
+            self.state.upsert(updated)?;
+        }
         let health = format!("http://127.0.0.1:{local_port}/health");
         let timeout = Duration::from_secs(self.config.scheduler.launch_timeout_secs);
-        if let Err(e) = mangosteen_device::remote::wait_http_ready(
-            &health,
-            timeout,
-            Duration::from_secs(2),
-        ) {
+        if let Err(e) =
+            mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2))
+        {
             self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
             return Err(e);
         }
@@ -372,9 +539,29 @@ impl Orchestrator {
             DeployStage::Launching,
             StageOutcome::Done,
             format!(
-                "推理进程已就绪（/health 通过）· 节点 {}@{} · 隧道端口 {local_port}",
+                "推理进程已就绪（/health 通过）· 节点 {}@{}",
                 ssh.user, ssh.host
             ),
+        );
+        // 启动阶段通过引导隧道完成健康检查；此处确认同一条本地网关到
+        // 远端模型通道仍然可用，并将其作为独立的业务阶段上报。
+        sink(
+            DeployStage::Tunneling,
+            StageOutcome::Running,
+            format!("正在建立本地网关到远端模型的隧道：127.0.0.1:{local_port}"),
+        );
+        if let Err(e) = mangosteen_device::remote::wait_http_ready(
+            &health,
+            Duration::from_secs(10),
+            Duration::from_secs(1),
+        ) {
+            self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
+            return Err(e);
+        }
+        sink(
+            DeployStage::Tunneling,
+            StageOutcome::Done,
+            format!("本地网关已接通远端模型：127.0.0.1:{local_port}"),
         );
         self.state
             .get(&id)?
@@ -395,7 +582,10 @@ impl Orchestrator {
         let _ = mangosteen_device::remote::stop_llama_server(ssh, workdir);
         let _ = self.device_tunnels.close_all();
 
-        let ComputeOrigin::Cloud { provider, instance_id } = origin;
+        let ComputeOrigin::Cloud {
+            provider,
+            instance_id,
+        } = origin;
         // 只有云厂商创建的实例才销毁；用户自己的机器不能关机
         let vendor_managed = self
             .state

@@ -36,25 +36,25 @@
 
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use mangosteen_core::{MnError, MnResult};
 
 use crate::gateway::Gateway;
 use crate::http::relay::is_stream_request;
+use crate::protocol::BackendTarget;
 
 // 兼容导出：处理器按 `http::server::*` 引入这些类型与工具，
 // 物理位置已按职责迁出，这里只保留唯一的公开路径。
-pub(crate) use crate::http::helpers::{
-    first_line, job_json, model_name_for_estimate, probe_assessed_detail, query_flag,
-};
+pub(crate) use crate::http::helpers::{first_line, job_json, model_name_for_estimate, query_flag};
 pub(crate) use crate::http::request::{parse_request, ParsedRequest};
 pub(crate) use crate::http::response::Response;
 
 /// 网关 HTTP 服务。
 pub struct GatewayServer {
     pub(crate) gateway: Arc<Mutex<Gateway>>,
+    pub(crate) backend_snapshot: Arc<RwLock<std::collections::BTreeMap<String, BackendTarget>>>,
     pub(crate) require_key: bool,
     pub(crate) api_key: String,
     pub(crate) upstream_timeout: Duration,
@@ -72,8 +72,18 @@ impl GatewayServer {
         api_key: String,
         upstream_timeout: Duration,
     ) -> Self {
+        let backend_snapshot = Arc::new(RwLock::new(std::collections::BTreeMap::new()));
+        // 启动时短暂读取一次现有后端，避免已有模型在首次对话时撞上部署锁。
+        if let Ok(mut gw) = gateway.lock() {
+            if let Ok(target) = gw.active_backend() {
+                if let Ok(mut snapshot) = backend_snapshot.write() {
+                    snapshot.insert(target.model_id.clone(), target);
+                }
+            }
+        }
         Self {
             gateway,
+            backend_snapshot,
             require_key,
             api_key,
             upstream_timeout,

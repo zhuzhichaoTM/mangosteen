@@ -95,6 +95,7 @@ impl GatewayServer {
                             // 云端节点公网 IP。
                             "node_ssh_port": r.plan.cloud.as_ref().and_then(|c| c.node_ssh_port),
                             "node_ssh_user": r.plan.cloud.as_ref().and_then(|c| c.node_ssh_user.clone()),
+                            "remote_port": r.plan.cloud.as_ref().map(|c| c.engine_port),
                             "gpu_model": r.plan.cloud.as_ref().map(|c| c.gpu_model.clone()),
                             "requested_spec_id": r
                                 .plan
@@ -217,6 +218,12 @@ impl GatewayServer {
         }
         if let Some(id) = parsed.get("device_id").and_then(|v| v.as_str()) {
             dreq.device_id = Some(id.to_string());
+        }
+        if let Some(spec) = parsed.get("cloud_spec").and_then(|v| v.as_str()) {
+            let spec = spec.trim();
+            if !spec.is_empty() {
+                dreq.cloud_spec = Some(spec.to_string());
+            }
         }
         // 算力来源（部署页签的「本地 / 云端」选择）。
         //

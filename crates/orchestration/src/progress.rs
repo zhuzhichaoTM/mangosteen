@@ -58,6 +58,8 @@ pub enum DeployStage {
     Quantizing,
     /// 启动模型：拉起引擎进程并等待健康检查
     Launching,
+    /// 建立本地网关到远端模型的 SSH 隧道
+    Tunneling,
     /// 已就绪
     Ready,
     /// 失败
@@ -75,6 +77,7 @@ impl DeployStage {
         DeployStage::Downloading,
         DeployStage::Quantizing,
         DeployStage::Launching,
+        DeployStage::Tunneling,
     ];
 
     /// 稳定标识（JSON 字段值，前端按它匹配样式）。
@@ -88,6 +91,7 @@ impl DeployStage {
             DeployStage::Configuring => "configuring",
             DeployStage::Quantizing => "quantizing",
             DeployStage::Launching => "launching",
+            DeployStage::Tunneling => "tunneling",
             DeployStage::Ready => "ready",
             DeployStage::Failed => "failed",
         }
@@ -102,6 +106,7 @@ impl DeployStage {
             DeployStage::Configuring => "设备配置",
             DeployStage::Quantizing => "模型量化",
             DeployStage::Launching => "启动模型",
+            DeployStage::Tunneling => "建立隧道",
             DeployStage::Ready => "已就绪",
             DeployStage::Failed => "失败",
         }

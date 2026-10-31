@@ -211,6 +211,9 @@ mod tests {
             providers: Default::default(),
             model_sources: Default::default(),
             remote_devices: Default::default(),
+            model_whitelist: Default::default(),
+            remote_inference: None,
+            remote_inferences: Default::default(),
         }
     }
 

@@ -145,6 +145,15 @@ pub fn log_dir(env: EnvLookup<'_>) -> PathBuf {
     }
 }
 
+/// API 网关 PID 文件路径。
+pub fn gateway_pid_file(env: EnvLookup<'_>) -> PathBuf {
+    config_dir(env).join("gateway.pid")
+}
+
+/// API 网关持久日志路径。
+pub fn gateway_log_file(env: EnvLookup<'_>) -> PathBuf {
+    log_dir(env).join("gateway.log")
+}
 /// 部署台账文件路径。
 pub fn state_file(env: EnvLookup<'_>) -> PathBuf {
     config_dir(env).join("state.json")

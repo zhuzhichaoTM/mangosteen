@@ -178,11 +178,14 @@ pub struct CloudConfig {
     /// 云端工作目录：模型、llama-server、日志都放在这里。
     #[serde(default = "default_remote_workdir")]
     pub remote_workdir: String,
+    /// Hugging Face 下载令牌，仅用于远端 aria2c/curl 请求。
+    /// 使用环境变量或文件引用，不在配置中保存明文令牌。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_token: Option<SecretRef>,
     /// llama.cpp 预编译包下载地址。
     ///
-    /// 远端没有 `llama-server` 时会下载这个 zip 并解压。留空表示
-    /// 「镜像里应该自带」——没有就报错，不尝试在远端编译。
-    #[serde(default)]
+    /// 远端没有 `llama-server` 时会下载这个包并解压。统一发布包源。
+    #[serde(default = "default_llama_server_url")]
     pub llama_server_url: String,
 }
 
@@ -190,12 +193,17 @@ fn default_remote_workdir() -> String {
     "/root/mangosteen".to_string()
 }
 
+fn default_llama_server_url() -> String {
+    "https://gh-proxy.com/https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.0/llama-cpp-bin-linux-x86_64.tar.gz".to_string()
+}
+
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
             ssh_password: None,
             remote_workdir: default_remote_workdir(),
-            llama_server_url: String::new(),
+            hf_token: None,
+            llama_server_url: default_llama_server_url(),
         }
     }
 }
@@ -232,6 +240,9 @@ pub struct RemoteDevice {
     /// 稳定 ID（由 `host:port` 派生）。留空时由接口层补齐。
     #[serde(default)]
     pub id: String,
+    /// 用户定义的节点名称，用于 GPU 节点选择展示。
+    #[serde(default)]
+    pub name: String,
     /// 主机名或 IP
     pub host: String,
     /// SSH 端口
@@ -280,6 +291,7 @@ impl RemoteDevice {
     /// 规范化：裁剪空白、补默认值、派生 ID。
     pub fn normalized(mut self) -> MnResult<Self> {
         self.host = self.host.trim().to_string();
+        self.name = self.name.trim().to_string();
         self.user = self.user.trim().to_string();
         self.workdir = self.workdir.trim().trim_end_matches('/').to_string();
         if self.host.is_empty() {
@@ -825,6 +837,15 @@ impl GatewayConfig {
     }
 }
 
+/// 已验证支持的模型资产配置。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WhitelistedModel {
+    pub display_name: String,
+    pub source_spec: String,
+    #[serde(default)]
+    pub template: String,
+}
+
 /// 根配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -849,6 +870,9 @@ pub struct Config {
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderConfig>,
     /// 模型源表（键为源名）。为空时使用内置 ModelScope + HuggingFace。
+    /// 当前已验证支持的模型白名单（key 为模型 ID，value 为模型资产配置）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_whitelist: BTreeMap<String, WhitelistedModel>,
     ///
     /// 配置驱动：新增 / 修改模型源不需要改代码。厂商改版时可在配置里
     /// 覆盖 `url_template` 修正。
@@ -859,6 +883,31 @@ pub struct Config {
     /// 部署时优先用这里的机器；列表为空才去云厂商创建节点。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_devices: Vec<RemoteDevice>,
+    /// 手动接入的远端推理服务（旧版单节点配置，兼容保留）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_inference: Option<RemoteInference>,
+    /// 多模型远端推理服务；网关按 model_id 建立独立隧道并路由。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_inferences: Vec<RemoteInference>,
+}
+
+/// 远端已启动推理服务的 SSH 隧道配置。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteInference {
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    #[serde(default = "default_ssh_user")]
+    pub user: String,
+    #[serde(default)]
+    pub password: SecretRef,
+    #[serde(default = "default_engine_port")]
+    pub remote_port: u16,
+    pub model_id: String,
+}
+
+fn default_engine_port() -> u16 {
+    8000
 }
 
 fn default_config_version() -> u32 {
@@ -1039,8 +1088,11 @@ impl Config {
                 default_source: default_model_source(),
             },
             providers,
+            model_whitelist: BTreeMap::new(),
             model_sources: BTreeMap::new(),
             remote_devices: Vec::new(),
+            remote_inference: None,
+            remote_inferences: Vec::new(),
         }
     }
 }
