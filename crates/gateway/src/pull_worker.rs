@@ -49,8 +49,15 @@ pub struct DeployHooks {
     pub prepare: PrepareHook,
     /// 云端：设备配置完成后调用，启动引擎并探活，返回部署 ID。
     pub commit_cloud: CommitCloudHook,
-    /// **回滚**：撤销这次部署产生的全部痕迹（停引擎、删台账、释放端口、删文件）。
+    /// 复用实例钩子：实例 ID 非空时跳过创建，直接开机重启。
+    pub resume: ResumeHook,
+    /// 复用实例不存在时将历史记录标记为 destroyed，随后回退创建流程。
+    pub invalidate: InvalidateHook,
+    /// 部署成功后刷新网关业务转发快照。
+    pub refresh_routes: RefreshRoutesHook,
+    /// **回滚**：撤销这次部署产生的全部痕迹（停引擎、释放端口、删文件）。
     ///
+    /// 实例**只停不删**：取消/卸载都保留实例与磁盘，供下次复用。
     /// 参数：`(部署 ID, 要删除的文件路径)`。
     ///
     /// 「是否删文件」由调用方判断——只有**本次下载的**文件才该删。
@@ -75,6 +82,17 @@ pub type PrepareHook =
 pub type CommitCloudHook =
     Arc<dyn Fn(mangosteen_orchestration::PreparedCloud) -> MnResult<String> + Send + Sync>;
 
+/// 复用实例钩子：已有部署 ID → 开机重启并探活。
+///
+/// 这是「实例 ID 非空时复用」的落点：不创建实例、不重下权重，
+/// 只把停掉的东西拉起来。
+pub type ResumeHook = Arc<dyn Fn(&str) -> MnResult<String> + Send + Sync>;
+
+/// 将失效复用记录标记为不可复用，随后由本次请求走完整创建流程。
+pub type InvalidateHook = Arc<dyn Fn(&str, &str) -> MnResult<()> + Send + Sync>;
+/// 刷新业务路由快照钩子。
+pub type RefreshRoutesHook = Arc<dyn Fn() + Send + Sync>;
+
 /// 启动一个下载任务（在独立线程执行）。
 ///
 /// 返回 `job_id`。函数本身立即返回。
@@ -93,6 +111,8 @@ pub fn spawn(
     register: RegisterHook,
     // 下载并登记成功后自动部署。`None` 表示只下载不部署（CLI 行为）。
     deploy: Option<DeployHooks>,
+    // 要复用的已有部署 ID。`Some` 表示跳过创建与下载，直接开机重启。
+    reuse_id: Option<String>,
 ) -> std::thread::JoinHandle<()> {
     // 进度回调把字节数写回任务表
     let jobs_for_cb = jobs.clone();
@@ -135,6 +155,34 @@ pub fn spawn(
             // 本次下载产生的——删它不算误删用户资产。
             let abort_file = opts.dest_dir.join(model.local_file_name());
 
+            // ================= 第 0 段：复用已有实例 =================
+            //
+            // 部署页点「部署」时，如果这个模型已经有实例（之前部署过、
+            // 现在处于停止状态），就不该重新创建实例、重新装依赖、
+            // 重新下载几 GB 权重——那些都还在机器上。
+            //
+            // 判定由网关在受理请求时完成（见 `reuse_deployment_id`），
+            // 这里只负责执行「开机 → 起进程 → 建隧道 → 探活」。
+            if let (Some(hooks), Some(dep_id)) = (deploy.as_ref(), reuse_id.clone()) {
+                if jobs.is_cancelled(&job_id) {
+                    jobs.set_note(&job_id, "已取消，未产生任何变更".to_string());
+                    return;
+                }
+                jobs.mark_deploying(&job_id);
+                match (hooks.resume)(&dep_id) {
+                    Ok(id) => {
+                        jobs.set_deployment(&job_id, Some(&id), None);
+                        jobs.mark_done_external(&job_id);
+                    }
+                    Err(e) => {
+                        let why = format!("复用实例启动失败：{e}");
+                        jobs.mark_failed(&job_id, why.clone());
+                        jobs.set_deployment(&job_id, None, Some(why));
+                    }
+                }
+                return;
+            }
+
             // ================= 第 1 段：准备（下载前）=================
             //
             // 评估 → 选设备 → 配置。这一段**必须在下载前**跑完，用户才能
@@ -165,15 +213,19 @@ pub fn spawn(
                     Ok(mangosteen_orchestration::PreparedDeployment::Cloud(p)) => {
                         // prepare 可能包含节点创建、SSH 配置和远端下载；
                         // 用户可在这段时间取消。必须在提交启动前再次检查，
-                        // 否则取消后仍会拉起引擎并留下计费实例。
+                        // 否则取消后仍会拉起引擎。
                         if jobs.is_cancelled(&job_id) {
-                            let rollback = (hooks.abort)(None, None);
+                            // 取消只停实例，不删机器：已装好的环境与已下载的
+                            // 权重下次部署可复用。这里必须把台账 id 传下去，
+                            // 否则钩子不知道要停哪台实例。
+                            let rollback = (hooks.abort)(Some(p.id.as_str()), None);
                             jobs.set_note(
                                 &job_id,
                                 match rollback {
-                                    Ok(()) => "已取消，节点、隧道和远端部署资源已回滚".to_string(),
+                                    Ok(()) => "已取消：实例已停止保存，隧道已关闭，可再次部署复用"
+                                        .to_string(),
                                     Err(e) => {
-                                        format!("已取消，但资源回滚失败，请检查实例与隧道：{e}")
+                                        format!("已取消，但实例停止失败，请检查是否仍在计费：{e}")
                                     }
                                 },
                             );
@@ -183,7 +235,10 @@ pub fn spawn(
                         // 不需要本地下载，也没有本地文件可登记；
                         // 直接进入「启动模型」阶段。
                         match (hooks.commit_cloud)(*p) {
-                            Ok(dep_id) => jobs.set_deployment(&job_id, Some(&dep_id), None),
+                            Ok(dep_id) => {
+                                jobs.set_deployment(&job_id, Some(&dep_id), None);
+                                (hooks.refresh_routes)();
+                            }
                             Err(e) => {
                                 // 启动失败必须终结任务状态：只改 deploy_state
                                 // 会让 job.state 永远停在 running，UI 轮询不停、
@@ -267,9 +322,9 @@ pub fn spawn(
                             jobs.set_note(
                                 &job_id,
                                 match rollback {
-                                    Ok(()) => "已取消，已删除本次下载的文件与部署记录".to_string(),
+                                    Ok(()) => "已取消，已删除本次下载的文件".to_string(),
                                     Err(e) => {
-                                        format!("已取消，但资源回滚失败，请检查实例与隧道：{e}")
+                                        format!("已取消，但清理失败，请检查实例与隧道：{e}")
                                     }
                                 },
                             );

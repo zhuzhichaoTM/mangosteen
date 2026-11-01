@@ -37,7 +37,7 @@ pub use assess::{Assessor, ComputeTarget, DeploymentRequest, Evaluated, ModelDow
 pub use backend::BackendTarget;
 pub use deployment::{
     CloudCandidateBrief, CloudPreview, DeploymentPreview, DeviceBrief, DeviceTarget, PreparedCloud,
-    PreparedDeployment,
+    PreparedDeployment, UnloadOutcome,
 };
 pub use orchestrator::{
     scheduler_config_with_overrides, ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot,

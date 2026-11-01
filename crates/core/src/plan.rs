@@ -86,6 +86,21 @@ pub struct LocalPlan {
     /// 旧台账没有该字段 → 反序列化时默认 llama.cpp（当时的唯一引擎）。
     #[serde(default)]
     pub engine: crate::config::InferenceEngine,
+    /// 多模态投影 GGUF 文件路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj_path: Option<String>,
+    /// MTP draft GGUF 文件路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_model_path: Option<String>,
+    /// LocalPlan 辅助 GGUF 下载清单。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_downloads: Vec<AuxiliaryDownload>,
+    /// 引擎专属额外参数（不含动态端口、模型路径）。
+    ///
+    /// 用于 qwen3.8 等多模态模型的 `--image-max-tokens`、
+    /// `--mtmd-batch-max-tokens`、`--parallel` 等 llama.cpp 参数。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
 }
 
 impl LocalPlan {
@@ -128,6 +143,10 @@ impl LocalPlan {
             host: "127.0.0.1".to_string(),
             // 默认 llama.cpp；网关在落台账前会覆盖为实际选中的引擎
             engine: crate::config::InferenceEngine::default(),
+            mmproj_path: None,
+            draft_model_path: None,
+            auxiliary_downloads: Vec::new(),
+            extra_args: Vec::new(),
         }
     }
 
@@ -137,6 +156,14 @@ impl LocalPlan {
     pub fn is_full_gpu(&self, total_layers: u32) -> bool {
         self.gpu_layers >= total_layers
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuxiliaryDownload {
+    pub url: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 /// 云端实例规格请求（已归一化，不含厂商差异字段）。
@@ -162,6 +189,15 @@ pub struct CloudPlan {
     pub model_path: String,
     /// 云端 llama-server 监听端口（实例内）
     pub engine_port: u16,
+    /// 多模态投影 GGUF 文件路径（与主模型一起加载）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmproj_path: Option<String>,
+    /// MTP draft GGUF 文件路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_model_path: Option<String>,
+    /// 辅助 GGUF 下载清单（例如 mmproj 与 MTP draft）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auxiliary_downloads: Vec<AuxiliaryDownload>,
     /// 隧道建立后本地映射端口
     pub local_port: u16,
     /// 云端引擎参数（与本地保持同一套语义，确保推理行为一致）
@@ -204,6 +240,9 @@ pub struct CloudPlan {
     /// 猜测地址。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_ip: Option<String>,
+    /// 用户选定的 GPU 型号（用于停止实例复用时匹配同型号节点）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_gpu_model: Option<String>,
     /// 用户选定的规格 ID（`None` 表示自动选点）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_spec_id: Option<String>,
@@ -351,6 +390,7 @@ mod tests {
             remote_model: None,
             node_ip: None,
             requested_spec_id: None,
+            requested_gpu_model: None,
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
@@ -364,6 +404,10 @@ mod tests {
             image: "ubuntu22-cuda12".into(),
             model_path: "/root/models/q.gguf".into(),
             engine_port: 8080,
+            mmproj_path: None,
+            draft_model_path: None,
+            auxiliary_downloads: Vec::new(),
+            extra_args: Vec::new(),
             local_port: 11435,
             engine,
             max_price_per_hour: Some(2.5),
@@ -396,6 +440,7 @@ mod tests {
             remote_model: None,
             node_ip: None,
             requested_spec_id: None,
+            requested_gpu_model: None,
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
@@ -409,6 +454,10 @@ mod tests {
             image: "ubuntu22-cuda12".into(),
             model_path: "/m.gguf".into(),
             engine_port: 8080,
+            mmproj_path: None,
+            draft_model_path: None,
+            auxiliary_downloads: Vec::new(),
+            extra_args: Vec::new(),
             local_port: 12000,
             engine: local,
             max_price_per_hour: None,
@@ -451,6 +500,7 @@ mod tests {
                 remote_model: None,
                 node_ip: None,
                 requested_spec_id: None,
+                requested_gpu_model: None,
                 node_ssh_port: None,
                 node_ssh_user: None,
                 device_id: None,
@@ -464,6 +514,10 @@ mod tests {
                 image: "ubuntu22-cuda12".into(),
                 model_path: "/m.gguf".into(),
                 engine_port: 8080,
+                mmproj_path: None,
+                draft_model_path: None,
+                auxiliary_downloads: Vec::new(),
+                extra_args: Vec::new(),
                 local_port: 12000,
                 engine: LocalPlan::from_assessment(&s, "/m.gguf", &a, 11435),
                 max_price_per_hour: None,

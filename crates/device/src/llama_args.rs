@@ -28,7 +28,9 @@ pub fn llama_cpp_args(plan: &LocalPlan, bind_host: &str, port: u16) -> Vec<Strin
         port.to_string(),
     ];
     if plan.flash_attention {
-        args.push("--flash-attn".to_string());
+        // 远端 llama-server 版本要求显式枚举值；仅传 `--flash-attn`
+        // 会把紧随其后的 `--mmproj` 误当成该参数的值。
+        args.extend(["--flash-attn".to_string(), "on".to_string()]);
     }
     // llama-server 当前版本默认启用 mmap，且部分远端发行包已经移除了
     // 显式 `--mmap` 参数。不能把通用计划字段直接翻译成该参数，
@@ -38,6 +40,28 @@ pub fn llama_cpp_args(plan: &LocalPlan, bind_host: &str, port: u16) -> Vec<Strin
     if plan.use_mlock {
         args.push("--mlock".to_string());
     }
+    if let Some(mmproj) = &plan.mmproj_path {
+        args.extend(["--mmproj".to_string(), mmproj.clone()]);
+    }
+    if let Some(draft) = &plan.draft_model_path {
+        args.extend([
+            "--model-draft".to_string(),
+            draft.clone(),
+            "--spec-type".to_string(),
+            "draft-mtp".to_string(),
+            "--n-gpu-layers-draft".to_string(),
+            plan.gpu_layers.to_string(),
+            "--spec-draft-n-max".to_string(),
+            "4".to_string(),
+            "--spec-draft-type-k".to_string(),
+            plan.kv_cache_type_k.as_cli_value().to_string(),
+            "--spec-draft-type-v".to_string(),
+            plan.kv_cache_type_v.as_cli_value().to_string(),
+        ]);
+    }
+    // 特定模型模板的 llama.cpp 参数由调度器注入；动态端口和模型路径
+    // 仍由本适配器统一生成，防止模板覆盖节点端口映射。
+    args.extend(plan.extra_args.iter().cloned());
     args
 }
 

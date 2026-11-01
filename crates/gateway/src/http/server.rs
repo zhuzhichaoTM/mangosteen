@@ -61,6 +61,11 @@ pub struct GatewayServer {
     pub(crate) sampler: mangosteen_platform::resmon::CpuSampler,
     pub(crate) pull_jobs: crate::pulljobs::PullJobs,
     pub(crate) cloud_monitor: crate::cloudmon::CloudMonitor,
+    /// 部署运行态探测缓存（`running` 字段）。
+    ///
+    /// `None` 表示未启用后台探测（测试构造的服务器）：此时
+    /// `running` 回退为「台账状态是否 ready」，行为可预期且不发网络请求。
+    pub(crate) runtime_probe: Option<crate::runprobe::RuntimeProbe>,
     pub(crate) sessions: mangosteen_session::SessionStore,
 }
 
@@ -72,12 +77,42 @@ impl GatewayServer {
         api_key: String,
         upstream_timeout: Duration,
     ) -> Self {
-        let backend_snapshot = Arc::new(RwLock::new(std::collections::BTreeMap::new()));
-        // 启动时短暂读取一次现有后端，避免已有模型在首次对话时撞上部署锁。
+        // API 网关重启后自动恢复台账中已就绪模型的本地隧道映射。
+        // 只恢复进程内连接状态，不创建实例、不下载模型、不重启节点。
         if let Ok(mut gw) = gateway.lock() {
-            if let Ok(target) = gw.active_backend() {
+            let _ = gw.restore_deployment_tunnels();
+        }
+        let backend_snapshot = Arc::new(RwLock::new(std::collections::BTreeMap::new()));
+        // 只读台账，把**全部**已就绪模型一次性做成业务转发快照。
+        //
+        // 绝不能调用 `active_backend()`：它只返回一个模型，而且会触发
+        // Orchestrator::refresh。部署线程执行节点配置/下载时会长时间持有
+        // Gateway 锁，若对话请求在快照中找不到自己的模型再回退拿这把锁，
+        // 就会被部署流程阻塞。业务转发应只读快照，部署控制完全走另一条路径。
+        if let Ok(gw) = gateway.lock() {
+            if let Ok(records) = gw.list_deployments() {
                 if let Ok(mut snapshot) = backend_snapshot.write() {
-                    snapshot.insert(target.model_id.clone(), target);
+                    for record in records {
+                        if record.status != mangosteen_base::state::DeploymentStatus::Ready {
+                            continue;
+                        }
+                        let Some(port) = record.plan.local_access_port() else {
+                            continue;
+                        };
+                        let model_id = mangosteen_core::model::ModelEntry::derive_id(
+                            &record.plan.model.name,
+                            record.plan.model.quant,
+                        );
+                        snapshot.insert(
+                            model_id.clone(),
+                            BackendTarget {
+                                host: "127.0.0.1".to_string(),
+                                port,
+                                model_id,
+                                origin_label: record.plan.origin.label(),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -90,6 +125,7 @@ impl GatewayServer {
             sampler: mangosteen_platform::resmon::CpuSampler::new(),
             pull_jobs: crate::pulljobs::PullJobs::new(),
             cloud_monitor: crate::cloudmon::CloudMonitor::new(),
+            runtime_probe: None,
             sessions: mangosteen_session::SessionStore::new(
                 mangosteen_platform::paths::sessions_file(
                     &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>,
@@ -114,6 +150,18 @@ impl GatewayServer {
     pub fn with_cloud_monitor(self) -> Self {
         let monitor = self.cloud_monitor.clone();
         crate::cloudmon::spawn_cloud_monitor(Arc::clone(&self.gateway), monitor);
+        self
+    }
+
+    /// 启用部署运行态周期探测（部署页签的「运行/停止」数据源）。
+    ///
+    /// 与云端监控同理：后台线程每 5 秒探一次本地隧道端口的 `/health`，
+    /// HTTP 端点只读缓存。不启用时 `running` 回退为台账状态，
+    /// 测试不必等待真实端口。
+    pub fn with_runtime_probe(mut self) -> Self {
+        let probe = crate::runprobe::RuntimeProbe::new();
+        crate::runprobe::spawn_runtime_probe(Arc::clone(&self.gateway), probe.clone());
+        self.runtime_probe = Some(probe);
         self
     }
 

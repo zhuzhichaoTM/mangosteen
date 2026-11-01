@@ -62,6 +62,43 @@ impl GatewayServer {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let config_template = parsed
+            .get("config_template")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let model_id = parsed
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let gpu_model = parsed
+            .get("gpu_model")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let auxiliary_models = parsed
+            .get("auxiliary_models")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let raw = item.as_str()?.trim();
+                        let file_name = raw.split_whitespace().next()?.to_string();
+                        if !file_name.to_ascii_lowercase().ends_with(".gguf") {
+                            return None;
+                        }
+                        Some(mangosteen_orchestration::assess::AuxiliaryModelSpec {
+                            file_name,
+                            url: String::new(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         // 同一规格正在下载 → 复用，避免两个 curl 争抢同一个 .part
         if let Some(existing) = self.pull_jobs.find_active_by_spec(spec) {
@@ -95,7 +132,15 @@ impl GatewayServer {
             Ok(r) => r,
             Err(e) => return Response::error(&e),
         };
-        let (source, model) = match registry.resolve(spec) {
+        // 部署页选择的模型 ID 对应配置白名单；白名单的 source_spec
+        // 是生效模板的唯一模型资产定义。只有没有 model_id 的旧 CLI 调用
+        // 才回退到请求中的裸 source spec。
+        let effective_spec = model_id
+            .as_ref()
+            .and_then(|id| cfg.model_whitelist.get(id).map(|m| m.source_spec.as_str()))
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(spec);
+        let (source, model) = match registry.resolve(effective_spec) {
             Ok(v) => v,
             Err(e) => return Response::error(&e),
         };
@@ -184,6 +229,14 @@ impl GatewayServer {
             _ => false,
         };
 
+        // 重新部署必须完整走「GPU 选择 → 节点配置 → 模型下载 → 启动模型 → 隧道」
+        // 全部阶段。即使台账里存在同模型的 stopped 实例，也不能在 HTTP 受理
+        // 阶段直接走 resume：用户本次可能已经选择了另一种 GPU，且节点配置、
+        // SSH 免密、依赖和模型文件都必须重新校验。
+        // 资源去重只允许发生在具体阶段内部（例如节点配置阶段发现依赖已存在），
+        // 不能用它跳过阶段本身。
+        let reuse_id: Option<String> = None;
+
         let job_id = self.pull_jobs.create_with(spec, &file_name, deploy_after);
         if deploy_after && cloud_spec.is_some() {
             // UI 已完成模型评估并明确选择 GPU 规格；任务创建后从“节点选择”开始。
@@ -205,6 +258,7 @@ impl GatewayServer {
         // 闭包在**持有网关锁**期间被调用（`prepare` / `commit_local` 要
         // `&mut Gateway`），所以 sink 里只能操作内存任务表，
         // 绝不做网络/磁盘 IO——否则几 GB 下载期间整个 API 都会被拖死。
+        let purge_model_id = model_id.clone();
         let dep: Option<crate::pulljobs::DeployHooks> = if deploy_after {
             let jobs = self.pull_jobs.clone();
             let jid = job_id.clone();
@@ -263,17 +317,21 @@ impl GatewayServer {
                     r.target = tgt;
                     // 云端要据此在远端下载；本地部署用不到，带着也无害
                     r.model_download = dl_spec.clone();
+                    r.model_id = model_id.clone();
                     r.cloud_spec = cloud_spec.clone();
                     r.device_id = device_id.clone();
+                    r.gpu_model = gpu_model.clone();
+                    r.auxiliary_models = auxiliary_models.clone();
+                    r.config_template = config_template.clone();
                     r
                 };
 
-                // 阶段 1/6：模型评估
+                // 阶段 1：模型评估（真实执行，完成后输出加载所需算力资源）
                 jobs_p.set_stage(
                     &jid_p,
                     mangosteen_orchestration::progress::DeployStage::Assessing,
                     mangosteen_orchestration::progress::StageOutcome::Running,
-                    "正在读取模型元数据并评估资源需求".to_string(),
+                    "正在解析模型元数据并评估模型加载所需算力资源".to_string(),
                 );
 
                 let evaluated = if local_final_path.is_file() {
@@ -289,7 +347,7 @@ impl GatewayServer {
                                 &jid_p,
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
                                 mangosteen_orchestration::progress::StageOutcome::Done,
-                                "模型元数据读取成功，评估阶段完成".to_string(),
+                                "模型评估完成，已输出模型加载所需算力资源".to_string(),
                             );
                             ev
                         }
@@ -321,7 +379,8 @@ impl GatewayServer {
                                 &jid_p,
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
                                 mangosteen_orchestration::progress::StageOutcome::Done,
-                                "远端模型元数据读取成功，评估阶段完成".to_string(),
+                                "模型评估完成，已输出模型加载所需算力资源（远端元数据）"
+                                    .to_string(),
                             );
                             ev
                         }
@@ -337,7 +396,7 @@ impl GatewayServer {
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
                                 mangosteen_orchestration::progress::StageOutcome::Done,
                                 format!(
-                                    "模型元数据预取失败，已明确使用估算值：{}",
+                                    "模型评估完成，使用估算值输出模型加载所需算力资源：{}",
                                     first_line(&e.to_string())
                                 ),
                             );
@@ -398,6 +457,24 @@ impl GatewayServer {
                 Ok(plan.id)
             });
 
+            let gw_rs = Arc::clone(&gw_for_abort);
+            let jobs_rs = jobs.clone();
+            let jid_rs = jid.clone();
+            let resume: crate::pulljobs::ResumeHook = Arc::new(move |dep_id| {
+                let sink_jobs = jobs_rs.clone();
+                let sink_id = jid_rs.clone();
+                let sink = move |stage: mangosteen_orchestration::progress::DeployStage,
+                                 outcome: mangosteen_orchestration::progress::StageOutcome,
+                                 detail: String| {
+                    sink_jobs.set_stage(&sink_id, stage, outcome, detail);
+                };
+                let mut g = gw_rs
+                    .lock()
+                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                g.start_service_with_progress(dep_id, &sink)?;
+                Ok(dep_id.to_string())
+            });
+
             let abort: crate::pulljobs::AbortHook = Arc::new(move |dep_id, delete_file| {
                 let Some(dep_id) = dep_id else { return Ok(()) };
                 let mut g = gw_a
@@ -406,17 +483,118 @@ impl GatewayServer {
                 g.abort_deployment(dep_id, delete_file)
             });
 
+            let gw_invalid = Arc::clone(&gw_for_abort);
+            let invalidate: crate::pulljobs::InvalidateHook = Arc::new(move |dep_id, reason| {
+                let mut g = gw_invalid
+                    .lock()
+                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                g.invalidate_deployment(dep_id, reason)
+            });
+
+            let refresh_gateway = Arc::clone(&self.gateway);
+            let refresh_snapshot = Arc::clone(&self.backend_snapshot);
+            let refresh_routes: crate::pulljobs::RefreshRoutesHook = Arc::new(move || {
+                let Ok(gw) = refresh_gateway.lock() else {
+                    return;
+                };
+                let Ok(records) = gw.list_deployments() else {
+                    return;
+                };
+                let Ok(mut snapshot) = refresh_snapshot.write() else {
+                    return;
+                };
+                for record in records {
+                    if record.status != mangosteen_base::state::DeploymentStatus::Ready {
+                        continue;
+                    }
+                    let Some(port) = record.plan.local_access_port() else {
+                        continue;
+                    };
+                    let model_id = mangosteen_core::model::ModelEntry::derive_id(
+                        &record.plan.model.name,
+                        record.plan.model.quant,
+                    );
+                    snapshot.insert(
+                        model_id.clone(),
+                        crate::protocol::BackendTarget {
+                            host: "127.0.0.1".to_string(),
+                            port,
+                            model_id,
+                            origin_label: record.plan.origin.label(),
+                        },
+                    );
+                }
+            });
+
             Some(crate::pulljobs::DeployHooks {
                 prepare,
                 commit_cloud,
+                resume,
+                invalidate,
+                refresh_routes,
                 abort,
             })
         } else {
             None
         };
 
+        // 重新部署必须走完整阶段：已有资源只能在对应阶段内部校验并复用，
+        // 不能在 HTTP 受理阶段直接跳过 GPU 选择、节点配置和下载流程。
+        // 资源去重只允许发生在具体阶段内部（例如节点配置阶段发现依赖已存在），
+        // 不能用它跳过阶段本身。
+        //
+        // 部署入口先清理同模型的历史台账记录和旧推理进程，防止旧的 ready/
+        // provisioning 记录在轮询时把新任务误判成“部署已完成”。模型文件不删，
+        // 下载阶段会重新做真实文件校验并复用完整资源。
+        if deploy_after {
+            if let Some(id) = purge_model_id.as_deref() {
+                if let Ok(mut g) = self.gateway.lock() {
+                    if let Err(e) = g.purge_model_deployments(id) {
+                        return Response::error(&e);
+                    }
+                }
+            }
+        }
+
         if already {
-            // 走一遍登记（可能只是台账丢了，文件还在）
+            // 已有本地文件也必须经过完整部署阶段。这里只记录文件已存在；
+            // 不再提前把任务标记 Done/Downloading Skipped 后直接 prepare。
+            // worker 会在模型下载阶段重新做远端文件完整性与可用性确认。
+            if deploy_after {
+                self.pull_jobs.set_note(
+                    &job_id,
+                    "本地已存在模型文件，仍执行完整部署流程并在下载阶段重新校验",
+                );
+                let resumed = cfg
+                    .storage
+                    .models_dir
+                    .join(format!("{file_name}.part"))
+                    .is_file();
+                // 阶段状态只能由 worker 在完成真实校验后上报。这里不能提前
+                // 下载阶段只由真实 worker/prepare 流程上报，不能在 HTTP 受理时提前
+                // 后续阶段已经“完成”，掩盖 auxiliary_models 尚未校验的问题。
+                crate::pulljobs::spawn(
+                    self.pull_jobs.clone(),
+                    job_id.clone(),
+                    source,
+                    model,
+                    opts,
+                    register,
+                    dep,
+                    reuse_id,
+                );
+                if resumed {
+                    self.pull_jobs
+                        .set_note(&job_id, "检测到未完成的下载，将从断点继续并重新校验");
+                }
+                self.pull_jobs.prune(10 * 60 * 1000);
+                return Response::json(
+                    200,
+                    &serde_json::json!({ "ok": true, "job_id": job_id, "reused": false }),
+                );
+            }
+
+            // 纯下载请求仍保留原有的本地文件幂等语义。
             let model_id = match register(&final_path, Some(source.name.as_str())) {
                 Ok(id) => id,
                 Err(e) => {
@@ -427,53 +605,6 @@ impl GatewayServer {
             };
             let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
             self.pull_jobs.mark_done(&job_id, &model_id, size, true);
-            if deploy_after {
-                // 文件已在本地 → 下载阶段直接标「跳过」（不是假装下载过）
-                self.pull_jobs.set_stage(
-                    &job_id,
-                    mangosteen_orchestration::progress::DeployStage::Downloading,
-                    mangosteen_orchestration::progress::StageOutcome::Skipped,
-                    format!(
-                        "本地已存在完整文件（{}），跳过下载",
-                        mangosteen_base::download::human_bytes(size)
-                    ),
-                );
-                self.pull_jobs.mark_deploying(&job_id);
-                // 已在本地 → 直接跑「准备 → 提交」，不经过下载。
-                // 准备里仍会做评估与设备选择，用户能看到同样的六步。
-                if let Some(hooks) = dep.as_ref() {
-                    let cancel_check: crate::pulljobs::CancelHook = {
-                        let jobs = self.pull_jobs.clone();
-                        let id = job_id.clone();
-                        Arc::new(move || jobs.is_cancelled(&id))
-                    };
-                    match (hooks.prepare)(cancel_check) {
-                        Ok(crate::gateway::PreparedDeployment::Cloud(p)) => {
-                            match (hooks.commit_cloud)(*p) {
-                                Ok(dep_id) => {
-                                    self.pull_jobs.set_deployment(&job_id, Some(&dep_id), None)
-                                }
-                                Err(e) => {
-                                    let why = format!(
-                                        "节点已就绪，但启动推理引擎失败：{e}。\
-                                         可在「已下载模型」里点「启动」重试"
-                                    );
-                                    self.pull_jobs.mark_failed(&job_id, why.clone());
-                                    self.pull_jobs.set_deployment(&job_id, None, Some(why));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let why = format!(
-                                "模型已就绪，但部署准备失败：{e}。\
-                                 可在「已下载模型」里点「启动」重试"
-                            );
-                            self.pull_jobs.mark_failed(&job_id, why.clone());
-                            self.pull_jobs.set_deployment(&job_id, None, Some(why));
-                        }
-                    }
-                }
-            }
         } else {
             let resumed = cfg
                 .storage
@@ -488,6 +619,7 @@ impl GatewayServer {
                 opts,
                 register,
                 dep,
+                reuse_id,
             );
             if resumed {
                 // 续传是磁盘上 .part 的能力，这里只补一句让用户安心

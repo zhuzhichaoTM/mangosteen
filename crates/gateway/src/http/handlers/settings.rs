@@ -135,6 +135,11 @@ impl GatewayServer {
             (gw.config().clone(), gw.config_store())
         };
         let before = cfg.remote_devices.len();
+        let removed = cfg
+            .remote_devices
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| (d.id.clone(), d.host.clone()));
         cfg.remote_devices.retain(|d| d.id != id);
         if before == cfg.remote_devices.len() {
             return Response::json(404, &ErrorResponse::bad_request("设备不存在", Some("id")));
@@ -142,12 +147,42 @@ impl GatewayServer {
         if let Err(e) = cfg.validate() {
             return Response::error(&e);
         }
+
+        // 删除节点前先释放该节点上由本工具创建的云实例。
+        //
+        // 自定义节点本身是用户的机器，单纯从列表移除并不等于销毁实例；
+        // 但如果这台机器上跑着我们用云 API 开出来的实例，不释放就会一直
+        // 计费。这里按 device_id / 节点 IP 反查部署台账并销毁对应实例；
+        // 销毁失败则中止删除，避免出现「节点没了但机器还在扣钱」。
+        let destroyed = {
+            let mut gw = match self.gateway.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::text(500, "网关状态锁中毒"),
+            };
+            match removed.as_ref() {
+                Some((device_id, host)) => {
+                    match gw.destroy_instances_bound_to_device(device_id, host) {
+                        Ok(list) => list,
+                        Err(e) => return Response::error(&e),
+                    }
+                }
+                None => Vec::new(),
+            }
+        };
+
         match store.save(&cfg) {
             Ok(_) => {
                 if let Ok(mut gw) = self.gateway.lock() {
                     gw.replace_config(cfg);
                 }
-                Response::json(200, &serde_json::json!({"ok": true, "id": id}))
+                Response::json(
+                    200,
+                    &serde_json::json!({
+                        "ok": true,
+                        "id": id,
+                        "destroyed_instances": destroyed,
+                    }),
+                )
             }
             Err(e) => Response::error(&e),
         }

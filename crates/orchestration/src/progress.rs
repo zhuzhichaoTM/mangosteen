@@ -12,7 +12,7 @@
 //! ## 阶段顺序
 //!
 //! ```text
-//! 模型评估 → 设备选择 → 设备配置 → 模型下载 → 模型量化 → 启动模型
+//! 模型评估 → 设备选择 → 设备配置 → 模型下载 → 启动模型
 //! ```
 //!
 //! **下载排在设备选择与配置之后**，这是刻意的产品决策：
@@ -32,13 +32,10 @@
 //! 明确标注「估算值」——不能让预取失败阻断整个部署，但也不能假装
 //! 那是精确结果。
 //!
-//! ## 「模型量化」为什么常常是「跳过」
+//! ## 量化能力边界
 //!
-//! 当前部署链路**不做自动量化**：用户下载的已经是量化好的 GGUF
-//! （`q4_k_m` 等），再量化一次只会降精度。`base::quantize` 是独立
-//! 能力（CLI 侧），不在部署主链路上。因此这一阶段如实标为
-//! `Skipped` 并说明原因，而不是假装跑过——假装的结果是用户以为
-//! 多花了几分钟，实际什么也没发生。
+//! 模型量化属于独立的可选工具能力，不属于部署主链路；部署使用已经准备好的
+//! GGUF 文件，因此部署阶段列表不再包含“模型量化”。
 
 /// 部署阶段。
 ///
@@ -54,8 +51,6 @@ pub enum DeployStage {
     Configuring,
     /// 模型下载：含 SHA 校验与台账登记
     Downloading,
-    /// 模型量化：当前链路不做，通常为跳过
-    Quantizing,
     /// 启动模型：拉起引擎进程并等待健康检查
     Launching,
     /// 建立本地网关到远端模型的 SSH 隧道
@@ -75,7 +70,6 @@ impl DeployStage {
         DeployStage::Selecting,
         DeployStage::Configuring,
         DeployStage::Downloading,
-        DeployStage::Quantizing,
         DeployStage::Launching,
         DeployStage::Tunneling,
     ];
@@ -89,7 +83,6 @@ impl DeployStage {
             DeployStage::Downloading => "downloading",
             DeployStage::Selecting => "selecting",
             DeployStage::Configuring => "configuring",
-            DeployStage::Quantizing => "quantizing",
             DeployStage::Launching => "launching",
             DeployStage::Tunneling => "tunneling",
             DeployStage::Ready => "ready",
@@ -104,7 +97,6 @@ impl DeployStage {
             DeployStage::Downloading => "模型下载",
             DeployStage::Selecting => "设备选择",
             DeployStage::Configuring => "设备配置",
-            DeployStage::Quantizing => "模型量化",
             DeployStage::Launching => "启动模型",
             DeployStage::Tunneling => "建立隧道",
             DeployStage::Ready => "已就绪",
@@ -221,7 +213,6 @@ mod tests {
             DeployStage::Downloading,
             DeployStage::Selecting,
             DeployStage::Configuring,
-            DeployStage::Quantizing,
             DeployStage::Launching,
         ] {
             assert!(DeployStage::STEPS.contains(&s), "{} 不在 STEPS 里", s.id());

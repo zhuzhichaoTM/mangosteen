@@ -39,6 +39,8 @@ pub mod http;
 pub mod protocol;
 mod pull_worker;
 pub mod pulljobs;
+/// 部署运行态探测缓存（`running` 字段的数据源）。
+pub mod runprobe;
 pub mod server;
 
 pub use cloudmon::{spawn_cloud_monitor, CloudMonitor};
@@ -50,6 +52,7 @@ pub use mangosteen_orchestration::progress;
 pub use mangosteen_orchestration::progress::{DeployStage, StageEvent, StageOutcome};
 pub use mangosteen_orchestration::{assess, scheduler};
 pub use mangosteen_orchestration::{Assessor, DeploymentRequest, Evaluated};
+pub use runprobe::{spawn_runtime_probe, RuntimeProbe};
 
 /// 在后台预热网关的慢速探测（引擎版本）。
 ///

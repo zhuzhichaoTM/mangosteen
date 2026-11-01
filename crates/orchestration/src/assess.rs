@@ -92,6 +92,8 @@ pub struct DeploymentRequest {
     pub batch_size: u32,
     /// 用户指定的算力落位（默认 `Auto`：本地优先）
     pub target: ComputeTarget,
+    /// UI 模型白名单 ID，用于选择完整配置模板。
+    pub model_id: Option<String>,
     /// 模型文件的**远端下载信息**（云端直连下载用）。
     ///
     /// 设备选云端时，模型的下载应该发生在云端。这里带上「从哪下、多大」，
@@ -106,12 +108,25 @@ pub struct DeploymentRequest {
     /// UI 在云端确认弹窗里让用户挑 GPU 型号；选定后由此传给编排层，
     /// 编排层优先创建该规格。`None` 表示按调度策略自动选。
     pub cloud_spec: Option<String>,
+    /// 用户选定的 GPU 型号（如 P40、V100S），用于已有实例复用匹配。
+    pub gpu_model: Option<String>,
     /// 用户选定的**已保存设备**（设置页「设备列表」里的 SSH 节点）。
     ///
     /// 有值时**不创建云实例**：直接连上这台机器部署。它优先于
     /// [`Self::cloud_spec`]——用户明确指了机器，就不该再开一台新的
     /// 计费实例。
     pub device_id: Option<String>,
+    /// 配置模板原文/名称之外的辅助模型下载清单。
+    /// 模板解析后由网关传入，不能只停留在 UI 展示层。
+    pub auxiliary_models: Vec<AuxiliaryModelSpec>,
+    /// UI/调用方最终选定的配置模板名称。
+    pub config_template: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuxiliaryModelSpec {
+    pub file_name: String,
+    pub url: String,
 }
 
 /// 模型文件的远端下载信息。
@@ -136,8 +151,12 @@ impl Default for DeploymentRequest {
             batch_size: 512,
             target: ComputeTarget::Auto,
             model_download: None,
+            model_id: None,
             cloud_spec: None,
+            gpu_model: None,
             device_id: None,
+            config_template: None,
+            auxiliary_models: Vec::new(),
         }
     }
 }
@@ -510,8 +529,12 @@ mod tests {
             target: ComputeTarget::Auto,
             // 测试只验证「请求翻译到纯算法层」，不涉及远端下载信息
             model_download: None,
+            model_id: None,
             cloud_spec: None,
+            gpu_model: None,
             device_id: None,
+            config_template: None,
+            auxiliary_models: Vec::new(),
         };
         let ar = r.to_assess_request();
         assert_eq!(ar.context_len, Some(16384));

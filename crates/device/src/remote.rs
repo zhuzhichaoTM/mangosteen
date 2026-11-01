@@ -820,7 +820,18 @@ pub fn ensure_llama_server(
         });
     }
 
-    // 用 curl -L 跟随跳转（GitHub release 会 302 到对象存储）。
+    // 下载器：aria2c 多连接优先（-x16 -s16 -k1M），缺失或失败回退 curl。
+    //
+    // ## 为什么不再直接用 curl
+    //
+    // 预编译包约 600 MB，跨境单连接 curl 实测只有几百 KB/s，十几分钟都下
+    // 不完，节点配置阶段就长时间卡在「准备引擎」，用户看着像卡死。aria2c
+    // 用 16 段并发能显著提速，参数与模型权重下载保持一致。
+    //
+    // `--allow-overwrite` + `--auto-file-renaming=false` 是必须的：
+    // 上一次失败的残留同名文件如果不覆盖，aria2 会改写成
+    // `llama.tar.gz.1`，随后的 `tar -xzf llama.tar.gz` 解压的是旧文件，
+    // 表现为「解压成功但找不到 llama-server」，极难排查。
     //
     // 官方发布包有两种格式：老的 `...-ubuntu-x64.zip` 和现在主流的
     // `...-ubuntu-cuda-12.8-x64.tar.gz`。按 URL 后缀选解压命令，
@@ -831,11 +842,26 @@ pub fn ensure_llama_server(
     } else {
         ("llama.zip", "unzip -o -q llama.zip")
     };
+    let q_url = shell_quote(download_url);
+    let q_file = shell_quote(file);
+    let q_tmp = shell_quote(&format!("{workdir}/tmp"));
+    let fetch = format!(
+        "if command -v aria2c >/dev/null 2>&1; then \
+           echo '使用 aria2c -x16 多连接下载 llama-server 预编译包'; \
+           aria2c -x16 -s16 -k1M --timeout=15 --max-tries=15 --retry-wait=2 \
+             --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
+             -d {q_tmp} -o {q_file} {q_url} \
+           || curl -fL --retry 5 --retry-delay 3 --connect-timeout 20 -o {file} {q_url}; \
+         else \
+           echo '未找到 aria2c，回退 curl 下载 llama-server 预编译包'; \
+           curl -fL --retry 5 --retry-delay 3 --connect-timeout 20 -o {file} {q_url}; \
+         fi"
+    );
     let script = format!(
         "set -e; \
          mkdir -p {workdir}/bin {workdir}/tmp; \
          cd {workdir}/tmp; \
-         curl -fL --retry 2 -o {file} '{download_url}'; \
+         {fetch}; \
          {extract}; \
          d=$(dirname $(find . -name llama-server -type f | head -1)); \
          cp -a \"$d\"/. {workdir}/bin/; \
@@ -885,8 +911,14 @@ pub fn start_llama_server(
     args: &[String],
     workdir: &str,
 ) -> MnResult<()> {
-    let log = format!("{workdir}/llama-server.log");
-    let pid_file = format!("{workdir}/llama-server.pid");
+    let log = match port_from_args(args) {
+        8080 => format!("{workdir}/llama-server.log"),
+        p => format!("{workdir}/llama-server-{p}.log"),
+    };
+    let pid_file = match port_from_args(args) {
+        8080 => format!("{workdir}/llama-server.pid"),
+        p => format!("{workdir}/llama-server-{p}.pid"),
+    };
     let quoted: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
     // 清理旧实例绝不使用 `pkill -f '<bin>'`：承载本命令的远端 shell
     // 命令行里就带着 `<bin>` 文本（见下方 nohup 一段），朴素模式必然
@@ -894,22 +926,95 @@ pub fn start_llama_server(
     // 改为：pid 文件杀进程组 + 括号守卫兜底 + 排除当前 shell PID。
     let bin_dir = bin.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(".");
     let library_path = format!("{bin_dir}:$LD_LIBRARY_PATH");
+    let port = port_from_args(args);
+    let listen_probe = listening_probe(port);
+    // 启动判定不能只看「1 秒后进程还在」：
+    //  * `llama-server` 加载模型期间只输出 initializing/参数信息，
+    //    过短的观察窗会把「正在加载」误判成失败；
+    //  * `setsid ... &` 的 `$!` 是 setsid 的 PID，setsid 在已是进程组
+    //    组长时会 fork，PID 文件于是指向一个已退出的父进程。
+    // 因此改为：由被启动的 shell 自己写 PID（`exec` 后 PID 不变），
+    // 再循环观察「端口开始监听」或「进程提前退出」，两者都等不到才算失败。
     let script = format!(
         "set -e; mkdir -p {workdir}; \
-         if [ -f {pid_file} ]; then kill -- -$(cat {pid_file}) 2>/dev/null || kill $(cat {pid_file}) 2>/dev/null || true; fi; \
+         if [ -f {pid_file} ]; then \
+           kill -- -$(cat {pid_file}) 2>/dev/null || kill $(cat {pid_file}) 2>/dev/null || true; \
+           rm -f {pid_file}; \
+         fi; \
          test -x {bin}; \
          LD_LIBRARY_PATH={library_path} {bin} --version >/dev/null 2>&1 || true; \
-         setsid env LD_LIBRARY_PATH={library_path} nohup {bin} {args} > {log} 2>&1 < /dev/null & \
-         echo $! > {pid_file}; \
-         sleep 1; \
-         if ! kill -0 $(cat {pid_file}) 2>/dev/null; then \
-           echo '--- 启动失败，日志尾部 ---' >&2; tail -20 {log} >&2; exit 1; \
-         fi; \
-         echo started",
+         setsid env LD_LIBRARY_PATH={library_path} sh -c 'echo $$ > {pid_file}; exec {bin} {args}' > {log} 2>&1 < /dev/null & \
+         started=0; \
+         i=0; \
+         while [ $i -lt 60 ]; do \
+           i=$((i+1)); \
+           sleep 0.5; \
+           if [ ! -f {pid_file} ] || ! kill -0 $(cat {pid_file}) 2>/dev/null; then \
+             if [ $i -lt 2 ]; then continue; fi; \
+             echo '--- 启动失败，日志尾部 ---' >&2; tail -40 {log} >&2; exit 1; \
+           fi; \
+           if {listen_probe}; then started=1; break; fi; \
+         done; \
+         if [ $started -eq 1 ] || kill -0 $(cat {pid_file}) 2>/dev/null; then echo started; exit 0; fi; \
+         echo '--- 启动超时，日志尾部 ---' >&2; tail -40 {log} >&2; exit 1",
         args = quoted.join(" ")
     );
-    ssh_exec(target, &script, 120)?;
+    ssh_exec(target, &script, 180)?;
     Ok(())
+}
+
+/// 端口监听探测片段。
+///
+/// 远端不一定装了 `ss`/`netstat`：都没有时退化为「只要进程还活着就算启动
+/// 成功」，随后仍会由调用方经隧道探 `/health` 做最终判定。
+fn listening_probe(port: u16) -> String {
+    format!(
+        "(command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ':{port} ') \
+         || (command -v netstat >/dev/null 2>&1 && netstat -lnt 2>/dev/null | grep -q ':{port} ')"
+    )
+}
+
+/// 从启动参数里读 `--port`，缺省按 llama.cpp 常规端口处理。
+fn port_from_args(args: &[String]) -> u16 {
+    args.iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(LLAMA_CPP_PORT)
+}
+
+/// 读取指定部署的远端启动诊断信息，不修改远端状态。
+///
+/// 健康检查超时后必须查看 PID、监听端口和日志尾部；否则调用方只能看到
+/// 本地隧道 connection reset，看不到 llama-server 是启动失败、OOM 退出还是
+/// 参数错误。
+pub fn llama_server_start_diagnostics(
+    target: &SshTarget,
+    workdir: &str,
+    port: u16,
+) -> MnResult<String> {
+    let pid_file = if port == LLAMA_CPP_PORT {
+        format!("{workdir}/llama-server.pid")
+    } else {
+        format!("{workdir}/llama-server-{port}.pid")
+    };
+    let log_file = if port == LLAMA_CPP_PORT {
+        format!("{workdir}/llama-server.log")
+    } else {
+        format!("{workdir}/llama-server-{port}.log")
+    };
+    ssh_exec(
+        target,
+        &format!(
+            "echo '[pid]'; if [ -f {pid} ]; then cat {pid}; ps -fp $(cat {pid}) 2>&1 || true; else echo missing; fi; \
+             echo '[listen]'; (ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null || true) | grep ':{port} ' || echo missing; \
+             echo '[processes]'; pgrep -af llama-server 2>/dev/null || echo missing; \
+             echo '[log]'; tail -80 {log} 2>&1 || true",
+            pid = pid_file,
+            log = log_file,
+        ),
+        30,
+    )
 }
 
 /// 与 [`start_llama_server`] 相同，预留启动阶段进度回调。
@@ -961,40 +1066,71 @@ pub fn llama_server_running(target: &SshTarget, workdir: &str) -> MnResult<bool>
     Ok(out.trim() == "yes")
 }
 
-/// 停掉远端 `llama-server`（**保留实例**）。
+/// 停掉指定部署的远端 `llama-server`（**保留实例**）。
 ///
-/// ## 与「销毁实例」的区别
-///
-/// 这是「停止服务」：进程没了，GPU 显存释放，但机器还在——所以**仍在计费**。
-/// 好处是再启动只要几秒（模型文件已在盘上）。真正停止计费要走
-/// `Orchestrator::teardown`（销毁实例）。
-///
-/// 调用方必须把「实例仍在计费」这件事告诉用户，否则会有人以为点了停止就
-/// 不花钱了。
+/// 通过该部署自己的 PID 文件和端口进程定位，不再使用全局
+/// `pkill -x llama-server`，避免卸载一个模型时误杀同节点上的其它模型。
 pub fn stop_llama_server(target: &SshTarget, workdir: &str) -> MnResult<()> {
+    stop_llama_server_on_port(target, workdir, None)
+}
+
+/// 停掉指定远端端口对应的模型进程。
+///
+/// `port` 为 `Some` 时只操作该部署的 PID/端口；旧调用传 `None` 时保留
+/// 兼容行为，但同节点多模型的生命周期必须使用带端口版本。
+pub fn stop_llama_server_on_port(
+    target: &SshTarget,
+    workdir: &str,
+    port: Option<u16>,
+) -> MnResult<()> {
     // 先 TERM 给机会优雅退出（它会自己释放显存），等不到再 KILL。
+    // 只 TERM 给机会优雅退出（它会自己释放显存），等不到再 KILL。
     // 只 TERM 就返回是不行的：端口没释放，重启会报 address in use。
     //
-    // 只用 pid 文件和精确进程名，不按完整命令行扫描；完整命令行扫描
-    // 会把当前 SSH shell 自身也纳入匹配范围。
-    let term_all = format!(
-        "if [ -f {workdir}/llama-server.pid ]; then kill -TERM -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -TERM $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; \
-         pkill -TERM -x llama-server 2>/dev/null || true"
-    );
-    let kill_all = format!(
-        "if [ -f {workdir}/llama-server.pid ]; then kill -KILL -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -KILL $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; \
-         pkill -KILL -x llama-server 2>/dev/null || true"
-    );
+    // 多模型节点必须按部署自己的 pid/端口操作；不带端口时才兼容旧的
+    // 单模型逻辑。带端口时不允许 `pkill -x llama-server` 兜底。
+    let scoped = port.is_some();
+    let pid_path = port
+        .map(|p| format!("{workdir}/llama-server-{p}.pid"))
+        .unwrap_or_else(|| format!("{workdir}/llama-server.pid"));
+    let term_all = if scoped {
+        format!(
+                "if [ -f {pid} ]; then kill -TERM -- -$(cat {pid}) 2>/dev/null || kill -TERM $(cat {pid}) 2>/dev/null || true; fi",
+                pid = pid_path
+            )
+    } else {
+        format!(
+            "if [ -f {workdir}/llama-server.pid ]; then kill -TERM -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -TERM $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; pkill -TERM -x llama-server 2>/dev/null || true"
+        )
+    };
+    let kill_all = if scoped {
+        format!(
+                "if [ -f {pid} ]; then kill -KILL -- -$(cat {pid}) 2>/dev/null || kill -KILL $(cat {pid}) 2>/dev/null || true; fi",
+                pid = pid_path
+            )
+    } else {
+        format!(
+            "if [ -f {workdir}/llama-server.pid ]; then kill -KILL -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -KILL $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; pkill -KILL -x llama-server 2>/dev/null || true"
+        )
+    };
+    let scope_check = if scoped {
+        format!(
+            "test ! -f {pid} || ! kill -0 $(cat {pid}) 2>/dev/null",
+            pid = pid_path
+        )
+    } else {
+        "! pgrep -x llama-server >/dev/null 2>&1".to_string()
+    };
     let out = ssh_exec(
         target,
         &format!(
             "{term_all}; \
              for i in $(seq 1 20); do \
-               if ! pgrep -x llama-server >/dev/null 2>&1; then echo stopped; exit 0; fi; \
+               if {scope_check}; then echo stopped; exit 0; fi; \
                sleep 0.5; \
              done; \
              {kill_all}; sleep 1; \
-             if pgrep -x llama-server >/dev/null 2>&1; then echo still-running; exit 1; fi; \
+             if ! ({scope_check}); then echo still-running; exit 1; fi; \
              echo stopped",
         ),
         60,
@@ -1298,9 +1434,16 @@ pub fn download_model_remote_with_progress(
 /// 计划大小可靠，因为计划大小可能来自预估，与源站实际字节数不完全一致。
 pub fn remote_download_completed(target: &SshTarget, path: &str) -> MnResult<bool> {
     let marker = format!("{path}.download.ok");
+    // 标记不是独立事实：必须同时验证目标文件存在、非空，且大小与标记
+    // 中记录的大小一致。否则旧的 `.download.ok` 残留会让模型文件缺失时
+    // 错误跳过下载，直到启动阶段才报 No such file or directory。
     let out = ssh_exec(
         target,
-        &format!("if [ -s '{marker}' ]; then echo yes; else echo no; fi"),
+        &format!(
+            "if [ -s '{marker}' ] && [ -s '{path}' ] && \
+             [ \"$(cat '{marker}' 2>/dev/null)\" = \"$(stat -c %s '{path}' 2>/dev/null)\" ]; \
+             then echo yes; else echo no; fi"
+        ),
         60,
     )?;
     Ok(out.trim() == "yes")
@@ -1321,6 +1464,89 @@ pub fn remote_file_size(target: &SshTarget, path: &str) -> MnResult<u64> {
         .trim()
         .parse()
         .unwrap_or(0))
+}
+
+/// 查询远端 GPU 总显存和当前空闲显存（字节）。
+///
+/// ## 为什么需要它
+///
+/// 云厂商新建实例时会按显存规格做选择校验，但**自定义/已保存节点**没有
+/// 这一步——用户添加的机器可能只有 8GB 显存，却要跑 27B 全量 GPU 模型。
+/// 如果不在启动前拦截，模型下载几 GB 后 llama-server 才会 CUDA OOM，
+/// 浪费下载时间，且错误表现为晦涩的「connection reset by peer」。
+///
+/// 返回 `None` 表示节点没有可查询的 NVIDIA GPU；不能把这种情况等同于
+/// 显存不足，因为部分云环境的 GPU 信息通过厂商 API 提供而非 nvidia-smi。
+pub fn remote_gpu_memory(target: &SshTarget) -> MnResult<Option<(u64, u64)>> {
+    let out = ssh_exec(
+        target,
+        "nvidia-smi --query-gpu=memory.total,memory.free --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' | tail -1",
+        30,
+    )?;
+    let mut fields = out.trim().split(',');
+    let total_mib = fields.next().and_then(|v| v.parse::<u64>().ok());
+    let free_mib = fields.next().and_then(|v| v.parse::<u64>().ok());
+    Ok(match (total_mib, free_mib) {
+        (Some(total), Some(free)) if total > 0 => Some((
+            total.saturating_mul(1024 * 1024),
+            free.saturating_mul(1024 * 1024),
+        )),
+        _ => None,
+    })
+}
+
+/// 查询远端 GPU 总显存（字节）。
+pub fn remote_gpu_total_memory(target: &SshTarget) -> MnResult<Option<u64>> {
+    Ok(remote_gpu_memory(target)?.map(|(total, _)| total))
+}
+
+/// 查询远端 HTTP(S) 资源的真实字节数（`Content-Length`）。
+///
+/// ## 为什么需要它
+///
+/// 部署模板里的辅助文件（mmproj / MTP）常常没有登记期望大小。此时若只按
+/// 「文件非空」判断，一次被中断的 aria2c 下载会停在**目标路径**上（aria2c
+/// 直接写最终文件名，不用 `.part`），残留几十 MB 也会被当成「已就绪」，
+/// 于是模型下载阶段直接通过、启动时才报 GGUF 打不开。
+///
+/// 这里在节点侧做一次 HEAD，把源站声明的长度当成期望值，让
+/// [`crate::remote::remote_file_size`] 的严格比对有依据。
+/// HEAD 不可用（部分镜像拒绝）时返回 `None`，由调用方退回标记 + 非空判断。
+pub fn remote_http_content_length(target: &SshTarget, url: &str) -> MnResult<Option<u64>> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Ok(None);
+    }
+    let q = shell_quote(url);
+    let out = ssh_exec(
+        target,
+        &format!(
+            "curl -fsIL --max-time 20 --retry 1 {q} 2>/dev/null \
+             | tr -d '\\r' | grep -i '^content-length:' | tail -1 | cut -d: -f2 | tr -d ' '"
+        ),
+        60,
+    )?;
+    Ok(out
+        .trim()
+        .lines()
+        .last()
+        .and_then(|l| l.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0))
+}
+
+/// 校验远端文件是否以 GGUF 魔数开头。
+///
+/// 用来识别「下到的是错误文件或 HTML 错误页」这类情况：大小看起来正常，
+/// 但根本不是模型权重。文件不存在时返回 `Ok(false)`。
+pub fn remote_file_is_gguf(target: &SshTarget, path: &str) -> MnResult<bool> {
+    let out = ssh_exec(
+        target,
+        &format!(
+            "if [ -f '{path}' ]; then head -c 4 '{path}' 2>/dev/null | od -An -tx1 | tr -d ' \\n'; else echo missing; fi"
+        ),
+        60,
+    )?;
+    // "GGUF" 的十六进制是 47475546
+    Ok(out.trim().eq_ignore_ascii_case("47475546"))
 }
 
 #[cfg(test)]

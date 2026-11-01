@@ -91,30 +91,23 @@ impl GatewayServer {
         };
         self.forward_json("embeddings", &body, &target)
     }
-    /// 取当前后端。
+
+    /// 取当前后端。业务转发只读启动/刷新后的快照，不等待部署控制锁。
     pub(crate) fn backend(&self) -> MnResult<BackendTarget> {
         if let Ok(snapshot) = self.backend_snapshot.read() {
             if let Some(target) = snapshot.values().next() {
                 return Ok(target.clone());
             }
         }
-        let mut gw = self
-            .gateway
-            .lock()
-            .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
-        let target = gw.active_backend()?;
-        if let Ok(mut snapshot) = self.backend_snapshot.write() {
-            snapshot.insert(target.model_id.clone(), target.clone());
-        }
-        Ok(target)
+        Err(MnError::bad_request(
+            "当前没有业务转发后端；请先部署并等待模型就绪",
+        ))
     }
     /// 按请求里的 `model` 选择后端。
     ///
-    /// 客户端传 `auto` 或缺省 → 自动（本地优先）；
-    /// 传了具体模型 ID → 必须路由到那个模型，未运行则明确报错。
-    ///
-    /// 这样 UI「模型信息」下拉的选择才真正生效——否则用户选了 A
-    /// 却被路由到 B，回答不对劲却查不出原因。
+    /// 业务转发路径只读 `backend_snapshot`。若快照中已有对应模型，
+    /// **不再回退到 Gateway 锁**；这样部署线程进行长时间节点配置、
+    /// 下载或启动时，已就绪模型的对话仍可直接转发。
     pub(crate) fn backend_for_model(&self, model: Option<&str>) -> MnResult<BackendTarget> {
         let requested = model.filter(|m| !m.is_empty() && *m != "auto");
         if let Ok(snapshot) = self.backend_snapshot.read() {
@@ -122,19 +115,24 @@ impl GatewayServer {
                 if let Some(target) = snapshot.get(id) {
                     return Ok(target.clone());
                 }
-            } else if let Some(target) = snapshot.values().next() {
+                // 兼容调用方只传裸模型名：仍只读快照，不碰部署控制锁。
+                if let Some(target) = snapshot
+                    .values()
+                    .find(|target| target.model_id.split(':').next() == Some(id))
+                {
+                    return Ok(target.clone());
+                }
+                return Err(MnError::bad_request(format!(
+                    "模型 `{id}` 未在业务转发快照中运行，部署控制不会阻塞对话；请等待该模型就绪"
+                )));
+            }
+            if let Some(target) = snapshot.values().next() {
                 return Ok(target.clone());
             }
         }
-        let mut gw = self
-            .gateway
-            .lock()
-            .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
-        let target = gw.active_backend_for(model)?;
-        if let Ok(mut snapshot) = self.backend_snapshot.write() {
-            snapshot.insert(target.model_id.clone(), target.clone());
-        }
-        Ok(target)
+        Err(MnError::bad_request(
+            "当前没有业务转发后端；请先部署并等待模型就绪",
+        ))
     }
     /// 转发 JSON 请求到上游，并把上游响应归一化。
     pub(crate) fn forward_json(&self, path: &str, body: &[u8], target: &BackendTarget) -> Response {

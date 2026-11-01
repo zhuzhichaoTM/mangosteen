@@ -100,9 +100,11 @@ impl DeploymentRecord {
             (self.status, next),
             (DeploymentStatus::Planned, DeploymentStatus::Provisioning)
                 | (DeploymentStatus::Planned, DeploymentStatus::Failed)
+                | (DeploymentStatus::Planned, DeploymentStatus::Stopped)
                 | (DeploymentStatus::Planned, DeploymentStatus::Destroyed)
                 | (DeploymentStatus::Provisioning, DeploymentStatus::Ready)
                 | (DeploymentStatus::Provisioning, DeploymentStatus::Failed)
+                | (DeploymentStatus::Provisioning, DeploymentStatus::Stopped)
                 | (DeploymentStatus::Provisioning, DeploymentStatus::Destroyed)
                 | (DeploymentStatus::Ready, DeploymentStatus::Stopped)
                 | (DeploymentStatus::Ready, DeploymentStatus::Failed)
@@ -110,6 +112,7 @@ impl DeploymentRecord {
                 | (DeploymentStatus::Stopped, DeploymentStatus::Provisioning)
                 | (DeploymentStatus::Stopped, DeploymentStatus::Destroyed)
                 | (DeploymentStatus::Failed, DeploymentStatus::Provisioning)
+                | (DeploymentStatus::Failed, DeploymentStatus::Stopped)
                 | (DeploymentStatus::Failed, DeploymentStatus::Destroyed)
         );
         if !allowed {
@@ -223,6 +226,30 @@ impl StateStore {
             None => state.deployments.push(record),
         }
         state.deployments.sort_by(|a, b| a.plan.id.cmp(&b.plan.id));
+        self.save(&state)
+    }
+
+    /// 只更新部署方案，保留记录当前的状态、PID 和错误信息。
+    ///
+    /// 部署准备阶段会逐步补齐节点、端口和实例信息，不能用
+    /// `DeploymentRecord::from_plan` 覆盖整条记录，否则会把已经进入
+    /// `provisioning` 的记录重置为 `planned`，后续 `planned -> ready`
+    /// 就会被状态机正确拒绝。
+    pub fn update_plan(&self, id: &str, plan: DeploymentPlan) -> MnResult<()> {
+        let mut state = self.load()?;
+        let rec = state
+            .deployments
+            .iter_mut()
+            .find(|r| r.plan.id == id)
+            .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 未登记")))?;
+        if rec.plan.id != plan.id {
+            return Err(MnError::bad_request(format!(
+                "部署方案 ID 不一致：记录 `{id}`，方案 `{}`",
+                plan.id
+            )));
+        }
+        rec.plan = plan;
+        rec.updated_at = mangosteen_core::time::now_unix();
         self.save(&state)
     }
 
@@ -402,6 +429,29 @@ mod tests {
     }
 
     #[test]
+    fn update_plan_preserves_runtime_state() {
+        let d = tmpdir("update-plan");
+        let s = StateStore::new(d.join("state.json"));
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Provisioning, Some("准备中".into()))
+            .unwrap();
+        s.set_pid("d1", 4242).unwrap();
+
+        let mut plan = sample_plan("d1");
+        plan.created_at = 1_800_000_000;
+        s.update_plan("d1", plan.clone()).unwrap();
+        let r = s.get("d1").unwrap().unwrap();
+        assert_eq!(r.plan.created_at, plan.created_at);
+        assert_eq!(r.status, DeploymentStatus::Provisioning);
+        assert_eq!(r.pid, Some(4242));
+        assert_eq!(r.error.as_deref(), Some("准备中"));
+
+        s.set_status("d1", DeploymentStatus::Ready, None).unwrap();
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn happy_path_transitions() {
         let d = tmpdir("trans");
         let s = StateStore::new(d.join("state.json"));
@@ -433,6 +483,65 @@ mod tests {
             .set_status("d1", DeploymentStatus::Ready, None)
             .unwrap_err();
         assert!(matches!(e, MnError::InvalidTransition { .. }));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 失败后可以「停放」到 stopped：停机保留实例，供再次部署复用。
+    ///
+    /// 状态机必须允许 `Failed → Stopped`，否则部署失败后取消/卸载会
+    /// 因非法迁移报错，用户既停不了机也复用不了实例。
+    #[test]
+    fn failed_can_park_to_stopped() {
+        let d = tmpdir("park");
+        let s = StateStore::new(d.join("state.json"));
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Provisioning, None)
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Failed, Some("boom".into()))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Stopped, Some("已停止".into()))
+            .unwrap();
+        assert_eq!(
+            s.get("d1").unwrap().unwrap().status,
+            DeploymentStatus::Stopped
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 还没进入 provisioning 就被取消：`Planned → Stopped` 必须合法。
+    ///
+    /// 场景：受理完任务、实例还没创建，用户就点了取消。此时台账是
+    /// `planned`，取消要把「已保留的资源」标成停止，不能因状态机拒绝
+    /// 而让记录卡在 `planned`（UI 会一直显示部署中）。
+    #[test]
+    fn planned_can_park_to_stopped() {
+        let d = tmpdir("park0");
+        let s = StateStore::new(d.join("state.json"));
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Stopped, None).unwrap();
+        assert_eq!(
+            s.get("d1").unwrap().unwrap().status,
+            DeploymentStatus::Stopped
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 部署进行中被取消：`Provisioning → Stopped` 必须合法。
+    #[test]
+    fn provisioning_can_park_to_stopped() {
+        let d = tmpdir("park2");
+        let s = StateStore::new(d.join("state.json"));
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Provisioning, None)
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Stopped, None).unwrap();
+        assert_eq!(
+            s.get("d1").unwrap().unwrap().status,
+            DeploymentStatus::Stopped
+        );
         std::fs::remove_dir_all(&d).ok();
     }
 

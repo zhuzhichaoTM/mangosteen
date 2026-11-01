@@ -38,6 +38,21 @@ pub struct PreparedCloud {
     pub workdir: String,
 }
 
+/// 卸载结果：说明停了什么、保留了什么。
+///
+/// UI 需要据此给出准确反馈——尤其要明确「机器是否还在计费」，
+/// 这是用户唯一无法自己观察到的信息。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnloadOutcome {
+    /// 被**停止**（关机）的云实例 ID。
+    ///
+    /// 注意语义：卸载只停不删，实例与磁盘保留以便下次复用；
+    /// 真正销毁由系统按策略回收或用户删除节点时处理。
+    pub stopped_instance: Option<String>,
+    /// 是否保留了节点（自定义节点：机器与文件都不动）。
+    pub node_kept: bool,
+}
+
 /// 已保存设备的连接信息（内存态，密码来自配置）。
 #[derive(Debug, Clone)]
 pub struct DeviceTarget {

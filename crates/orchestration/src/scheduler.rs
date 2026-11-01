@@ -332,14 +332,44 @@ impl Scheduler {
             require_stock: self.config.require_stock,
         };
 
+        // 模型文件名必须来自最终生效的下载模板/源地址，而不是
+        // `evaluated.spec.name` 的简化推导。否则 qwen2.5-0.5b 会被
+        // 错误改写成 qwen2.5-0.5b.gguf，下载和启动使用不同文件。
+        let is_qwen38 = evaluated.spec.name.to_ascii_lowercase().contains("qwen3.8");
+        // qwen3.8 模板的文件名是契约，不允许被模型源的简化名称或
+        // `download_file_name` 推导覆盖；否则会检查另一个不存在的文件，
+        // 或把真实的主模型误判为已下载。
+        let remote_file = if is_qwen38 {
+            "Qwen3.8-27B-UD-Q4_K_M.gguf".to_string()
+        } else {
+            req.model_download
+                .as_ref()
+                .and_then(|d| download_file_name(&d.url))
+                .unwrap_or_else(|| model_file_name(&evaluated.spec.name))
+        };
+        let qwen38_source = "https://hf-mirror.com/";
+        let qwen38_repo = "unsloth/Qwen3.8-27B-GGUF";
+        let qwen38_download_url = if is_qwen38 {
+            Some(format!(
+                "{qwen38_source}{qwen38_repo}/resolve/main/{remote_file}"
+            ))
+        } else {
+            None
+        };
+        let mmproj_file = if is_qwen38 {
+            Some("/root/mangosteen/models/mmproj-BF16.gguf".to_string())
+        } else {
+            None
+        };
+        let draft_file = if is_qwen38 {
+            Some("/root/mangosteen/models/mtp-Qwen3.8-27B-Q4_0.gguf".to_string())
+        } else {
+            None
+        };
         // 引擎参数：与本地同一套语义，仅端口/绑定不同
         let engine = LocalPlan::from_assessment(
             &evaluated.spec,
-            // 云端路径约定：模型放在实例的数据盘目录下
-            format!(
-                "/root/mangosteen/models/{}",
-                model_file_name(&evaluated.spec.name)
-            ),
+            format!("/root/mangosteen/models/{remote_file}"),
             &evaluated.assessment,
             // 云端跑的是 llama.cpp，端口用 `LLAMA_CPP_PORT`（8080）。
             // 隧道必须转发到服务真正监听的端口，否则隧道建好了也连不上。
@@ -351,6 +381,31 @@ impl Scheduler {
         // 直接搬过来会让云端推理慢几十倍。
         let mut engine = engine;
         engine.gpu_layers = evaluated.spec.n_layers;
+        engine.mmproj_path = mmproj_file.clone();
+        engine.draft_model_path = draft_file.clone();
+        if is_qwen38 {
+            // Qwen3.8-27B default 模板的特定 llama.cpp 参数。
+            // `--port`、`--model`、`--mmproj`、draft 模型路径等动态资源
+            // 仍由统一适配器生成，避免覆盖节点端口映射。
+            engine.gpu_layers = 99;
+            engine.context_size = 65_536;
+            engine.batch_size = 2_048;
+            engine.kv_cache_type_k = mangosteen_core::estimate::KvCacheType::Q4_0;
+            engine.kv_cache_type_v = mangosteen_core::estimate::KvCacheType::Q4_0;
+            engine.flash_attention = true;
+            engine.extra_args = vec![
+                "--parallel".to_string(),
+                "1".to_string(),
+                "--ubatch-size".to_string(),
+                "512".to_string(),
+                "--image-max-tokens".to_string(),
+                "768".to_string(),
+                "--mtmd-batch-max-tokens".to_string(),
+                "256".to_string(),
+                "--spec-draft-n-max".to_string(),
+                "4".to_string(),
+            ];
+        }
 
         let _ = reason;
         Ok(CloudPlan {
@@ -366,21 +421,47 @@ impl Scheduler {
                 .saturating_mul(2)
                 .max(50 << 30),
             image: "ubuntu22.04-cuda12".to_string(),
-            model_path: format!(
-                "/root/mangosteen/models/{}",
-                model_file_name(&evaluated.spec.name)
-            ),
+            // 下载目标必须与引擎读取路径**完全一致**。此前这里独立按模型名
+            // 推导（qwen2.5-0.5b → qwen2.5-0.5b.gguf），而下发给 llama-server
+            // 的是模板文件名，于是「下了一份、启动找另一份」。
+            model_path: format!("/root/mangosteen/models/{remote_file}"),
             engine_port: mangosteen_device::remote::LLAMA_CPP_PORT,
+            mmproj_path: mmproj_file,
+            draft_model_path: draft_file,
+            auxiliary_downloads: if is_qwen38 {
+                vec![
+                    mangosteen_core::plan::AuxiliaryDownload {
+                        url: format!(
+                            "{qwen38_source}{qwen38_repo}/resolve/main/mmproj-BF16.gguf"
+                        ),
+                        path: "/root/mangosteen/models/mmproj-BF16.gguf".to_string(),
+                        bytes: None,
+                    },
+                    mangosteen_core::plan::AuxiliaryDownload {
+                        url: format!(
+                            "{qwen38_source}{qwen38_repo}/resolve/main/MTP/mtp-Qwen3.8-27B-Q4_0.gguf"
+                        ),
+                        path: "/root/mangosteen/models/mtp-Qwen3.8-27B-Q4_0.gguf".to_string(),
+                        bytes: None,
+                    },
+                ]
+            } else {
+                Vec::new()
+            },
             local_port: self.allocate_local_port(),
             engine,
             max_price_per_hour: req.max_price_per_hour.or(self.config.max_price_per_hour),
             // 主链路：**远端自己下载**。设备选云端时，下载就该发生在云端——
             // 不要求本地先下一份再传上去。地址与本地下载同源同规则
             // （`ModelSource::download_url`），所以云端拿到的就是用户选的那个文件。
-            download_url: req.model_download.as_ref().map(|d| d.url.clone()),
+            download_url: qwen38_download_url
+                .or_else(|| req.model_download.as_ref().map(|d| d.url.clone())),
             download_bytes: req.model_download.as_ref().and_then(|d| d.expected_bytes),
             remote_model: None,
             node_ip: None,
+            // 用户在确认弹窗里选定的 GPU 型号；用于下次部署时匹配
+            // 已停止实例，型号一致才允许复用。
+            requested_gpu_model: req.gpu_model.clone(),
             // 用户在确认弹窗里选定的规格（None = 按调度策略自动选）
             requested_spec_id: req.cloud_spec.clone(),
             node_ssh_port: None,
@@ -461,7 +542,23 @@ impl Scheduler {
     }
 }
 
-/// 从模型名推导云端文件名。
+/// 从最终下载地址提取模型文件名。
+fn download_file_name(url: &str) -> Option<String> {
+    let raw = url
+        .split('?')
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()?
+        .trim();
+    if raw.ends_with(".gguf") && !raw.is_empty() {
+        Some(raw.to_string())
+    } else {
+        None
+    }
+}
+
+/// 从模型名推导云端文件名（无下载地址时的兼容兜底）。
 fn model_file_name(model: &str) -> String {
     let slug: String = model
         .chars()
@@ -769,6 +866,24 @@ mod tests {
     }
 
     #[test]
+    fn cloud_model_path_matches_engine_path_from_template_url() {
+        let s = scheduler(4, 8);
+        let e = evaluated(spec_70b(), &s);
+        let mut req = DeploymentRequest::for_model("m").with_context(4096);
+        req.model_download = Some(crate::assess::ModelDownloadSpec {
+            url: "https://hf-mirror.com/Qwen/repo/qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string(),
+            expected_bytes: Some(491_400_032),
+        });
+        let d = s.decide(&e, &req).unwrap();
+        let Decision::Cloud { plan, .. } = d else {
+            panic!("expected cloud");
+        };
+        let expected = "/root/mangosteen/models/qwen2.5-0.5b-instruct-q4_k_m.gguf";
+        assert_eq!(plan.model_path, expected, "下载目标必须使用模板文件名");
+        assert_eq!(plan.engine.model_path, expected, "启动路径必须与下载一致");
+    }
+
+    #[test]
     fn cloud_plan_respects_price_cap() {
         let s = scheduler(4, 8);
         let e = evaluated(spec_70b(), &s);
@@ -854,11 +969,15 @@ mod tests {
             image: "i".into(),
             model_path: "/m".into(),
             engine_port: 8080,
+            mmproj_path: None,
+            draft_model_path: None,
+            auxiliary_downloads: Vec::new(),
             download_url: None,
             download_bytes: None,
             remote_model: None,
             node_ip: None,
             requested_spec_id: None,
+            requested_gpu_model: None,
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
@@ -877,6 +996,10 @@ mod tests {
                 port: 8080,
                 host: "127.0.0.1".into(),
                 engine: Default::default(),
+                mmproj_path: None,
+                draft_model_path: None,
+                auxiliary_downloads: Vec::new(),
+                extra_args: Vec::new(),
             },
             max_price_per_hour: None,
         };
@@ -901,6 +1024,17 @@ mod tests {
         assert!(Scheduler::instance_ready(InstanceState::Running));
         assert!(!Scheduler::instance_ready(InstanceState::Stopped));
         assert!(!Scheduler::instance_ready(InstanceState::Starting));
+    }
+
+    #[test]
+    fn download_file_name_preserves_template_asset_name() {
+        assert_eq!(
+            download_file_name(
+                "https://hf-mirror.com/Qwen/repo/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=1"
+            ),
+            Some("qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string())
+        );
+        assert_eq!(download_file_name("https://example.com/model.bin"), None);
     }
 
     #[test]

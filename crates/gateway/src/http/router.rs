@@ -100,6 +100,10 @@ impl GatewayServer {
                 let id = &p["/api/deployments/".len()..p.len() - "/start-service".len()];
                 self.start_service(id)
             }
+            ("POST", p) if p.starts_with("/api/deployments/") && p.ends_with("/unload") => {
+                let id = &p["/api/deployments/".len()..p.len() - "/unload".len()];
+                self.unload(id)
+            }
             ("DELETE", p) if p.starts_with("/api/deployments/") => {
                 self.stop(&p["/api/deployments/".len()..])
             }

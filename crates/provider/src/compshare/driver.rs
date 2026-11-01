@@ -168,7 +168,8 @@ impl<T: Transport> CompshareDriver<T> {
         match self.wait_until(&created.id, &[InstanceState::Running]) {
             Ok(inst) => Ok(inst),
             Err(e) => {
-                let cleanup = self.destroy(&created.id);
+                // 失败回滚只关闭实例，保留实例与磁盘供后续复用。
+                let cleanup = self.stop(&created.id).map(|_| ());
                 Err(augment_cleanup(e, &created.id, cleanup))
             }
         }
@@ -975,10 +976,10 @@ fn is_not_found(err: &MnError) -> bool {
 /// 在错误消息后追加回滚结果。
 fn augment_cleanup(base: MnError, id: &str, cleanup: MnResult<()>) -> MnError {
     let suffix = match cleanup {
-        Ok(()) => format!("\n已自动删除临时实例 {id}，未产生持续费用。"),
+        Ok(()) => format!("\n已自动关闭实例 {id}，保留实例与磁盘，停止计费，可复用。"),
         Err(e) => format!(
-            "\n⚠ 自动删除实例 {id} 失败：{e}\n\
-             请立即到优云智算控制台手工释放，避免持续计费。"
+            "\n⚠ 自动关闭实例 {id} 失败：{e}\n\
+             实例已保留但可能仍在计费，请到优云智算控制台关机确认。"
         ),
     };
     MnError::Provider {
@@ -1572,7 +1573,23 @@ mod tests {
                 "CreateCompShareInstance",
                 r#"{"RetCode":0,"UHostIds":["uhost-1"]}"#.to_string(),
             ),
-            // 轮询与销毁流程里都会 describe，始终返回 Stopped
+            // 回滚时查询实例状态后关闭，保留实例与磁盘供后续复用。
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-1", "Stopped"),
+            ),
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-1", "Stopped"),
+            ),
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-1", "Stopped"),
+            ),
+            (
+                "DescribeCompShareInstance",
+                instance_json("uhost-1", "Stopped"),
+            ),
             (
                 "DescribeCompShareInstance",
                 instance_json("uhost-1", "Stopped"),
@@ -1581,20 +1598,18 @@ mod tests {
                 "StopCompShareInstance",
                 r#"{"RetCode":0,"UHostId":"uhost-1"}"#.to_string(),
             ),
-            (
-                "TerminateCompShareInstance",
-                r#"{"RetCode":0,"UHostId":"uhost-1","InRecycle":"Yes"}"#.to_string(),
-            ),
         ]);
         let d = driver(vendor);
         let e = d.provision_ready("4090/1x16c/64g", "11435").unwrap_err();
         let s = e.to_string();
-        assert!(s.contains("未进入") || s.contains("自动删除"), "{s}");
-
-        // 必须出现 Terminate（否则实例会持续计费）
         assert!(
-            d.client().transport().called("TerminateCompShareInstance"),
-            "回滚必须删除实例：{:?}",
+            s.contains("未进入") || s.contains("自动关闭") || s.contains("保留实例"),
+            "{s}"
+        );
+
+        assert!(
+            !d.client().transport().called("TerminateCompShareInstance"),
+            "回滚不得删除实例：{:?}",
             d.client().transport().calls()
         );
     }

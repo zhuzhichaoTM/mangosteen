@@ -276,7 +276,7 @@ tr.picked{background:var(--accent-soft)}
 /* 处理结果列表：每步一行，完整文本不截断。
    为什么不用步骤条里的窄格：6 列并排每格仅 ~76px，
    资源占用那种长文本必然被截掉（用户报过「评估没输出资源占用」）。*/
-.dp-step-log{margin-top:12px;display:flex;flex-direction:column;gap:0}
+.stage-output{margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);font-size:12px;line-height:1.55;max-height:280px;overflow:auto}.stage-output-title{font-weight:700;color:var(--text);margin-bottom:6px}.stage-output-row{padding:7px 0;border-top:1px solid var(--line)}.stage-output-head{display:flex;justify-content:space-between;gap:10px}.stage-output-name{color:var(--text)}.stage-output-state{color:var(--muted);font-size:11px}.stage-output-detail{color:var(--muted);white-space:pre-wrap;word-break:break-word;margin-top:3px}
 .dp-log-row{
   display:flex;gap:8px;align-items:flex-start;
   font-size:12px;line-height:1.55;padding:6px 0;
@@ -622,6 +622,7 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           </div>
           <div class="dp-steps" id="dp-chain-steps"></div>
           <div class="banner info" id="dp-chain-note" style="margin-top:12px"></div>
+          <div id="dp-chain-detail" class="stage-output" aria-live="polite">等待阶段输出…</div>
         </div>
         <div id="dp-empty-content" class="empty">请选择模型并点击部署，部署链路将在此处显示。</div>
         <div id="dp-detail" class="template-inline" hidden></div>
@@ -640,6 +641,9 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           </label>
           <label>节点信息
             <span id="dp-node-info" class="dp-inline-value dp-node-info">-</span>
+          </label>
+          <label>实例ID
+            <span id="dp-instance-id" class="dp-inline-value dp-node-info">-</span>
           </label>
           <span class="model-actions" style="margin-left:auto">
             <button class="primary sm" id="dp-deploy-btn">部署</button>
@@ -1385,17 +1389,36 @@ cache_v: q4_0`,
 model_id: qwen3.8-27b
 quantization: 4-bit (Q4_K_M)
 device: ssh
-source: https://hf-mirror.com/unsloth/Qwen3.8-27B-GGUF
+source: https://hf-mirror.com/
+repository: unsloth/Qwen3.8-27B-GGUF
 framework: llama.cpp
 binary: llama-server
 model: Qwen3.8-27B-UD-Q4_K_M.gguf
+auxiliary_models:
+  - mmproj-BF16.gguf (多模态投影)
+  - MTP/mtp-Qwen3.8-27B-Q4_0.gguf (MTP draft)
 context: 65536
 gpu_layers: 99
+parallel: 1
 batch: 2048
 ubatch: 512
 cache_k: q4_0
 cache_v: q4_0
-speculative: draft-mtp`,
+flash_attn: on
+image_max_tokens: 768
+mtmd_batch_max_tokens: 256
+speculative:
+  type: draft-mtp
+  draft_model_path: MTP/mtp-Qwen3.8-27B-Q4_0.gguf
+  draft_gpu_layers: 99
+  draft_n_max: 4
+  draft_cache_k: q4_0
+  draft_cache_v: q4_0
+multimodal:
+  mmproj: mmproj-BF16.gguf
+host: 0.0.0.0
+alias: qwen3.8-27b
+# port: 由部署调度器按节点占用情况动态分配`,
       mode1: "template: mode1\nbase: default\nprofile: low-memory",
       mode2: "template: mode2\nbase: default\nprofile: high-throughput",
     },
@@ -1404,7 +1427,7 @@ speculative: draft-mtp`,
     { id: "qwen2.5-0.5b", name: "Qwen2.5-0.5B", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
     { id: "qwen3.8-27b", name: "Qwen3.8-27B", source: "hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" },
   ];
-  const stages = ["模型评估", "GPU 节点选择", "节点配置", "模型下载", "模型量化", "启动模型", "建立隧道"];
+  const stages = ["模型评估", "GPU 节点选择", "节点配置", "模型下载", "启动模型", "建立隧道"];
   let registry = {};
   let liveMap = {};
   // 轮询短暂失败时保留最后一个已确认阶段，不能把流程重置为模型评估。
@@ -1414,6 +1437,9 @@ speculative: draft-mtp`,
   // 候选只来自本次 preview 的实时云端接口，不再混入历史/参考节点。
   const GPU_FALLBACK = [];
 
+  // 全部阶段都会真实执行，没有「暂不激活」的环节。
+  // 保留空集合是为了渲染分支统一：失败标记仍要落在真实故障步骤上。
+  const SKIPPED_STAGES = new Set([]);
   function renderChain(active, note, failed) {
     if (!failed && active < lastChainIndex) active = lastChainIndex;
     if (!failed && active >= lastChainIndex) lastChainIndex = active;
@@ -1423,18 +1449,43 @@ speculative: draft-mtp`,
     const abort = $("dp-chain-abort"); if (abort) abort.hidden = false;
     const box = $("dp-chain-steps"); box.innerHTML = "";
     stages.forEach((name, i) => {
-      const state = failed && i === active ? "failed" : i < active ? "done" : i === active ? "running" : "pending";
+      let state;
+      if (SKIPPED_STAGES.has(i) && !(failed && i === active)) state = "skipped";
+      else state = failed && i === active ? "failed" : i < active ? "done" : i === active ? "running" : "pending";
       const row = el("div", "dp-step " + state);
-      row.appendChild(el("div", "dot", state === "done" ? "✓" : state === "running" ? "●" : state === "failed" ? "✕" : ""));
+      row.appendChild(el("div", "dot", state === "done" ? "✓" : state === "running" ? "●" : state === "failed" ? "✕" : state === "skipped" ? "–" : ""));
       row.appendChild(el("div", "lb", name)); box.appendChild(row);
     });
     $("dp-chain-note").textContent = note || (failed ? "部署失败，请检查节点和配置" : "正在执行：" + (stages[active] || "部署"));
+    renderStageTrail(window.__currentDeployJob || null);
+  }
+
+  function renderStageTrail(j) {
+    const trail = j && j.deploy_trail || [];
+    const detail = $("dp-chain-detail");
+    if (!detail) return;
+    detail.innerHTML = "";
+    if (!trail.length) {
+      detail.textContent = "等待阶段输出…";
+      return;
+    }
+    const title = el("div", "stage-output-title", "阶段处理输出");
+    detail.appendChild(title);
+    trail.forEach((ev) => {
+      const row = el("div", "stage-output-row");
+      const head = el("div", "stage-output-head");
+      head.appendChild(el("b", "stage-output-name", ev.label || ev.stage || "阶段"));
+      head.appendChild(el("span", "stage-output-state", ev.outcome || ""));
+      row.appendChild(head);
+      row.appendChild(el("div", "stage-output-detail", ev.detail || ""));
+      detail.appendChild(row);
+    });
   }
 
   function stageIndex(stage) {
     const id = stage && stage.id;
     if (id === "ready") return stages.length;
-    const i = ["assessing", "selecting", "configuring", "downloading", "quantizing", "launching", "tunneling"].indexOf(id);
+    const i = ["assessing", "selecting", "configuring", "downloading", "launching", "tunneling"].indexOf(id);
     return i < 0 ? 0 : i;
   }
 
@@ -1454,7 +1505,7 @@ speculative: draft-mtp`,
       $("dp-template-sel").onchange = () => { if ($("dp-detail").hidden === false) showDetail($("dp-template-sel").value); };
       $("dp-deploy-btn").onclick = () => { const mdef = currentModelDef(); begin(mdef, $("dp-template-sel").value, registry[mdef.id]); };
       $("dp-chain-abort").onclick = cancelDeployment;
-      $("dp-remove-btn").onclick = () => { const mdef = currentModelDef(); const m = registry[mdef.id]; if (m) unload(m.id); };
+      $("dp-remove-btn").onclick = () => { const mdef = currentModelDef(); unload(mdef.id); };
       $("dp-detail-btn").onclick = () => {
         if ($("dp-detail").hidden) showDetail($("dp-template-sel").value, false);
         else { $("dp-detail").hidden = true; $("dp-detail").innerHTML = ""; $("dp-detail-btn").textContent = "详情"; }
@@ -1465,7 +1516,17 @@ speculative: draft-mtp`,
     registry = {}; liveMap = {};
     models.forEach((mdef) => {
       registry[mdef.id] = (r.models || []).find(x => String(x.id || "").toLowerCase().includes(mdef.id)) || null;
-      liveMap[mdef.id] = (d.deployments || []).find(x => (x.status === "ready" || x.status === "provisioning") && String(x.model_id || x.model || "").toLowerCase().includes(mdef.id)) || null;
+      // 台账里该模型的最新记录：包括已停止的。
+      //
+      // 为什么必须包含 stopped：实例 ID 要一直显示（用户靠它区分
+      // 「未部署」与「已部署但停止」），且再次点「部署」要复用这条记录。
+      // 只保留 ready/provisioning 会让停止后实例ID突然变成空，
+      // 看起来像机器被删了。
+      const cands = (d.deployments || []).filter((x) =>
+        String(x.model_id || x.model || "").toLowerCase().includes(mdef.id)
+      ).filter((x) => x.status !== "destroyed");
+      cands.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+      liveMap[mdef.id] = cands[0] || null;
     });
     refreshStatus();
   }
@@ -1477,19 +1538,56 @@ speculative: draft-mtp`,
 
   function refreshStatus() {
     const mdef = currentModelDef();
-    const m = registry[mdef.id]; const live = liveMap[mdef.id];
+    const live = liveMap[mdef.id];
+
+    // ---- 实例ID：区分「未部署」与「已部署」的唯一依据 ----
+    //
+    // 云厂商实例显示云端容器 ID；自定义节点没有容器 ID，显示绑定的设备 ID。
+    // 首次未部署时为空。
+    const dev = $("dp-instance-id");
+    const instanceId = live && live.instance_id ? String(live.instance_id) : "";
+    const cloudId = live && live.cloud_instance_id ? String(live.cloud_instance_id) : "";
+    dev.textContent = instanceId || "-";
+    dev.title = cloudId || (instanceId ? "自定义节点绑定：" + instanceId : "未部署");
+
+    // ---- 节点信息：区分「运行」与「停止」 ----
+    //
+    // 只有真正在跑时才显示端口映射；停止后必须是 "-"，
+    // 否则用户会以为还能连。running 来自后端周期探测（进程保活）。
     const node = $("dp-node-info");
-    if (live) {
+    const running = !!(live && live.running);
+    if (running) {
       const host = live.node_ip || live.node_host || "";
       const remotePort = live.remote_port || live.engine_port || "";
-      node.textContent = host ? host + (remotePort ? ":" + remotePort : "") : "-";
-      node.title = node.textContent === "-" ? "未部署" : node.textContent;
+      const tunnelPort = live.port || "";
+      const target = host ? host + (remotePort ? ":" + remotePort : "") : "";
+      node.textContent = target
+        ? target + (tunnelPort ? " → 127.0.0.1:" + tunnelPort : "")
+        : (tunnelPort ? "127.0.0.1:" + tunnelPort : "-");
+      node.title = node.textContent;
     } else {
       node.textContent = "-";
-      node.title = "未部署";
+      node.title = instanceId ? "已停止（实例保留，可再次部署复用）" : "未部署";
     }
-    const deploy = $("dp-deploy-btn"); deploy.disabled = !!live; deploy.textContent = live ? "部署中" : "部署";
-    const remove = $("dp-remove-btn"); remove.disabled = !m || !!live;
+
+    // ---- 部署按钮：文案恒定，不随状态变化 ----
+    //
+    // 用户明确要求按钮固定是「部署」。是否可点由状态决定：
+    // 正在部署中时禁用（避免并发两个任务）；其它情况都可点——
+    // 未部署→创建实例，已部署但停止→复用实例启动。
+    const deploying = !!live && live.deployed && !running && live.status === "provisioning";
+    const deploy = $("dp-deploy-btn");
+    deploy.textContent = "部署";
+    deploy.disabled = deploying;
+
+    // ---- 卸载：已部署即可点（绿色主操作）----
+    //
+    // 卸载只停实例不删机器，所以「已停止」时无需再点——但保留可点是为了
+    // 让用户能对「停止但进程仍在」的异常状态再执行一次停机。
+    const remove = $("dp-remove-btn");
+    const deployed = !!live && !!instanceId;
+    remove.disabled = !deployed;
+    remove.classList.toggle("primary", deployed);
   }
 
   /// 在上方部署内容文本区域中显示模板详情（纯文本 YAML）。
@@ -1507,12 +1605,17 @@ speculative: draft-mtp`,
     $("dp-detail-btn").textContent = "收起";
   }
 
-  /// 判断节点是否空闲、可部署；不可用时返回具体原因。
+  /// 判断节点是否可部署；只有厂商明确返回库存为 0 才阻断。
+  ///
+  /// `stock == null` 表示厂商没有提供库存字段，不等于没有库存。
+  /// 当前后端 scheduler.require_stock=false 时，候选已经通过服务商
+  /// 的规格/资源筛选，必须允许用户继续选择，否则 UI 会把所有合法候选
+  /// 错误显示成「实时接口未返回空闲可部署节点」。
   function availability(x) {
-    if (x.reference) return { ok: false, reason: "参考节点：未接入厂商实时库存，无法确认空闲状态" };
     if (x.stock === 0) return { ok: false, reason: "库存不足：厂商实时库存为 0" };
-    if (x.stock == null) return { ok: false, reason: "库存未知：厂商未提供实时库存，无法确认空闲状态" };
-    return { ok: true, reason: "" };
+    if (x.reference) return { ok: true, warn: true, reason: "参考节点：未提供实时库存，创建时由服务商再次确认" };
+    if (x.stock == null) return { ok: true, warn: true, reason: "库存未知：厂商未提供库存字段，创建时由服务商再次确认" };
+    return { ok: true, reason: "库存可用：" + x.stock };
   }
 
   async function begin(mdef, template, model) {
@@ -1522,6 +1625,12 @@ speculative: draft-mtp`,
     lastChainNote = "";
     renderChain(0, "正在读取模型规格；随后会等待云端节点创建完成");
     $("dp-chain-model").textContent = mdef.name + " · 模板 " + template;
+
+    // ---- GPU 选择后再决定「复用还是创建」 ----
+    //
+    // 不能在进入 GPU 选择前按旧实例直接复用：用户可能选择了不同型号。
+    // 统一先展示当前可用规格，确认后把 gpu_model 传给后端，后端再按型号匹配。
+    const existing = liveMap[mdef.id];
     const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, target:"cloud", config_template:template})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
     renderChain(1, "模型评估完成，请选择 GPU 节点后继续");
     const saved = (pv.devices || []).map(d => ({
@@ -1534,10 +1643,17 @@ speculative: draft-mtp`,
     if (!candidates.length && pv.cloud) candidates.push(pv.cloud);
     const chosen = await chooseGpu(candidates);
     if (!chosen) { renderChain(1, "已取消：未确认 GPU 节点", true); return; }
+    const selectedCandidate = candidates.find(x => (x.spec_id || x.gpu_model) === chosen) || {};
     const source = mdef.source;
-    const payload = {model:source, deploy:true, target:"cloud", config_template:template};
+    const payload = {model:source, model_id:mdef.id, deploy:true, target:"cloud", config_template:template};
     if (chosen.startsWith("dev-")) payload.device_id = chosen;
-    else payload.cloud_spec = chosen;
+    else {
+      payload.cloud_spec = chosen;
+      // 关键：选择完成后才把 GPU 型号传给后端。
+      // 后端会查询同模型、同 GPU 型号的停止实例：匹配则复用，
+      // 不匹配则按当前选择创建新实例。
+      payload.gpu_model = selectedCandidate.gpu_model || chosen;
+    }
     renderChain(1, "已选择 " + chosen + "，正在提交节点创建任务");
     const r = await api("/api/models/pull", {
       method:"POST", timeoutMs:30000,
@@ -1625,6 +1741,8 @@ speculative: draft-mtp`,
     if (!currentJob) return;
     const id = currentJob;
     const j = await api("/api/models/jobs?id=" + encodeURIComponent(id)).catch(() => null);
+    window.__currentDeployJob = j;
+    renderStageTrail(j);
     if (!j) {
       renderChain(lastChainIndex, lastChainNote || "正在等待部署任务状态…");
       setTimeout(pollChain, 1000);
@@ -1659,8 +1777,34 @@ speculative: draft-mtp`,
     renderChain(idx, stageSummary(j));
     setTimeout(pollChain, 1000);
   }
-  async function unload(id) { if (!confirm("确定卸载该模型？")) return; await api("/api/models/" + encodeURIComponent(id) + "?delete_file=1", {method:"DELETE"}); await loadModels(); }
-  return { async mount() { await loadModels(); }, unmount() { if (timer) clearInterval(timer); } };
+  /// 卸载：停止推理服务并关机实例（**只停不删**）。
+  ///
+  /// 实例与磁盘保留，下次点「部署」会复用同一台机器开机重启；
+  /// 真正销毁由系统按策略回收，或在删除自定义节点时按需调用云 API。
+  async function unload(modelId) {
+    const live = liveMap[modelId];
+    if (!live) { toast("当前模型没有可卸载的部署", "err"); return; }
+    if (!confirm("确定停止该模型的推理服务？\n实例会被关机以停止 GPU 计费，但机器与已下载的权重会保留，可再次部署复用。")) return;
+    try {
+      const r = await api("/api/deployments/" + encodeURIComponent(live.id) + "/unload", { method: "POST", timeoutMs: 60000 });
+      toast(r.message || "推理服务已停止", "ok");
+    } catch (e) {
+      toast("停止失败：" + e.message, "err");
+    }
+    await loadModels();
+  }
+  return {
+    async mount() {
+      await loadModels();
+      // 周期刷新部署状态：运行态由后端后台探测（5 秒一轮），
+      // 这里按同样量级拉取，用户才能看到「运行 ⇄ 停止」自动反映。
+      // 未在部署时也必须刷新——否则停止后界面永远停在旧状态。
+      if (!timer) timer = setInterval(() => {
+        if (!currentJob) loadModels().catch(() => {});
+      }, 5000);
+    },
+    unmount() { if (timer) { clearInterval(timer); timer = null; } }
+  };
 })());
 
 /* ==================================================================== 设置 */
@@ -1690,7 +1834,15 @@ Tabs.register("setting", (() => {
           } catch (e) { toast("连接测试失败：" + e.message, "err"); }
           b.disabled = false; b.textContent = "连接测试";
         };
-        row.querySelector(".delete-device").onclick = async () => { await api("/api/devices/" + encodeURIComponent(d.id), {method:"DELETE"}); await loadDevices(); };
+        row.querySelector(".delete-device").onclick = async () => {
+          if (!confirm("确定删除该节点？\n该节点上由本工具创建的云实例会被销毁（停止计费）。")) return;
+          try {
+            const r = await api("/api/devices/" + encodeURIComponent(d.id), {method:"DELETE", timeoutMs:60000});
+            const n = (r && r.destroyed_instances || []).length;
+            toast(n ? "节点已删除，同时释放了 " + n + " 个云实例" : "节点已删除", "ok");
+          } catch (e) { toast("删除失败：" + e.message, "err"); }
+          await loadDevices();
+        };
         box.appendChild(row);
       });
     } catch (e) { box.innerHTML = '<div class="empty">设备列表读取失败：' + esc(e.message) + '</div>'; }

@@ -91,12 +91,12 @@ impl Orchestrator {
     ) -> MnResult<DeploymentPlan> {
         use crate::progress::{DeployStage, StageOutcome};
 
+        let evaluated = self.evaluate(req)?;
         sink(
             DeployStage::Assessing,
             StageOutcome::Running,
-            "正在读取模型元数据并评估资源需求".to_string(),
+            "正在解析模型元数据并评估所需算力资源".to_string(),
         );
-        let evaluated = self.evaluate(req)?;
         sink(
             DeployStage::Assessing,
             StageOutcome::Done,
@@ -156,6 +156,14 @@ impl Orchestrator {
             &evaluated.spec.name,
             evaluated.spec.quant,
         );
+        // 部署前清理同模型的历史残留记录：UI 的 pull 和直接 /api/deploy
+        // 都必须经过同一条清理路径。否则旧的 Ready/Provisioning 台账会被
+        // 唯一性检查误判为活跃实例，直接返回“已有同 GPU 型号实例”，
+        // 实际新部署根本没有开始。
+        // 只停止该模型自己的进程、释放端口并移除台账；远端模型文件和实例
+        // 保留，后续下载阶段会校验并复用资源。
+        self.purge_model_deployments(&wanted_id)?;
+
         for rec in self.state.list()? {
             if !rec.status.is_active() {
                 continue;
@@ -165,9 +173,24 @@ impl Orchestrator {
                 rec.plan.model.quant,
             );
             if running_id == wanted_id {
+                // 只有「同一模型 + 同一 GPU 型号」才互相冲突。
+                // 用户明确选择了另一种 GPU（例如当前活跃的是 P40、
+                // 本次选择 V100S），必须允许创建新实例，不能把旧实例
+                // 的存在错误地变成「请先停止」阻断。
+                let same_gpu = match (
+                    req.gpu_model.as_deref().filter(|s| !s.trim().is_empty()),
+                    rec.plan.cloud.as_ref().map(|c| c.gpu_model.as_str()),
+                ) {
+                    (Some(want), Some(actual)) => actual.eq_ignore_ascii_case(want),
+                    // 无法严格确认型号时不能假定匹配，避免 P40 被当成 V100S。
+                    _ => false,
+                };
+                if !same_gpu {
+                    continue;
+                }
                 return Err(MnError::bad_request(format!(
-                    "模型 `{wanted_id}` 已有活跃实例（{}，端口 {}）。\
-                     同一模型只允许一个实例，请先停止它再重新部署",
+                    "模型 `{wanted_id}` 已有同 GPU 型号的活跃实例（{}，端口 {}）。\
+                     若要重新启动，请先停止该实例",
                     rec.plan.id,
                     rec.plan
                         .local_access_port()
@@ -207,7 +230,7 @@ impl Orchestrator {
 
         let trail: Vec<String> = Vec::new();
         let reason = LOCAL_REMOVED.to_string();
-        let cloud_plan = match self.scheduler.build_cloud_plan(&evaluated, req, &reason) {
+        let mut cloud_plan = match self.scheduler.build_cloud_plan(&evaluated, req, &reason) {
             Ok(p) => p,
             Err(e) => {
                 sink(DeployStage::Selecting, StageOutcome::Failed, e.to_string());
@@ -215,11 +238,39 @@ impl Orchestrator {
             }
         };
         let device = self.resolve_device(req);
+        // 同一远端节点可承载多个模型；为每个部署分配不冲突的远端
+        // llama-server 端口，不能所有模型都固定使用 8080。
+        cloud_plan.engine_port = self.allocate_remote_engine_port();
+        cloud_plan.engine.port = cloud_plan.engine_port;
         let why = self.scheduler.explain_local_failure(&evaluated);
         // 远端模型下载和节点配置由 prepare_cloud 按严格顺序执行：
         // 先等待实例创建并完成节点配置，再在节点侧下载模型。这里不能提前
-        // 上报 Downloading/Quantizing，否则 UI 会在节点创建前跳到后续阶段。
+        // 下载阶段由 prepare 内部在节点确认后上报，随后直接进入启动阶段。
         self.prepare_cloud(&evaluated, cloud_plan, trail, &why, device, sink)
+    }
+
+    /// 为同一远端节点上的多个模型分配互不冲突的远端端口。
+    ///
+    /// ## 为什么只看活跃部署
+    ///
+    /// 只有 `ready` / `provisioning` 的记录才意味着「远端进程此刻真的占着
+    /// 这个端口」。把 `stopped` / `failed` 也算进来会让首台机器上的第一个
+    /// 模型莫名其妙从 8081 开始——那些历史记录早已不再监听。
+    ///
+    /// 历史记录里 `stopped` 的实例再次启动时会复用原有端口分配逻辑
+    /// （复用路径不经过这里），因此不会与这里的分配冲突。
+    pub(crate) fn allocate_remote_engine_port(&self) -> u16 {
+        let used: std::collections::BTreeSet<u16> = self
+            .state
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.status.is_active())
+            .filter_map(|r| r.plan.cloud.map(|c| c.engine_port))
+            .collect();
+        (mangosteen_device::remote::LLAMA_CPP_PORT..=8191u16)
+            .find(|port| !used.contains(port))
+            .unwrap_or(mangosteen_device::remote::LLAMA_CPP_PORT)
     }
 
     /// 生成部署 ID。

@@ -88,7 +88,10 @@ pub fn run(args: Args) -> MnResult<i32> {
         Duration::from_secs(300),
     )
     // 启用云端监控后台采集：设备页在「使用云端算力」时显示云端指标
-    .with_cloud_monitor();
+    .with_cloud_monitor()
+    // 启用部署运行态周期探测：部署页签区分「运行 / 停止」，
+    // 探测在后台线程，HTTP 路径只读缓存。
+    .with_runtime_probe();
 
     server.serve(listener)?;
     Ok(0)

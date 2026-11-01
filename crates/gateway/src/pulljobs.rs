@@ -270,6 +270,20 @@ impl PullJobs {
         self.mark_done_with(id, Some(model_id), done, already_present, None);
     }
 
+    /// 标记任务终结，但不涉及本地下载（复用实例启动路径）。
+    ///
+    /// 复用实例时没有字节数可报——权重是上次就下载好的。这里把任务
+    /// 直接收为 `Done`，否则 UI 会一直轮询一个永远不会再变化的任务。
+    pub fn mark_done_external(&self, id: &str) {
+        if let Ok(mut g) = self.inner.lock() {
+            if let Some(j) = g.get_mut(id) {
+                j.state = JobState::Done;
+                j.finished_ms = Some(mangosteen_core::time::now_unix_millis() as u64);
+                j.note = Some("已复用已有实例并启动推理服务".to_string());
+            }
+        }
+    }
+
     /// 标记完成，并可选带一条警告。
     ///
     /// `model_id` 为 `None` 表示「文件下好了，但没能登记成模型」——
@@ -505,7 +519,8 @@ impl PullJobs {
 /// 后台 worker 的公开契约位于 [`pull_worker`]；此处保留 re-export，
 /// 兼容已有 gateway 调用方。
 pub use crate::pull_worker::{
-    spawn, AbortHook, CancelHook, CommitCloudHook, DeployHooks, PrepareHook, RegisterHook,
+    spawn, AbortHook, CancelHook, CommitCloudHook, DeployHooks, InvalidateHook, PrepareHook,
+    RefreshRoutesHook, RegisterHook, ResumeHook,
 };
 
 #[cfg(test)]

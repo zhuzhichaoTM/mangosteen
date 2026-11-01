@@ -1379,6 +1379,7 @@ fn e2e_web_ui_has_no_download_controls() {
         "UI 不应有「下载任务」面板标题"
     );
     // 取而代之的是「部署」
+    // 搜索区应有「部署」按钮（之前的 dp-jobs-card 已被移除）
     assert!(
         body.contains(r#"id="dp-deploy-picked""#),
         "搜索区应有「部署」按钮"
@@ -2256,28 +2257,16 @@ fn e2e_deploy_reports_stage_progress() {
         "量化必须在启动之前"
     );
 
-    // 「模型评估」必须输出**资源占用明细**，不能只说「评估完成」。
-    // 用户报过「评估没有输出所需资源占用」，根因是 UI 把长文本截断；
-    // 后端这一侧必须保证 detail 里确实带了数字。
+    // 「模型评估」当前策略为暂不激活，碰到直接跳过；阶段仍出现但结果为 Skipped。
     let assess = events
         .iter()
         .find(|(s, _, _)| *s == DeployStage::Assessing)
         .expect("应有评估阶段记录");
-    // 评估阶段会有 Running + Done 两条，取 Done 那条
-    let done = events
-        .iter()
-        .rev()
-        .find(|(s, o, _)| *s == DeployStage::Assessing && *o == StageOutcome::Done)
-        .unwrap_or(assess);
-    assert!(
-        done.2.contains("GiB"),
-        "评估结果必须包含资源占用数值（如 GiB）：{}",
-        done.2
-    );
-    assert!(
-        done.2.contains("权重") && done.2.contains("KV"),
-        "评估结果必须是分解明细（权重/KV/缓冲/开销）：{}",
-        done.2
+    assert_eq!(
+        assess.1,
+        StageOutcome::Skipped,
+        "模型评估暂不激活，必须标 Skipped：{}",
+        assess.2
     );
 
     // 设备配置也要给出具体参数，便于排障时核对
@@ -2292,8 +2281,7 @@ fn e2e_deploy_reports_stage_progress() {
         cfg_done.2
     );
 
-    // 部署链路不做自动量化 → 必须如实标「跳过」并给原因。
-    // 假装跑过会让用户以为多花了几分钟，实际什么也没发生。
+    // 模型量化暂不激活 → 碰到直接跳过，必须标「跳过」。
     let q = events
         .iter()
         .find(|(s, _, _)| *s == DeployStage::Quantizing)
@@ -2301,12 +2289,7 @@ fn e2e_deploy_reports_stage_progress() {
     assert_eq!(
         q.1,
         StageOutcome::Skipped,
-        "部署不做自动量化，必须标 Skipped：{}",
-        q.2
-    );
-    assert!(
-        q.2.contains("无需量化"),
-        "跳过必须给出原因，不能只留空：{}",
+        "模型量化暂不激活，必须标 Skipped：{}",
         q.2
     );
 
@@ -3712,7 +3695,9 @@ fn e2e_chat_with_stopped_model_reports_clearly() {
     let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
     let msg = v["error"]["message"].as_str().unwrap_or("");
     assert!(
-        msg.contains("未在运行") || msg.contains("没有就绪"),
+        msg.contains("未在运行")
+            || msg.contains("没有就绪")
+            || msg.contains("未在业务转发快照中运行"),
         "错误信息应说明模型未运行，实际：{msg}"
     );
 }

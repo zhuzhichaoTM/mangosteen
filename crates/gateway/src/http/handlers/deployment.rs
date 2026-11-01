@@ -69,6 +69,9 @@ impl GatewayServer {
         }
     }
     pub(crate) fn deployments(&self) -> Response {
+        // 运行态来自后台探测缓存（微秒级读锁）；未启用探测时回退台账状态。
+        // 绝不在这里现场探测：部署页几秒轮询一次，现场探测会把页面拖卡。
+        let probe = self.runtime_probe.as_ref();
         let gw = match self.gateway.lock() {
             Ok(g) => g,
             Err(_) => return Response::text(500, "网关状态锁中毒"),
@@ -78,8 +81,47 @@ impl GatewayServer {
                 let arr: Vec<serde_json::Value> = list
                     .into_iter()
                     .map(|r| {
+                        // 实例 ID：区分「未部署」与「已部署」的唯一依据。
+                        //
+                        // 云厂商创建的实例用云端容器 ID；自定义节点没有容器
+                        // ID，回退到设备 ID——否则「自定义节点部署成功」会被
+                        // 判成「未部署」，用户既看不到节点也无法卸载。
+                        let cloud_instance = match &r.plan.origin {
+                            mangosteen_core::plan::ComputeOrigin::Cloud { instance_id, .. } => {
+                                instance_id.clone()
+                            }
+                        };
+                        let device_id = r.plan.cloud.as_ref().and_then(|c| c.device_id.clone());
+                        let device_name = device_id.as_deref().and_then(|id| {
+                            gw.config()
+                                .remote_devices
+                                .iter()
+                                .find(|d| d.id == id)
+                                .map(|d| if d.name.trim().is_empty() { id.to_string() } else { d.name.clone() })
+                        });
+                        let instance_id = if !cloud_instance.trim().is_empty() {
+                            cloud_instance.clone()
+                        } else {
+                            device_name.clone().unwrap_or_default()
+                        };
+                        let deployed = !instance_id.trim().is_empty();
+                        // 运行态：只有已部署才有意义；已停止/失败的记录不探测。
+                        let running = match probe.and_then(|p| p.is_running(&r.plan.id)) {
+                            Some(v) => v,
+                            // 没探测过（刚启动/刚部署完）→ 按台账状态判断
+                            None => deployed && r.status.as_str() == "ready",
+                        };
                         serde_json::json!({
                             "id": r.plan.id,
+                            // 实例 ID（云端容器 ID；自定义节点为设备 ID）
+                            "instance_id": instance_id,
+                            // 云端容器 ID 原文（自定义节点为空），供需要区分的调用方使用
+                            "cloud_instance_id": cloud_instance,
+                            "device_id": device_id,
+                            // 是否已部署：UI 用它区分「未部署」与「已部署」
+                            "deployed": deployed,
+                            // 是否正在运行（底层会话进程保活探测结果）
+                            "running": running,
                             "model": r.plan.model.name,
                             // 完整模型 ID（含量化后缀）。`model` 只有裸名，
                             // 同家族多个量化版本并存时分不清实际在跑哪一个。
@@ -102,6 +144,11 @@ impl GatewayServer {
                                 .cloud
                                 .as_ref()
                                 .and_then(|c| c.requested_spec_id.clone()),
+                            "requested_gpu_model": r
+                                .plan
+                                .cloud
+                                .as_ref()
+                                .and_then(|c| c.requested_gpu_model.clone()),
                             "node_ip": r
                                 .plan
                                 .cloud
@@ -147,6 +194,35 @@ impl GatewayServer {
             Err(e) => Response::error(&e),
         }
     }
+    /// 卸载部署（`POST /api/deployments/{id}/unload`）。
+    ///
+    /// **只停不删**：停推理进程、关隧道、云实例关机（停 GPU 计费），
+    /// 实例与磁盘保留，下次点「部署」会复用同一实例开机重启。
+    /// 实例的最终销毁由系统按策略回收，或在用户删除自定义节点时处理。
+    pub(crate) fn unload(&self, id: &str) -> Response {
+        let mut gw = match self.gateway.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::text(500, "网关状态锁中毒"),
+        };
+        match gw.unload(id) {
+            Ok(outcome) => Response::json(
+                200,
+                &serde_json::json!({
+                    "ok": true,
+                    "id": id,
+                    "stopped_instance": outcome.stopped_instance,
+                    "node_kept": outcome.node_kept,
+                    "message": if outcome.node_kept {
+                        "已停止推理服务；自定义节点的机器与文件保留"
+                    } else {
+                        "已停止推理服务并关机，实例保留可再次部署"
+                    },
+                }),
+            ),
+            Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
+        }
+    }
+
     /// 停止服务：云端关机（停 GPU 计费，实例与权重保留），本地停引擎进程。
     pub(crate) fn stop_service(&self, id: &str) -> Response {
         let mut gw = match self.gateway.lock() {
@@ -225,6 +301,12 @@ impl GatewayServer {
                 dreq.cloud_spec = Some(spec.to_string());
             }
         }
+        if let Some(gpu) = parsed.get("gpu_model").and_then(|v| v.as_str()) {
+            let gpu = gpu.trim();
+            if !gpu.is_empty() {
+                dreq.gpu_model = Some(gpu.to_string());
+            }
+        }
         // 算力来源（部署页签的「本地 / 云端」选择）。
         //
         // Mangosteen 当前为纯云端部署：模型一律部署到远端 GPU 节点
@@ -299,6 +381,7 @@ impl GatewayServer {
                     "node_ssh_port": cloud.and_then(|c| c.node_ssh_port),
                     "node_ssh_user": cloud.and_then(|c| c.node_ssh_user.clone()),
                     "requested_spec_id": cloud.and_then(|c| c.requested_spec_id.clone()),
+                    "requested_gpu_model": cloud.and_then(|c| c.requested_gpu_model.clone()),
                 });
                 Response::json(201, &payload)
             }

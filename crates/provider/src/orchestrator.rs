@@ -347,6 +347,37 @@ impl CloudOrchestrator {
         launch: &EngineLaunchConfig,
         on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> MnResult<Provisioned> {
+        // GPU 型号已由上层在节点选择阶段确定。先查询云端实例列表，严格按
+        // 型号匹配可复用实例；只有没有匹配实例时才进入规格排序和创建流程。
+        // 这是“优先复用、再创建”的唯一入口，避免重复创建相同 GPU 节点。
+        let requested_gpu_owned = plan
+            .requested_gpu_model
+            .as_deref()
+            .or_else(|| (!plan.gpu_model.trim().is_empty()).then_some(plan.gpu_model.as_str()))
+            .map(|s| s.trim().to_string());
+        if let Some(requested_gpu) = requested_gpu_owned.as_deref().filter(|s| !s.is_empty()) {
+            if let Some((provider, mut instance)) = self.find_reusable_instance(requested_gpu)? {
+                eprintln!(
+                    "[cloud] ✓ 复用 GPU 型号匹配实例 {} · {}（状态 {}）",
+                    provider, instance.id, instance.state
+                );
+                let driver = self.registry.get(&provider)?;
+                if !instance.state.is_serving() {
+                    self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
+                }
+                return finish_provision(
+                    driver,
+                    instance,
+                    plan,
+                    launch,
+                    &mut self.tunnels,
+                    &self.config,
+                    on_progress,
+                );
+            }
+            eprintln!("[cloud] 未找到 GPU 型号 `{requested_gpu}` 的可复用实例，进入创建流程");
+        }
+
         let (_best, ranked, _all) = self.pick(constraints)?;
         let mut ordered: Vec<CreateCandidate> = ranked
             .iter()
@@ -421,8 +452,8 @@ impl CloudOrchestrator {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!("[cloud] ✗ {} 启动失败：{e}", instance.id);
-                    // 回滚：绝不留下计费中的实例
-                    let cleanup = destroy_with_retry(driver, &instance.id);
+                    // 回滚：关闭实例但不删除，保留实例和磁盘供后续复用。
+                    let cleanup = stop_with_retry(driver, &instance.id);
                     // 实例自己起不来（Failed / 启动超时）是**该节点**的问题，
                     // 换个节点可能就好了。只有在清理干净之后才换——清理没成功
                     // 就继续建下一台，会同时留两台机器计费。
@@ -511,12 +542,16 @@ impl CloudOrchestrator {
         }
     }
 
-    /// 销毁部署：关隧道 + 销毁实例。
+    /// 关闭部署：关隧道 + 关闭实例（**绝不删除实例与磁盘**）。
     ///
-    /// 返回销毁过程中遇到的错误列表（**不中断**后续清理步骤）。
+    /// 返回关闭过程中遇到的错误列表（**不中断**后续清理步骤）。
     ///
-    /// 为什么用「收集错误而非短路」：关隧道失败不应阻止销毁实例——
-    /// 后者才是停止计费的关键动作。
+    /// ## 为什么不删除
+    ///
+    /// 产品要求「任何环节失败、卸载都只关闭，不删除实例」：机器上的权重、
+    /// 引擎和运行环境是重新部署时最贵的部分（几 GB 下载 + 依赖安装）。
+    /// 删除等于把下次部署的成本全部重付一遍。关机已停止 GPU 计费，
+    /// 实例与磁盘保留供后续复用。
     pub fn teardown(&mut self, provider: &str, instance_id: &str) -> Vec<String> {
         let mut errors = Vec::new();
 
@@ -525,23 +560,19 @@ impl CloudOrchestrator {
             errors.push(format!("关闭隧道失败：{e}"));
         }
 
-        // 2. 销毁实例（关键步骤）
+        // 2. 关闭实例（关键步骤：关机保留，不删除）
         match self.registry.get(provider) {
             Ok(driver) => {
-                // 已销毁时 destroy 可能报错，先查状态避免误报
+                // 已经是终态（已不存在）就不再操作；其余状态一律尝试关机。
                 match driver.describe(instance_id) {
                     Ok(inst) if inst.state == InstanceState::Destroyed => {}
                     Ok(_) => {
-                        if let Err(e) = driver.destroy(instance_id) {
-                            errors.push(format!("销毁实例 {instance_id} 失败：{e}"));
+                        if let Err(e) = stop_with_retry(driver, instance_id) {
+                            errors.push(format!("关闭实例 {instance_id} 失败：{e}"));
                         }
                     }
-                    Err(_) => {
-                        // 查不到 → 尝试销毁（幂等）
-                        if let Err(e) = driver.destroy(instance_id) {
-                            errors.push(format!("销毁实例 {instance_id} 失败：{e}"));
-                        }
-                    }
+                    // 查不到实例：可能是记录残留，视为已不存在，不报错也不删除。
+                    Err(_) => {}
                 }
             }
             Err(e) => errors.push(format!("找不到服务商驱动 {provider}：{e}")),
@@ -588,6 +619,21 @@ impl CloudOrchestrator {
     pub fn stop_service(&self, provider: &str, instance_id: &str) -> MnResult<()> {
         let target = self.service_target(provider, instance_id)?;
         mangosteen_device::remote::stop_llama_server(&target, &self.config.remote_workdir)
+    }
+
+    /// 停止指定部署端口对应的 llama-server，不影响同节点其它模型。
+    pub fn stop_service_on_port(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        engine_port: u16,
+    ) -> MnResult<()> {
+        let target = self.service_target(provider, instance_id)?;
+        mangosteen_device::remote::stop_llama_server_on_port(
+            &target,
+            &self.config.remote_workdir,
+            Some(engine_port),
+        )
     }
 
     /// **启动服务**：在已有实例上重新拉起 `llama-server`。
@@ -692,6 +738,13 @@ impl CloudOrchestrator {
     /// 用户想暂停一下，不是想删机器。
     pub fn power_off(&self, provider: &str, instance_id: &str) -> MnResult<()> {
         let driver = self.registry.get(provider)?;
+        let target = self.service_target(provider, instance_id)?;
+        // 关机前硬校验：仍有 llama-server 时禁止关闭实例。
+        if mangosteen_device::remote::llama_server_running(&target, &self.config.remote_workdir)? {
+            return Err(MnError::bad_request(format!(
+                "实例 {instance_id} 仍有 llama-server 进程运行，已阻止关机；请先停止推理进程后重试"
+            )));
+        }
         driver.stop(instance_id)?;
         Ok(())
     }
@@ -707,6 +760,40 @@ impl CloudOrchestrator {
             instance = driver.start(instance_id)?;
         }
         self.wait_until_running(driver, &mut instance, Some(plan.engine_port))
+    }
+
+    /// 查询可复用的同 GPU 型号实例（跨服务商）。
+    ///
+    /// 只接受能够继续进入 Running 的实例状态：Created、Stopped、Starting
+    /// 和 Running。Failed/Destroyed/Stopping/Creating 不作为复用候选，避免
+    /// 把处于不可恢复或过渡状态的实例误交给部署流程。
+    ///
+    /// 查询某个服务商失败不会阻断其它服务商；如果所有查询都失败，返回
+    /// `None`，调用方仍可按原有策略创建新实例。
+    fn find_reusable_instance(&self, requested_gpu: &str) -> MnResult<Option<(String, Instance)>> {
+        let wanted = mangosteen_core::policy::normalize_gpu_model(requested_gpu);
+        if wanted.is_empty() || wanted == "unknown" {
+            return Ok(None);
+        }
+        for (provider, result) in self.list_instances() {
+            let Ok(instances) = result else {
+                continue;
+            };
+            if let Some(instance) = instances.into_iter().find(|instance| {
+                let model = mangosteen_core::policy::normalize_gpu_model(&instance.spec.gpu.model);
+                model == wanted
+                    && matches!(
+                        instance.state,
+                        InstanceState::Created
+                            | InstanceState::Stopped
+                            | InstanceState::Starting
+                            | InstanceState::Running
+                    )
+            }) {
+                return Ok(Some((provider, instance)));
+            }
+        }
+        Ok(None)
     }
 
     /// 列出全部云端实例（跨服务商）。
@@ -975,13 +1062,49 @@ impl CloudOrchestrator {
     /// 启动留给 [`Self::start_engine`]，对应产品要求的两段式：
     /// 设备配置完成后再启动模型。
     ///
-    /// 失败时按现有不变量回滚：厂商实例会被销毁，绝不留计费中的机器。
+    /// 失败时关闭厂商实例但不删除，保留实例和磁盘供后续复用。
     pub fn provision_resources(
         &mut self,
         constraints: &SelectionConstraints,
         plan: &CloudPlan,
         _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     ) -> MnResult<ProvisionedResources> {
+        // 先查询云端现有实例。这里是当前部署编排实际使用的入口（区别于
+        // 旧的 provision_with_progress），因此复用逻辑必须在这里执行；否则
+        // UI 选择 P40 后仍会直接走 pick/create，重复创建 uhost 实例。
+        let requested_gpu_owned = plan
+            .requested_gpu_model
+            .as_deref()
+            .or_else(|| (!plan.gpu_model.trim().is_empty()).then_some(plan.gpu_model.as_str()))
+            .map(|s| s.trim().to_string());
+        if let Some(requested_gpu) = requested_gpu_owned.as_deref().filter(|s| !s.is_empty()) {
+            if let Some((provider, mut instance)) = self.find_reusable_instance(requested_gpu)? {
+                eprintln!(
+                    "[cloud] ✓ provision_resources 复用 GPU 型号匹配实例 {} · {}（状态 {}）",
+                    provider, instance.id, instance.state
+                );
+                let driver = self.registry.get(&provider)?;
+                if !instance.state.is_serving() {
+                    self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
+                }
+                let ssh = vendor_password_target(&instance, &self.config)?;
+                let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
+                let local_port = self
+                    .tunnels
+                    .establish(&spec, self.config.tunnel_timeout)?
+                    .local_port;
+                return Ok(ProvisionedResources {
+                    instance: Some(instance),
+                    ssh,
+                    workdir: self.config.remote_workdir.trim_end_matches('/').to_string(),
+                    local_port,
+                });
+            }
+            eprintln!(
+                "[cloud] provision_resources 未找到 GPU 型号 `{requested_gpu}` 的匹配实例，进入创建流程"
+            );
+        }
+
         let (_best, ranked, _all) = self.pick(constraints)?;
         let mut ordered: Vec<CreateCandidate> = ranked
             .iter()
@@ -1021,7 +1144,7 @@ impl CloudOrchestrator {
         match result {
             Ok(r) => Ok(r),
             Err(e) => {
-                let cleanup = destroy_with_retry(driver, &instance.id);
+                let cleanup = stop_with_retry(driver, &instance.id);
                 Err(augment_with_cleanup(e, &instance, cleanup))
             }
         }
@@ -1101,7 +1224,7 @@ fn finish_provision(
     let target = match vendor_ssh_target(driver, &instance, config) {
         Ok(t) => t,
         Err(e) => {
-            let cleanup = driver.destroy(&instance.id);
+            let cleanup = stop_with_retry(driver, &instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
     };
@@ -1118,7 +1241,7 @@ fn finish_provision(
         )
         .and_then(|_| start_node_engine(&target, &workdir, launch))
         {
-            let cleanup = driver.destroy(&instance.id);
+            let cleanup = stop_with_retry(driver, &instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
     }
@@ -1127,7 +1250,7 @@ fn finish_provision(
     let local_port = match tunnels.establish(&spec, config.tunnel_timeout) {
         Ok(t) => t.local_port,
         Err(e) => {
-            let cleanup = driver.destroy(&instance.id);
+            let cleanup = stop_with_retry(driver, &instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
     };
@@ -1140,7 +1263,7 @@ fn finish_provision(
             config.poll_interval,
         ) {
             let _ = tunnels.close(&spec);
-            let cleanup = driver.destroy(&instance.id);
+            let cleanup = stop_with_retry(driver, &instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
     } else if let Some(model) = plan.remote_model.as_deref() {
@@ -1150,14 +1273,14 @@ fn finish_provision(
             config.poll_interval,
         ) {
             let _ = tunnels.close(&spec);
-            let cleanup = driver.destroy(&instance.id);
+            let cleanup = stop_with_retry(driver, &instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
         if let Err(e) =
             mangosteen_device::remote::ensure_ollama_model(&base, model, config.start_timeout)
         {
             let _ = tunnels.close(&spec);
-            let cleanup = driver.destroy(&instance.id);
+            let cleanup = stop_with_retry(driver, &instance.id);
             return Err(augment_with_cleanup(e, &instance, cleanup));
         }
     }
@@ -1200,15 +1323,12 @@ pub fn configure_node(
         &workdir,
         llama_server_url,
     )?;
-    mangosteen_device::remote::ssh_exec(
-        target,
-        &format!(
-            "test -x '{}' && '{}' --version >/dev/null 2>&1 || test -x '{}'",
-            llama_path, llama_path, llama_path
-        ),
-        60,
-    )?;
-    eprintln!("[node-config] llama-server 已确认可执行：{llama_path}");
+    // 不在节点配置阶段执行 `llama-server --version`：部分 CUDA 发行包
+    // 初始化动态库/设备上下文会耗时几十秒，甚至触发一次不必要的 CUDA
+    // 探测，导致模型下载迟迟不开始。这里只确认文件可执行；真正的
+    // 可执行性由启动阶段 probe + 健康检查验证。
+    mangosteen_device::remote::ssh_exec(target, &format!("test -x '{}'", llama_path), 30)?;
+    eprintln!("[node-config] llama-server 文件已确认，进入模型下载：{llama_path}");
     Ok(())
 }
 
@@ -1221,15 +1341,34 @@ pub fn download_model_node(
     should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> MnResult<String> {
     let remote_model = &plan.model_path;
+    // 期望大小：计划里登记了就用登记值；没有（辅助文件常见）就去源站取
+    // `Content-Length`。绝不能因为「没有期望值」就退化成只看文件非空——
+    // aria2c 直接写最终文件名，中断后会留下一个几十 MB 的残缺文件，
+    // 只看非空会把它当成已下载完成。
+    let planned = plan.download_bytes.filter(|v| *v > 0);
+    let want = match planned {
+        Some(v) => Some(v),
+        None => match plan.download_url.as_deref() {
+            Some(url) => mangosteen_device::remote::remote_http_content_length(target, url)?,
+            None => None,
+        },
+    };
     let remote_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
-    let want = plan.download_bytes;
+    // `.download.ok` 由下载器在所有分片成功退出后写入，是「传输真的跑完」的
+    // 证据；但它单独不足以说明文件可用（文件可能事后被删/截断），所以只
+    // 在**缺少期望大小**时作为辅助判据，且始终与真实文件大小一起看。
     let marked_complete =
         mangosteen_device::remote::remote_download_completed(target, remote_model)?;
-    let ready = marked_complete
-        || match (remote_size, want) {
-            (got, Some(exp)) if exp > 0 => got == exp,
-            (got, _) => got > 0,
-        };
+    let ready = match (remote_size, want) {
+        // 有期望大小：必须严格相等，多一个字节少一个字节都不算完成。
+        (size, Some(expected)) => size == expected,
+        // 无期望大小：非空 + 下载器曾成功退出 + GGUF 魔数正确。
+        (size, None) => {
+            size > 0
+                && marked_complete
+                && mangosteen_device::remote::remote_file_is_gguf(target, remote_model)?
+        }
+    };
     if !ready {
         let url = plan
             .download_url
@@ -1249,8 +1388,6 @@ pub fn download_model_node(
         )?;
     }
     // 下载函数返回后做最终核验，确认文件真的落到远端再进入下一阶段。
-    // 期望字节数只作参考：计划里的 `download_bytes` 可能来自预估，
-    // 与源站实际大小差几个字节时不应否定一次已完成的下载。
     let final_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
     if final_size == 0 {
         return Err(MnError::Network {
@@ -1258,13 +1395,26 @@ pub fn download_model_node(
             reason: format!("下载结束但远端文件为空：{remote_model}"),
         });
     }
-    if let Some(exp) = want.filter(|v| *v > 0) {
+    if let Some(exp) = want {
         if final_size != exp {
-            eprintln!(
-                "[download] 远端文件大小 {} 与计划期望 {} 不一致，按远端实际大小继续部署",
-                final_size, exp
-            );
+            return Err(MnError::Network {
+                stage: "云端下载模型".to_string(),
+                reason: format!(
+                    "远端文件大小校验失败：{}，实际 {} 字节，期望 {} 字节",
+                    remote_model, final_size, exp
+                ),
+            });
         }
+    }
+    // 大小对了也不代表内容对：错误页/错误仓库的文件同样可能有大小。
+    // GGUF 魔数是最后一道廉价检查，只在前 4 字节上花一次 SSH。
+    if !mangosteen_device::remote::remote_file_is_gguf(target, remote_model)? {
+        return Err(MnError::Network {
+            stage: "云端下载模型".to_string(),
+            reason: format!(
+                "远端文件不是有效的 GGUF（魔数不符）：{remote_model}，请检查下载地址是否指向正确的模型文件"
+            ),
+        });
     }
     Ok(remote_model.clone())
 }
@@ -1368,25 +1518,16 @@ fn is_retryable_instance_failure(e: &MnError) -> bool {
     }
 }
 
-/// 销毁实例，遇到「任务进行中」类错误时重试。
-///
-/// ## 为什么必须重试
-///
-/// 优云在实例刚进入 `Failed`/`Stopped` 时返回 8903
-/// `UHost is in the task, please try again later`。这时立刻销毁必然失败，
-/// 而**销毁失败就意味着继续计费**。只调一次然后把错误抛给用户，等于让用户
-/// 自己盯着时间去控制台点删除——这正是要避免的。
-///
-/// 厂商的异步任务通常在十几秒内结束，所以退避间隔取 3/5/7/9/11/13 秒。
-fn destroy_with_retry(
+/// 关闭实例，遇到异步任务中的临时错误时重试；不删除实例和磁盘。
+fn stop_with_retry(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
     instance_id: &str,
 ) -> MnResult<()> {
     const ATTEMPTS: usize = 6;
     let mut last: Option<MnError> = None;
     for i in 0..ATTEMPTS {
-        match driver.destroy(instance_id) {
-            Ok(()) => return Ok(()),
+        match driver.stop(instance_id) {
+            Ok(_) => return Ok(()),
             Err(e) => {
                 let text = e.to_string().to_ascii_lowercase();
                 let transient = text.contains("8903")
@@ -1401,7 +1542,7 @@ fn destroy_with_retry(
         }
     }
     Err(last.unwrap_or_else(|| MnError::Network {
-        stage: "销毁云端实例".to_string(),
+        stage: "关闭云端实例".to_string(),
         reason: "未知失败".to_string(),
     }))
 }
@@ -1469,12 +1610,14 @@ fn wait_tcp(host: &str, port: u16, budget: Duration, interval: Duration) -> MnRe
 /// 否则会静默产生费用。
 fn augment_with_cleanup(base: MnError, instance: &Instance, cleanup: MnResult<()>) -> MnError {
     let suffix = match cleanup {
-        Ok(()) => format!("\n已自动销毁临时实例 {}，未产生持续费用。", instance.id),
+        Ok(()) => format!(
+            "\n已自动关闭实例 {}，保留实例与磁盘，停止计费，可在后续部署中复用。",
+            instance.id
+        ),
         Err(e) => format!(
-            "\n⚠ 自动销毁实例 {} 失败：{e}\n\
-             请立即手工处理，避免持续计费：\n  \
-             mangosteen cloud destroy {} --provider {}",
-            instance.id, instance.id, instance.provider
+            "\n⚠ 自动关闭实例 {} 失败：{e}\n\
+             实例已保留但可能仍在计费，请在云端控制台关闭它。",
+            instance.id
         ),
     };
     MnError::Provider {
@@ -1508,7 +1651,9 @@ mod tests {
         retryable_create_failure: bool,
         /// start 是否失败
         fail_start: bool,
-        /// destroy 是否失败
+        /// stop 是否失败
+        fail_stop: bool,
+        /// destroy 是否失败（仅保留给显式 teardown 测试）
         fail_destroy: bool,
         /// 是否返回 SSH 信息
         with_ssh: bool,
@@ -1525,6 +1670,7 @@ mod tests {
                 fail_create: false,
                 retryable_create_failure: false,
                 fail_start: false,
+                fail_stop: false,
                 fail_destroy: false,
                 with_ssh: true,
                 specs: vec![spec_entry(name, 24, 2.0)],
@@ -1649,6 +1795,13 @@ mod tests {
         }
         fn stop(&self, id: &str) -> MnResult<Instance> {
             self.record(&format!("stop:{id}"));
+            if self.fail_stop {
+                return Err(MnError::Provider {
+                    provider: self.name.into(),
+                    code: "stop_failed".into(),
+                    message: "关闭失败".into(),
+                });
+            }
             Ok(self.make_instance(id, InstanceState::Stopped))
         }
         fn destroy(&self, id: &str) -> MnResult<()> {
@@ -1742,6 +1895,7 @@ mod tests {
             remote_model: None,
             node_ip: None,
             requested_spec_id: None,
+            requested_gpu_model: None,
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
@@ -1755,6 +1909,9 @@ mod tests {
             image: "img".into(),
             model_path: "/root/q.gguf".into(),
             engine_port: 8080,
+            mmproj_path: None,
+            draft_model_path: None,
+            auxiliary_downloads: Vec::new(),
             local_port: 11435,
             engine,
             max_price_per_hour: None,
@@ -1936,18 +2093,23 @@ mod tests {
             )
             .unwrap_err();
         let msg = e.to_string();
-        // 失败信息里必须包含回滚结果
+        // 失败信息里必须说明回滚结果
         assert!(
-            msg.contains("自动销毁") || msg.contains("手工处理"),
+            msg.contains("已自动关闭") || msg.contains("可能仍在计费"),
             "got {msg}"
         );
 
         let c = calls.lock().unwrap().clone();
         assert!(c.iter().any(|s| s.starts_with("create")), "{c:?}");
         assert!(c.iter().any(|s| s.starts_with("start")), "{c:?}");
+        // 回滚只关闭实例（stop），绝不删除实例与磁盘。
         assert!(
-            c.iter().any(|s| s.starts_with("destroy")),
-            "必须销毁已创建实例，实际调用：{c:?}"
+            c.iter().any(|s| s.starts_with("stop")),
+            "回滚必须关闭已创建实例，实际调用：{c:?}"
+        );
+        assert!(
+            !c.iter().any(|s| s.starts_with("destroy")),
+            "回滚不得删除实例，实际调用：{c:?}"
         );
     }
 
@@ -1955,7 +2117,7 @@ mod tests {
     fn provision_reports_uncleaned_resource_on_rollback_failure() {
         let mut d = FakeDriver::new("alpha", vec![InstanceState::Created]);
         d.fail_start = true;
-        d.fail_destroy = true;
+        d.fail_stop = true;
         let mut o = orchestrator(vec![Box::new(d)]);
 
         let e = o
@@ -1966,12 +2128,12 @@ mod tests {
             )
             .unwrap_err();
         let msg = e.to_string();
-        assert!(msg.contains("手工处理"), "必须提示人工介入：{msg}");
         assert!(
-            msg.contains("mangosteen cloud destroy"),
-            "必须给出清理命令：{msg}"
+            msg.contains("关闭实例") || msg.contains("可能仍在计费"),
+            "必须提示关闭失败：{msg}"
         );
-        assert!(msg.contains("i-1"), "必须给出残留实例 ID：{msg}");
+        assert!(!msg.contains("cloud destroy"), "不应再给出删除命令：{msg}");
+        assert!(msg.contains("i-1"), "必须给出保留实例 ID：{msg}");
     }
 
     #[test]
@@ -2009,12 +2171,13 @@ mod tests {
             )
             .unwrap_err();
         assert!(e.to_string().contains("SSH"), "got {e}");
-        // 拿不到 SSH 也必须销毁实例，避免白花钱
+        // 拿不到 SSH 也必须关闭实例，但不能删除实例。
         let c = calls.lock().unwrap().clone();
         assert!(
-            c.iter().any(|s| s.starts_with("destroy")),
-            "无 SSH 信息时也要销毁实例：{c:?}"
+            c.iter().any(|s| s.starts_with("stop")),
+            "无 SSH 信息时也要关闭实例：{c:?}"
         );
+        assert!(!c.iter().any(|s| s.starts_with("destroy")), "{c:?}");
     }
 
     #[test]
@@ -2035,17 +2198,18 @@ mod tests {
             "got {e}"
         );
         let c = calls.lock().unwrap().clone();
-        assert!(c.iter().any(|s| s.starts_with("destroy")), "{c:?}");
+        assert!(c.iter().any(|s| s.starts_with("stop")), "{c:?}");
+        assert!(!c.iter().any(|s| s.starts_with("destroy")), "{c:?}");
     }
 
     #[test]
     fn teardown_collects_errors_without_short_circuit() {
         let mut d = FakeDriver::new("alpha", vec![]);
-        d.fail_destroy = true;
+        d.fail_stop = true;
         let mut o = orchestrator(vec![Box::new(d)]);
         let errs = o.teardown("alpha", "i-1");
         assert!(!errs.is_empty());
-        assert!(errs.iter().any(|e| e.contains("销毁实例")), "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("关闭实例")), "{errs:?}");
     }
 
     #[test]
@@ -2066,7 +2230,8 @@ mod tests {
         let errs = o.teardown("alpha", "i-1");
         assert!(errs.is_empty(), "{errs:?}");
         let c = calls.lock().unwrap().clone();
-        assert!(c.iter().any(|s| s.starts_with("destroy")), "{c:?}");
+        assert!(c.iter().any(|s| s.starts_with("stop")), "{c:?}");
+        assert!(!c.iter().any(|s| s.starts_with("destroy")), "{c:?}");
     }
 
     #[test]

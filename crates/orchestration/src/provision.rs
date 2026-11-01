@@ -182,11 +182,166 @@ impl Orchestrator {
                 Ok(PreparedDeployment::Cloud(Box::new(p)))
             }
             Err(e) => {
-                self.state
-                    .set_status(&id, DeploymentStatus::Failed, Some(e.to_string()))?;
+                // 失败也**不销毁**实例：节点配置/下载失败往往只是网络或
+                // 一次性错误，机器上已装好的环境仍然值钱。停机能立即止住
+                // GPU 计费，同时保留现场供用户重试。
+                self.park_failed_instance(&id, &e);
                 Err(e)
             }
         }
+    }
+
+    /// 部署失败时的「停放」：停推理进程 + 关隧道 + 实例关机（不销毁）。
+    ///
+    /// ## 为什么统一用它取代销毁
+    ///
+    /// 1. 失败原因多为可恢复（网络抖动、镜像内依赖缺失、参数不兼容），
+    ///    把机器留着，用户修完配置点「部署」就能复用同一实例；
+    /// 2. 关机已能停止 GPU 计费，不销毁不会造成持续费用；
+    /// 3. 真正销毁交给系统按策略回收，或在删除自定义节点时处理。
+    ///
+    /// 自定义节点是用户自己的机器，**只停进程，不关机**。
+    fn park_failed_instance(&mut self, id: &str, err: &MnError) {
+        let Some(rec) = self.state.get(id).ok().flatten() else {
+            return;
+        };
+        let Some(cloud) = rec.plan.cloud.clone() else {
+            return;
+        };
+        let vendor_managed = cloud.device_id.is_none();
+        let ComputeOrigin::Cloud {
+            provider,
+            instance_id,
+        } = &rec.plan.origin;
+
+        let mut note = err.to_string();
+        if vendor_managed && !provider.trim().is_empty() && !instance_id.trim().is_empty() {
+            if let Some(o) = self.cloud.as_mut() {
+                // 先停进程（可能已起来），再关机
+                let _ = o.stop_service(provider, instance_id);
+                if let Err(e) = o.power_off(provider, instance_id) {
+                    note = format!("{err}；且实例 {instance_id} 关机失败，可能仍在计费：{e}");
+                } else {
+                    note = format!("{err}；实例 {instance_id} 已停止保存，可再次部署复用");
+                }
+            }
+        }
+        let _ = self.device_tunnels.close_all();
+        if let Some(o) = self.cloud.as_mut() {
+            let _ = o.tunnels_mut().close_all();
+        }
+        let _ = self
+            .state
+            .set_status(id, DeploymentStatus::Failed, Some(note));
+    }
+
+    /// **模型下载阶段**（两条节点路径共用）：主模型 + 全部辅助模型逐个下载并校验。
+    ///
+    /// ## 为什么必须共用一个实现
+    ///
+    /// 曾经只有云厂商实例路径遍历 `auxiliary_downloads`，自定义/已保存节点
+    /// 路径只下主模型就回报「下载完成」——于是同一节点部署多模态模型时，
+    /// mmproj 和 MTP 从来没被下过，UI 上表现为「模型下载」一闪而过。
+    /// 阶段是否执行不能取决于节点类型，所以下载清单只允许在这里定义一次。
+    ///
+    /// ## 每个文件的判定
+    ///
+    /// 交给 [`mangosteen_provider::orchestrator::download_model_node`]：真实远端
+    /// 文件大小严格匹配（缺期望大小时先取源站 `Content-Length`）+ GGUF 魔数。
+    /// 只有它返回成功，才认为该文件可用于加载。
+    fn download_all_node_models(
+        &self,
+        ssh: &SshTarget,
+        cloud_plan: &mangosteen_core::plan::CloudPlan,
+        progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+        sink: crate::progress::ProgressSink<'_>,
+    ) -> MnResult<()> {
+        use crate::progress::{DeployStage, StageOutcome};
+
+        let hf_token = self
+            .config
+            .cloud
+            .hf_token
+            .as_ref()
+            .and_then(|token| token.resolve(mangosteen_platform::paths::real_env).ok());
+
+        // 清单：主模型在前，辅助模型按模板顺序。索引从 1 开始，供 UI 显示
+        // 「第 n/N 个文件」，让多文件模型不再表现为“只下一个就结束”。
+        let mut manifest: Vec<(String, Option<String>, Option<u64>, String)> = vec![(
+            cloud_plan.model_path.clone(),
+            cloud_plan.download_url.clone(),
+            cloud_plan.download_bytes,
+            "主模型".to_string(),
+        )];
+        for aux in &cloud_plan.auxiliary_downloads {
+            manifest.push((
+                aux.path.clone(),
+                Some(aux.url.clone()),
+                aux.bytes,
+                "辅助模型".to_string(),
+            ));
+        }
+        let total = manifest.len();
+        for (i, (path, url, bytes, kind)) in manifest.into_iter().enumerate() {
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            sink(
+                DeployStage::Downloading,
+                StageOutcome::Running,
+                format!(
+                    "[{}/{total}] {kind} {name}：校验远端文件（不存在则下载）",
+                    i + 1
+                ),
+            );
+            let file_plan = mangosteen_core::plan::CloudPlan {
+                model_path: path.clone(),
+                download_url: url,
+                download_bytes: bytes,
+                ..cloud_plan.clone()
+            };
+            mangosteen_provider::orchestrator::download_model_node(
+                &ssh,
+                &file_plan,
+                hf_token.as_deref(),
+                Some(progress),
+                None,
+            )?;
+            let size = mangosteen_device::remote::remote_file_size(ssh, &path)?;
+            sink(
+                DeployStage::Downloading,
+                StageOutcome::Running,
+                format!(
+                    "[{}/{total}] {kind} {name}：已就绪（{}）",
+                    i + 1,
+                    mangosteen_platform::fs::human_bytes(size)
+                ),
+            );
+        }
+
+        // 终检：不读 `.download.ok`，也不信任务表状态，只看远端真实文件。
+        // 任一文件缺失/为空都禁止进入模型加载。
+        for path in std::iter::once(cloud_plan.model_path.clone()).chain(
+            cloud_plan
+                .auxiliary_downloads
+                .iter()
+                .map(|a| a.path.clone()),
+        ) {
+            let size = mangosteen_device::remote::remote_file_size(ssh, &path)?;
+            if size == 0 {
+                return Err(MnError::Network {
+                    stage: "模型下载".to_string(),
+                    reason: format!("模板声明的远端模型文件不存在或为空：{path}"),
+                });
+            }
+        }
+        sink(
+            DeployStage::Downloading,
+            StageOutcome::Done,
+            format!(
+                "模型下载完成：共 {total} 个文件（主模型 + {} 个辅助模型）均已校验",
+                cloud_plan.auxiliary_downloads.len()
+            ),
+        );
+        Ok(())
     }
 
     /// 自建设备：连 SSH → 准备远端资源 → 建隧道。**不创建任何云资源**。
@@ -234,23 +389,7 @@ impl Orchestrator {
             crate::progress::StageOutcome::Running,
             "开始在目标节点下载模型".to_string(),
         );
-        let downloaded = mangosteen_provider::orchestrator::download_model_node(
-            &ssh,
-            &cloud_plan,
-            self.config
-                .cloud
-                .hf_token
-                .as_ref()
-                .and_then(|token| token.resolve(mangosteen_platform::paths::real_env).ok())
-                .as_deref(),
-            Some(progress),
-            None,
-        )?;
-        sink(
-            crate::progress::DeployStage::Downloading,
-            crate::progress::StageOutcome::Done,
-            format!("模型下载完成：{}", downloaded),
-        );
+        self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
 
         let spec =
             mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true);
@@ -262,8 +401,7 @@ impl Orchestrator {
         if let Some(c) = plan.cloud.as_mut() {
             c.local_port = local_port;
         }
-        self.state
-            .upsert(DeploymentRecord::from_plan(plan.clone()))?;
+        self.state.update_plan(&id, plan.clone())?;
 
         Ok(PreparedCloud {
             id: id.to_string(),
@@ -361,8 +499,7 @@ impl Orchestrator {
             provider: instance.provider.clone(),
             instance_id: instance.id.clone(),
         };
-        self.state
-            .upsert(DeploymentRecord::from_plan(plan.clone()))?;
+        self.state.update_plan(&id, plan.clone())?;
         sink(
             crate::progress::DeployStage::Selecting,
             crate::progress::StageOutcome::Done,
@@ -407,25 +544,10 @@ impl Orchestrator {
                 cloud_plan.model_path
             ),
         );
-        let hf_token = self
-            .config
-            .cloud
-            .hf_token
-            .as_ref()
-            .and_then(|token| token.resolve(mangosteen_platform::paths::real_env).ok());
-        let downloaded = mangosteen_provider::orchestrator::download_model_node(
-            &ssh,
-            &cloud_plan,
-            hf_token.as_deref(),
-            Some(progress),
-            None,
-        )?;
-        sink(
-            crate::progress::DeployStage::Downloading,
-            crate::progress::StageOutcome::Done,
-            format!("模型下载完成：{}", downloaded),
-        );
+        self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
 
+        // 模型量化当前暂不激活：不执行任何量化处理，也不把阶段标记为
+        // Skipped/Done；启动链路直接使用模板声明的 GGUF 文件。
         Ok(PreparedCloud {
             id: id.to_string(),
             plan,
@@ -469,6 +591,55 @@ impl Orchestrator {
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
         let launch_config = self.cloud_launch_config(&cloud_plan)?;
+        // 启动前显存预检：**只针对自定义/已保存节点**。
+        //
+        // 云厂商实例在创建时已由 `SelectionConstraints.min_vram_bytes` 按规格
+        // 保证显存，不需要也不应该再走一次 SSH 查询——SSH 一时不可用
+        // （实例刚开机、网络抖动、端口转发未就绪）会让整个启动被误判为失败。
+        //
+        // 自定义节点没有经过规格选择，8GB 卡也可能被拿来跑 27B 全量 GPU 模型，
+        // 最终只在 llama-server 内部 CUDA OOM，表现成 120 秒 connection reset。
+        // 因此这里保留预检，但**查询失败只记录并跳过**，绝不阻断启动：
+        // 真正的连接问题会在后续起引擎时以准确错误暴露。
+        if cloud_plan.device_id.is_some() {
+            match mangosteen_device::remote::remote_gpu_memory(&ssh) {
+                Ok(Some((total_vram, free_vram))) => {
+                    let required = cloud_plan.vram_bytes_per_gpu;
+                    let safety = 512u64 * 1024 * 1024;
+                    if free_vram < required.saturating_add(safety) {
+                        let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                        let e = MnError::bad_request(format!(
+                            "远端 GPU 显存不足，禁止启动推理引擎：总显存 {:.2} GiB，当前空闲 {:.2} GiB，预计至少需要 {:.2} GiB（含 512 MiB 运行余量）。请更换显存更大的节点，或降低量化/上下文长度；本次未启动 llama-server。",
+                            gib(total_vram),
+                            gib(free_vram),
+                            gib(required.saturating_add(safety))
+                        ));
+                        self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
+                        return Err(e);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[deploy] 显存预检跳过（查询失败，不阻断启动）：{e}");
+                }
+            }
+        }
+        // 启动前先确认远端确实有模型文件。下载阶段若因残留标记或命名不一致
+        // 被跳过，这里要给出指向「模型下载」的明确结论，而不是让
+        // llama-server 抛出难以定位的 GGUF 打不开错误。
+        let model_size =
+            mangosteen_device::remote::remote_file_size(&ssh, &cloud_plan.engine.model_path)?;
+        if model_size == 0 {
+            let e = MnError::Network {
+                stage: "启动云端推理服务".to_string(),
+                reason: format!(
+                    "远端模型文件不存在：{}。请在「模型下载」阶段确认文件已完整落盘",
+                    cloud_plan.engine.model_path
+                ),
+            };
+            self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
+            return Err(e);
+        }
         sink(
             DeployStage::Launching,
             StageOutcome::Running,
@@ -530,6 +701,16 @@ impl Orchestrator {
         if let Err(e) =
             mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2))
         {
+            let diagnostic = mangosteen_device::remote::llama_server_start_diagnostics(
+                &ssh,
+                &workdir,
+                cloud_plan.engine_port,
+            )
+            .unwrap_or_else(|diag_err| format!("远端诊断获取失败：{diag_err}"));
+            let e = MnError::Network {
+                stage: "等待云端推理服务".to_string(),
+                reason: format!("{e}\n远端启动诊断：\n{diagnostic}"),
+            };
             self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
             return Err(e);
         }
@@ -563,13 +744,28 @@ impl Orchestrator {
             StageOutcome::Done,
             format!("本地网关已接通远端模型：127.0.0.1:{local_port}"),
         );
+        // 隧道建立完成后再落一次节点信息：此后 UI 展示的 IP／端口
+        // 就是「当前真正可连的地址」，而不是 prepare 阶段的占位值。
+        if let Some(mut rec) = self.state.get(&id)? {
+            if let Some(c) = rec.plan.cloud.as_mut() {
+                c.node_ip = Some(ssh.host.clone());
+                c.node_ssh_port = Some(ssh.port);
+                c.node_ssh_user = Some(ssh.user.clone());
+                c.local_port = local_port;
+            }
+            self.state.upsert(rec)?;
+        }
         self.state
             .get(&id)?
             .map(|r| r.plan)
             .ok_or_else(|| MnError::bad_request("台账记录丢失"))
     }
 
-    /// 启动失败的回滚：云厂商实例必须销毁（持续计费），自建设备只停进程。
+    /// 启动失败的回滚：**停实例不销毁**，保留现场供重试。
+    ///
+    /// 启动失败（模型文件缺失、参数不兼容、动态库缺失）通常是配置问题，
+    /// 机器上的引擎与权重都还有用。关机停止 GPU 计费即可，销毁等于把
+    /// 下次重试的成本全部重置。自定义节点只停进程，机器不动。
     fn rollback_failed_cloud(
         &mut self,
         id: &str,
@@ -586,7 +782,7 @@ impl Orchestrator {
             provider,
             instance_id,
         } = origin;
-        // 只有云厂商创建的实例才销毁；用户自己的机器不能关机
+        // 只有云厂商创建的实例才关机；用户自己的机器不能动
         let vendor_managed = self
             .state
             .get(id)
@@ -595,24 +791,28 @@ impl Orchestrator {
             .and_then(|r| r.plan.cloud)
             .map(|c| c.device_id.is_none())
             .unwrap_or(false);
-        if vendor_managed {
+        let shared_node = self
+            .state
+            .get(id)
+            .ok()
+            .flatten()
+            .map(|r| self.has_other_active_on_node(id, &r))
+            .unwrap_or(true);
+        let mut note = err.to_string();
+        if vendor_managed && !shared_node {
             if let Some(o) = self.cloud.as_mut() {
-                let errors = o.teardown(provider, instance_id);
-                if !errors.is_empty() {
-                    let _ = self.state.set_status(
-                        id,
-                        DeploymentStatus::Failed,
-                        Some(format!(
-                            "{err}；且实例 {instance_id} 可能仍在计费：{}",
-                            errors.join("；")
-                        )),
-                    );
-                    return;
+                if let Err(e) = o.power_off(provider, instance_id) {
+                    note = format!("{err}；且实例 {instance_id} 关机失败，可能仍在计费：{e}");
+                } else {
+                    note = format!("{err}；实例 {instance_id} 已停止保存，可再次部署复用");
                 }
             }
         }
+        if let Some(o) = self.cloud.as_mut() {
+            let _ = o.tunnels_mut().close_all();
+        }
         let _ = self
             .state
-            .set_status(id, DeploymentStatus::Failed, Some(err.to_string()));
+            .set_status(id, DeploymentStatus::Failed, Some(note));
     }
 }
