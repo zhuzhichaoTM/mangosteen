@@ -87,7 +87,7 @@ button.danger{color:var(--danger);border-color:var(--danger-line);background:var
 button.sm{padding:3px 9px;font-size:12px;border-radius:6px}
 button.ghost{border-color:transparent;background:transparent;color:var(--muted)}
 button.ghost:hover:not(:disabled){background:var(--panel3);border-color:var(--line2)}
-select,input[type=text],input[type=number],textarea{
+select,input[type=text],input[type=number],input[type=password],textarea{
   font:inherit;font-size:13px;padding:6px 9px;border-radius:8px;
   border:1px solid var(--line2);background:var(--panel2);color:var(--text);width:100%;
 }
@@ -95,6 +95,11 @@ select:focus,input:focus,textarea:focus{outline:2px solid var(--accent-line);out
 label.f{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px;font-weight:500}
 label.f:first-child{margin-top:0}
 .hint{color:var(--faint);font-size:11.5px;line-height:1.5}
+/* 「?」说明开关：点击在标题旁展开/收起说明文字，让界面默认更干净 */
+.qmark{width:16px;height:16px;margin-left:6px;padding:0;border-radius:50%;font-size:10.5px;
+  line-height:1;display:inline-grid;place-items:center;vertical-align:1px;
+  color:var(--muted);border:1px solid var(--line2);background:transparent;cursor:pointer;flex:0 0 auto}
+.qmark:hover{color:var(--text);border-color:var(--line2);background:var(--panel3)}
 .banner{
   border:1px solid var(--warn-line);background:var(--warn-soft);color:var(--warn);
   border-radius:9px;padding:9px 12px;font-size:12.5px;line-height:1.55;
@@ -114,6 +119,11 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel3);
 .kv{display:flex;justify-content:space-between;gap:14px;font-size:12.5px;padding:3px 0}
 .kv .k{color:var(--muted);flex:0 0 auto}
 .kv .v{font-family:var(--mono);font-size:12px;text-align:right;word-break:break-all}
+/* 设置页节点列表：每行一个带边框的条目，与页面卡片风格一致 */
+#se-devices .kv{border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-top:8px;
+  background:var(--panel2);align-items:center}
+#se-devices .kv:first-child{margin-top:0}
+#se-devices .kv button{flex:0 0 auto}
 
 .model-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
 #v-deploy .pane{display:flex;flex-direction:column;overflow:hidden}
@@ -125,8 +135,10 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel3);
 .dp-config-bar select{padding:3px 9px;font-size:12px;border-radius:6px;min-width:130px;min-height:26px}
 .dp-config-bar .pill{margin-bottom:7px;font-size:12px}
 .dp-config-bar label{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--muted);white-space:nowrap}
-.dp-inline-value{display:inline-flex;align-items:center;min-height:26px;box-sizing:border-box}
-.dp-node-info{min-width:130px;max-width:220px;overflow:hidden;text-overflow:ellipsis;color:var(--text);font-size:12px;line-height:26px}
+/* 只读值框：与同排的 select（模型名称/配置模板）同风格——同边框、底色、圆角、内距 */
+.dp-inline-value{display:inline-flex;align-items:center;min-height:26px;box-sizing:border-box;
+  border:1px solid var(--line2);border-radius:6px;background:var(--panel2);padding:0 9px}
+.dp-node-info{min-width:130px;max-width:220px;overflow:hidden;text-overflow:ellipsis;color:var(--text);font-size:12px;line-height:24px}
 @media(max-width:700px){.model-actions{margin-left:0!important}}.model-main{display:flex;flex-direction:column;gap:3px;min-width:145px;flex:1}.model-row select{width:100px}.model-actions{display:flex;gap:6px;white-space:nowrap}.gpu-confirm{margin-top:14px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--panel2)}.model-detail-row td{padding:0}.template-inline{padding:12px 0}.template-inline pre{max-height:360px;overflow:auto}
 /* ================= CHAT ================= */
 #v-chat .head{
@@ -448,8 +460,14 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 .pk-block{padding:14px 0 4px;border-top:1px solid var(--line, rgba(128,128,128,.2))}
 .pk-block:first-child{border-top:none;padding-top:2px}
 .pk-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
-.pk-title b{font-size:13px}
+/* 与卡片标题（h3：13px/650 字重）一致，不用 <b> 的 700 加粗 */
+.pk-title b{font-size:13px;font-weight:650}
 .pk-block .node-form.single{grid-template-columns:1fr}
+/* 设置页与对话/部署页签观感一致：
+   文本框参考部署页「节点信息」值框（12px 字体 / 6px 圆角 / 26px 高 / 同边框底色），
+   控制按钮统一 sm 尺寸（与部署页「开始/停止/详情」、对话页各按钮同款）。 */
+#v-setting input, #ov-node input{font-size:12px;padding:0 9px;border-radius:6px;min-height:26px;font-weight:400}
+#v-setting .node-card > .node-actions button{padding:3px 9px;font-size:12px;border-radius:6px}
 
 .ov{
   position:fixed;inset:0;background:rgba(10,10,12,.48);backdrop-filter:blur(2px);
@@ -567,11 +585,9 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
       <div class="welcome" id="welcome">
         <div class="logo"></div>
         <h2>开始对话</h2>
-        <p>Enter 发送，Shift+Enter 换行</p>
-        <p>点回形针可附加文档，点地球图标可联网抓取网页</p>
         <div class="chips">
           <button data-prompt="简单介绍你的能力和限制">介绍一下你自己</button>
-          <button data-prompt="用三句话说明量化格式在 llama.cpp 中的作用">解释什么是 GGUF 量化</button>
+          <button data-prompt="大模型推理优化做什么？请简明扼要地说明">大模型推理优化做什么</button>
           <button data-prompt="写一个 Python 快速排序，附带注释">写一个快速排序</button>
         </div>
       </div>
@@ -579,7 +595,7 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
     <div class="composer-wrap">
       <div class="composer">
         <div class="attach-list" id="att-list"></div>
-        <textarea id="ta" rows="1" placeholder="输入消息… Enter 发送，Shift+Enter 换行"></textarea>
+        <textarea id="ta" rows="1" placeholder="输入消息…"></textarea>
         <div class="bar">
           <button class="iconbtn" id="btn-file" title="添加附件（文本 / Office / PDF）">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -619,7 +635,7 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
   <div class="view" id="v-deploy" hidden>
     <div class="pane"><div class="pane-narrow">
       <h1>模型部署</h1>
-      <div class="sub">按链路完成模型评估、GPU 节点选择、配置、下载和加载</div>
+      <div class="sub">进行模型评估、GPU 节点选择、节点配置、模型下载和加载</div>
       <div class="card deploy-content">
         <div id="dp-chain" hidden>
           <div class="row" style="justify-content:space-between;align-items:flex-start">
@@ -630,12 +646,12 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           <div class="banner info" id="dp-chain-note" style="margin-top:12px"></div>
           <div id="dp-chain-detail" class="stage-output" aria-live="polite">等待阶段输出…</div>
         </div>
-        <div id="dp-empty-content" class="empty">请选择模型并点击部署，部署链路将在此处显示。</div>
+        <div id="dp-empty-content" class="empty" hidden></div>
         <div id="dp-detail" class="template-inline" hidden></div>
       </div>
       <div class="card deploy-config">
         <div class="dp-config-bar">
-          <label>模型
+          <label>模型名称
             <select id="dp-model-sel"></select>
           </label>
           <label>配置模板
@@ -652,8 +668,8 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
             <span id="dp-instance-id" class="dp-inline-value dp-node-info">-</span>
           </label>
           <span class="model-actions" style="margin-left:auto">
-            <button class="primary sm" id="dp-deploy-btn">部署</button>
-            <button class="primary sm" id="dp-remove-btn">卸载</button>
+            <button class="primary sm" id="dp-deploy-btn">开始</button>
+            <button class="primary sm" id="dp-remove-btn">停止</button>
             <button class="primary sm" id="dp-detail-btn">详情</button>
           </span>
         </div>
@@ -665,33 +681,23 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
   <div class="view" id="v-setting" hidden>
     <div class="pane">
       <div class="pane-narrow">
-        <h1>设备列表</h1>
-        <div class="sub">添加自定义 GPU 节点。部署时会自动加入 GPU 节点选择。</div>
+        <h1>系统配置</h1>
+        <div class="sub">配置系统运行参数</div>
 
         <div class="card node-card">
-          <h3>自定义节点列表</h3>
-          <div class="hint">已添加的节点会出现在部署页 GPU 节点选择中。密码只用于 SSH 连接，不会回显。</div>
+          <h3>自定义节点<button class="qmark" type="button" aria-label="显示说明"
+            onclick="const h=this.closest('h3').nextElementSibling; h.hidden=!h.hidden">?</button></h3>
+          <div class="hint" hidden>已添加的节点会出现在部署页 GPU 节点选择中。密码只用于 SSH 连接，不会回显。点「添加」按钮弹出添加对话框。</div>
           <div id="se-devices" style="margin-top:14px"><div class="empty">加载中…</div></div>
-        </div>
-
-        <div class="card node-card">
-          <h3>添加节点</h3>
-          <div class="node-form">
-            <input id="se-dev-name" placeholder="节点名称（GPU 节点选择中的标识）">
-            <input id="se-dev-host" placeholder="IP 地址">
-            <input id="se-dev-port" type="number" value="22" min="1" max="65535" placeholder="SSH 端口">
-            <input id="se-dev-user" value="root" placeholder="用户名">
-            <input id="se-dev-password" type="password" placeholder="登录密码">
-          </div>
           <div class="node-actions">
-            <button class="primary" id="se-dev-add">添加节点</button>
-            <span class="hint" id="se-msg"></span>
+            <button class="primary sm" id="se-dev-open">添加</button>
           </div>
         </div>
 
         <div class="card node-card">
-          <h3>云平台密钥</h3>
-          <div class="hint">为已启用的云平台更新访问密钥。每个平台两个参数：<b>AccessKey ID</b> 是平台公钥标识（保存后回显），<b>AccessKey Secret</b> 是平台私钥（只写入本地 secrets 目录、绝不回显，留空表示不修改）。新密钥由您到对应云平台申请获取；保存后立即生效，无需重启。后续接入新云平台后，这里会自动出现对应配置项。</div>
+          <h3>云平台密钥<button class="qmark" type="button" aria-label="显示说明"
+            onclick="const h=this.closest('h3').nextElementSibling; h.hidden=!h.hidden">?</button></h3>
+          <div class="hint" hidden>为已启用的云平台更新访问密钥。每个平台两个参数：<b>AccessKey ID</b> 是平台公钥（对应平台申请的 Public_key，输入非空时才提交，不回显），<b>AccessKey Secret</b> 是平台私钥（只写入本地 secrets 目录、绝不回显，留空表示不修改）。新密钥由您到对应云平台申请获取；保存后立即生效，无需重启。后续接入新云平台后，这里会自动出现对应配置项。</div>
           <div id="se-provider-keys" style="margin-top:14px"><div class="empty">加载中…</div></div>
         </div>
       </div>
@@ -715,15 +721,36 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
   </div>
 </div>
 
+<!-- 添加自定义节点弹窗：由设置页「添加」按钮触发，添加成功/取消后关闭 -->
+<div class="ov" id="ov-node">
+  <div class="modal">
+    <h2>添加自定义节点</h2>
+    <div class="msub">节点会出现在部署页 GPU 节点选择中；密码只用于 SSH 连接，不会回显。</div>
+    <div class="mbody">
+      <div class="node-form" style="grid-template-columns:1fr 1fr">
+<input id="se-dev-name" type="text" placeholder="节点名称（GPU 节点选择中的标识）">
+<input id="se-dev-host" type="text" placeholder="IP 地址">
+        <input id="se-dev-port" type="number" value="22" min="1" max="65535" placeholder="SSH 端口">
+        <input id="se-dev-user" type="text" value="root" placeholder="用户名">
+        <input id="se-dev-password" type="password" placeholder="登录密码" style="grid-column:1 / -1">
+      </div>
+      <div class="hint" id="se-msg" style="margin-top:10px"></div>
+    </div>
+    <div class="mfoot">
+      <button id="se-dev-cancel" class="sm">取消</button>
+      <div class="grow"></div>
+      <button class="primary sm" id="se-dev-add">添加节点</button>
+    </div>
+  </div>
+</div>
+
 <template id="welcome-tpl">
   <div class="welcome">
     <div class="logo"></div>
     <h2>开始对话</h2>
-    <p>Enter 发送，Shift+Enter 换行</p>
-    <p>点回形针可附加文档，点地球图标可联网抓取网页</p>
     <div class="chips">
       <button data-prompt="简单介绍你的能力和限制">介绍一下你自己</button>
-      <button data-prompt="用三句话说明量化格式在 llama.cpp 中的作用">解释什么是 GGUF 量化</button>
+      <button data-prompt="大模型推理优化做什么？请简明扼要地说明">大模型推理优化做什么</button>
       <button data-prompt="写一个 Python 快速排序，附带注释">写一个快速排序</button>
     </div>
   </div>
@@ -1247,10 +1274,10 @@ Tabs.register("chat", (() => {
 
         if (!ready) {
           // 没有运行中的模型：下拉明确说明「为什么不能聊」以及该去哪
-          sel.appendChild(new Option("（无运行中的模型）", ""));
+          sel.appendChild(new Option("（待部署模型）", ""));
           sel.disabled = true;
           sel.title = "请先在「部署」页启动一个模型";
-          $("ta").placeholder = "请先在「部署」页启动模型，然后即可对话";
+          $("ta").placeholder = "输入消息…";
         } else {
           sel.disabled = false;
           sel.title = "选择用于对话的模型";
@@ -1265,7 +1292,7 @@ Tabs.register("chat", (() => {
           // 尽量保留用户原选择；原选择已失效则回到第一个
           if (prev && active.some((a) => a.model === prev)) sel.value = prev;
           else sel.value = active[0].model;
-          $("ta").placeholder = "输入消息… Enter 发送，Shift+Enter 换行";
+          $("ta").placeholder = "输入消息…";
         }
 
         // 模型来源符号已经放在下拉选项前：⌂ 本地 / ☁ 云端。
@@ -1534,9 +1561,14 @@ alias: qwen3.8-27b
       // 「未部署」与「已部署但停止」），且再次点「部署」要复用这条记录。
       // 只保留 ready/provisioning 会让停止后实例ID突然变成空，
       // 看起来像机器被删了。
-      const cands = (d.deployments || []).filter((x) =>
-        String(x.model_id || x.model || "").toLowerCase().includes(mdef.id)
-      ).filter((x) => x.status !== "destroyed");
+      //
+      // 匹配必须优先 base 名（":" 前的模型名）精确相等，没有才退回子串：
+      // 否则 qwen3.8-27b 会子串命中 qwen3.8-27b-ud 的台账记录，
+      // 把别的模型的云实例 ID 错挂到本模型上。
+      const all = (d.deployments || []).filter((x) => x.status !== "destroyed");
+      const baseName = (x) => String(x.model_id || x.model || "").toLowerCase().split(":")[0];
+      let cands = all.filter((x) => baseName(x) === mdef.id);
+      if (!cands.length) cands = all.filter((x) => baseName(x).includes(mdef.id));
       cands.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
       liveMap[mdef.id] = cands[0] || null;
     });
@@ -1582,20 +1614,20 @@ alias: qwen3.8-27b
       node.title = instanceId ? "已停止（实例保留，可再次部署复用）" : "未部署";
     }
 
-    // ---- 部署按钮：文案恒定，不随状态变化 ----
+    // ---- 开始按钮：文案恒定，不随状态变化 ----
     //
-    // 用户明确要求按钮固定是「部署」。是否可点由状态决定：
-    // 正在部署中时禁用（避免并发两个任务）；其它情况都可点——
-    // 未部署→创建实例，已部署但停止→复用实例启动。
+    // 用户要求按钮固定是「开始」（面向普通用户，比「部署」直白）。
+    // 是否可点由状态决定：正在部署中时禁用（避免并发两个任务）；
+    // 其它情况都可点——未部署→创建实例，已部署但停止→复用实例启动。
     const deploying = !!live && live.deployed && !running && live.status === "provisioning";
     const deploy = $("dp-deploy-btn");
-    deploy.textContent = "部署";
+    deploy.textContent = "开始";
     deploy.disabled = deploying;
 
-    // ---- 卸载：恒定高亮、恒定可点 ----
+    // ---- 停止：恒定高亮、恒定可点 ----
     //
     // 未部署时点击给出 toast 提示（见 unload()），不做禁用——
-    // 用户明确要求「部署/卸载默认都高亮、都可操作」。
+    // 用户要求「开始/停止默认都高亮、都可操作」。
     $("dp-remove-btn").disabled = false;
   }
 
@@ -1755,7 +1787,7 @@ alias: qwen3.8-27b
     $("dp-chain-steps").innerHTML = "";
     $("dp-chain-note").textContent = "";
     $("dp-deploy-btn").disabled = false;
-    $("dp-deploy-btn").textContent = "部署";
+    $("dp-deploy-btn").textContent = "开始";
     $("dp-model-sel").selectedIndex = 0;
     $("dp-template-sel").selectedIndex = 0;
   }
@@ -1838,7 +1870,7 @@ alias: qwen3.8-27b
   /// 真正销毁由系统按策略回收，或在删除自定义节点时按需调用云 API。
   async function unload(modelId) {
     const live = liveMap[modelId];
-    if (!live) { toast("当前模型没有可卸载的部署", "err"); return; }
+    if (!live) { toast("当前模型没有可停止的部署", "err"); return; }
     if (!confirm("确定停止该模型的推理服务？\n实例会被关机以停止 GPU 计费，但机器与已下载的权重会保留，可再次部署复用。")) return;
     try {
       const r = await api("/api/deployments/" + encodeURIComponent(live.id) + "/unload", { method: "POST", timeoutMs: 60000 });
@@ -1873,7 +1905,7 @@ Tabs.register("setting", (() => {
 
   // 云平台密钥：按已启用的云平台动态渲染，天然支持后续接入新平台。
   // 每个平台固定两个参数：
-  //   AccessKey ID  → 平台公钥（如优云 PublicKey），保存后回显；
+  //   AccessKey ID  → 平台公钥（如优云 PublicKey），不回显，输入非空时才提交；
   //   AccessKey Secret → 平台私钥（如优云 PrivateKey），只写本地 secrets 目录，绝不回显。
   // 平台是否用公钥由后端 settings 返回（public_key 字段是否存在）决定，
   // UI 不写死任何平台的密钥模型——只用 AccessKey ID/Secret 两个通用参数名。
@@ -1893,11 +1925,11 @@ Tabs.register("setting", (() => {
           '<span class="gi-sub">' + esc(p.name) + ' · ' + st + '</span></div>' +
           '<div class="node-form' + (hasPk ? "" : " single") + '">' +
           (hasPk
-            ? '<input class="pk-id" placeholder="AccessKey ID（平台公钥标识）" value="' + esc(p.public_key) + '">'
+            ? '<input class="pk-id" type="text" placeholder="Public_key（平台公钥，申请获取）">'
             : "") +
           '<input class="pk-secret" type="password" placeholder="AccessKey Secret（平台私钥，留空表示不修改）">' +
           '</div>' +
-          '<div class="node-actions"><button class="primary sm pk-save">保存密钥</button><span class="hint pk-msg"></span></div>';
+          '<div class="node-actions"><button class="primary sm pk-save">保存</button><span class="hint pk-msg"></span></div>';
         sec.querySelector(".pk-save").onclick = () => saveProviderKeys(p.name, sec);
         box.appendChild(sec);
       });
@@ -1957,7 +1989,7 @@ Tabs.register("setting", (() => {
         };
         box.appendChild(row);
       });
-    } catch (e) { box.innerHTML = '<div class="empty">设备列表读取失败：' + esc(e.message) + '</div>'; }
+    } catch (e) { box.innerHTML = '<div class="empty">自定义节点读取失败：' + esc(e.message) + '</div>'; }
   }
 
   async function addDevice() {
@@ -1967,14 +1999,27 @@ Tabs.register("setting", (() => {
         host: $("se-dev-host").value.trim(), port: Number($("se-dev-port").value),
         user: $("se-dev-user").value.trim(), password: $("se-dev-password").value
       })});
-      $("se-dev-password").value = ""; $("se-dev-name").value = ""; $("se-dev-host").value = ""; await loadDevices(); toast("节点已保存", "ok");
-    } catch (e) { toast("保存设备失败：" + e.message, "err"); }
+      // 添加成功：清空表单并自动关闭弹窗
+      $("se-dev-password").value = ""; $("se-dev-name").value = ""; $("se-dev-host").value = "";
+      $("ov-node").classList.remove("show");
+      await loadDevices(); toast("节点已保存", "ok");
+    } catch (e) { $("se-msg").textContent = "保存失败：" + e.message; toast("保存设备失败：" + e.message, "err"); }
+  }
+
+  function openNodeModal() {
+    $("se-msg").textContent = "";
+    $("ov-node").classList.add("show");
+    $("se-dev-name").focus();
   }
 
   return {
     async mount() {
       if (!mounted) {
+        $("se-dev-open").onclick = openNodeModal;
         $("se-dev-add").onclick = addDevice;
+        $("se-dev-cancel").onclick = () => $("ov-node").classList.remove("show");
+        // 点遮罩空白处关闭（点弹窗本体不关）
+        $("ov-node").onclick = (ev) => { if (ev.target === $("ov-node")) $("ov-node").classList.remove("show"); };
         mounted = true;
       }
       await load();
