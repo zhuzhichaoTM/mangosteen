@@ -503,6 +503,7 @@ impl GatewayServer {
                 let Ok(mut snapshot) = refresh_snapshot.write() else {
                     return;
                 };
+                snapshot.clear();
                 for record in records {
                     if record.status != mangosteen_base::state::DeploymentStatus::Ready {
                         continue;

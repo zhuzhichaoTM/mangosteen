@@ -20,7 +20,14 @@ impl Orchestrator {
         };
         let mut errors = Vec::new();
         for record in records {
-            if record.status != DeploymentStatus::Ready {
+            // `Failed` 记录同样重建隧道：瞬时探测失败会把实际仍在服务的
+            // 部署标成 failed，网关重启后若不重建隧道，探测自愈永远等不到
+            // 健康端口，模型在对话页签消失。状态这里不翻转，仍由后台探测
+            // 在 `/health` 通过时翻回 `ready`（真死的部署保持 failed 无害）。
+            if !matches!(
+                record.status,
+                DeploymentStatus::Ready | DeploymentStatus::Failed
+            ) {
                 continue;
             }
             let Some(cloud_plan) = record.plan.cloud.clone() else {
@@ -114,11 +121,24 @@ impl Orchestrator {
             match self.device_target_for(c) {
                 Some(target) => {
                     let workdir = self.config.cloud.remote_workdir.clone();
-                    let _ = mangosteen_device::remote::stop_llama_server_on_port(
+                    let port = c.engine_port;
+                    if let Err(e) = mangosteen_device::remote::stop_llama_server_on_port(
                         &target,
                         &workdir,
-                        cloud.as_ref().map(|c| c.engine_port),
-                    );
+                        Some(port),
+                    ) {
+                        return Err(MnError::Network {
+                            stage: "卸载（停止模型进程）".to_string(),
+                            reason: format!("模型远端端口 {port} 的 llama-server 停止失败：{e}"),
+                        });
+                    }
+                    if mangosteen_device::remote::llama_server_running_on_port(
+                        &target, &workdir, port,
+                    )? {
+                        return Err(MnError::bad_request(format!(
+                            "模型远端端口 {port} 的 llama-server 仍在运行，已阻止后续关机"
+                        )));
+                    }
                 }
                 None => {
                     // 云厂商实例：直接由驱动停止服务（内部走 ssh）
@@ -128,7 +148,7 @@ impl Orchestrator {
                     } = &record.plan.origin;
                     if let Some(o) = self.cloud.as_mut() {
                         if !provider.trim().is_empty() && !instance_id.trim().is_empty() {
-                            let _ = o.stop_service_on_port(
+                            if let Err(e) = o.stop_service_on_port(
                                 provider,
                                 instance_id,
                                 record
@@ -137,7 +157,12 @@ impl Orchestrator {
                                     .as_ref()
                                     .map(|c| c.engine_port)
                                     .unwrap_or(8080),
-                            );
+                            ) {
+                                return Err(MnError::Network {
+                                    stage: "卸载（停止模型进程）".to_string(),
+                                    reason: format!("模型远端进程停止失败：{e}"),
+                                });
+                            }
                         }
                     }
                 }
@@ -147,9 +172,18 @@ impl Orchestrator {
         // 2) 关隧道并释放端口预留。
         //
         // 节点共享时不能 close_all：那会切断其它模型的业务转发。
-        // 当前实现的 TunnelManager 按节点归属，无法安全按单模型关闭，
-        // 因此共享节点只释放当前模型端口；其它模型隧道保持存活。
-        if !shared_node {
+        // 但**必须**关掉当前模型自己那条隧道——否则每卸载一个模型就
+        // 泄漏一个 ssh 进程和一个本地端口，反复部署后端口区间被吃光，
+        // 表现为「分配本地端口失败」。
+        let engine_port = cloud.as_ref().map(|c| c.engine_port);
+        if shared_node {
+            if let Some(p) = engine_port {
+                let _ = self.device_tunnels.close_by_remote_port(p);
+                if let Some(o) = self.cloud.as_mut() {
+                    let _ = o.tunnels_mut().close_by_remote_port(p);
+                }
+            }
+        } else {
             let _ = self.device_tunnels.close_all();
             if let Some(o) = self.cloud.as_mut() {
                 let _ = o.tunnels_mut().close_all();
@@ -868,11 +902,18 @@ impl Orchestrator {
     /// 根据本地映射端口与远端引擎端口的实时探测结果刷新台账。
     ///
     /// `mapped=true` 表示本地端口能访问对应远端 `/health`，且方案中记录了
-    /// 远端引擎端口；这时记录可视为 Ready。`mapped=false` 时，旧的 Ready/
-    /// Stopped 记录标为 Failed，避免历史台账继续冒充可用实例。
+    /// 远端引擎端口；这时记录可视为 Ready（**含 Failed 的探测自愈**：
+    /// 瞬时探测失败翻成的 Failed 在端口恢复服务后必须能翻回 Ready，
+    /// 否则记录永久卡死，对话页签看不到该模型）。
+    /// `mapped=false` 时，旧的 Ready 记录标为 Failed，避免历史台账
+    /// 继续冒充可用实例。
     ///
     /// 正在部署的 Planned/Provisioning 不在这里处理，避免后台 5 秒探测在
     /// 节点创建、下载或启动期间把正常进行中的任务提前判成失败。
+    ///
+    /// Stopped 同样跳过：它是用户的显式动作态（停止服务后隧道必然不通），
+    /// 不能因为「探测不到」降级成 Failed——否则破坏「停止保留实例、
+    /// 可再启动」的生命周期。
     pub fn refresh_deployment_mapping(&mut self, id: &str, mapped: bool) -> MnResult<()> {
         let Some(record) = self.state.get(id)? else {
             return Ok(());
@@ -880,7 +921,9 @@ impl Orchestrator {
         if record.status == DeploymentStatus::Destroyed
             || matches!(
                 record.status,
-                DeploymentStatus::Planned | DeploymentStatus::Provisioning
+                DeploymentStatus::Planned
+                    | DeploymentStatus::Provisioning
+                    | DeploymentStatus::Stopped
             )
         {
             return Ok(());

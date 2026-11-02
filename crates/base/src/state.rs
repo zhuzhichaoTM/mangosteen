@@ -114,6 +114,12 @@ impl DeploymentRecord {
                 | (DeploymentStatus::Failed, DeploymentStatus::Provisioning)
                 | (DeploymentStatus::Failed, DeploymentStatus::Stopped)
                 | (DeploymentStatus::Failed, DeploymentStatus::Destroyed)
+                // 探测自愈：`Failed` 只代表「上次探测时端口没在服务」，
+                // 不是终局。若后续探测发现本地隧道健康检查通过，说明部署
+                // 实际仍在服务，必须允许翻回 `Ready`——否则一次瞬时探测
+                // 失败（如模型加载期 /health 返回 503）会把记录永久卡死在
+                // `Failed`，对话页签再也看不到该模型。
+                | (DeploymentStatus::Failed, DeploymentStatus::Ready)
         );
         if !allowed {
             return Err(MnError::InvalidTransition {
@@ -506,6 +512,34 @@ mod tests {
             s.get("d1").unwrap().unwrap().status,
             DeploymentStatus::Stopped
         );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 探测自愈：`Failed → Ready` 必须合法。
+    ///
+    /// 场景：部署成功后一次瞬时探测失败（模型加载期 `/health` 返回
+    /// 503、隧道短暂重建等）把台账翻成 `failed`；之后探测确认端口
+    /// 仍在服务，必须能翻回 `ready`，否则记录永久卡死，对话页签
+    /// 再也看不到该模型。
+    #[test]
+    fn failed_recovers_to_ready_on_probe() {
+        let d = tmpdir("recover");
+        let s = StateStore::new(d.join("state.json"));
+        s.upsert(DeploymentRecord::from_plan(sample_plan("d1")))
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Provisioning, None)
+            .unwrap();
+        s.set_status("d1", DeploymentStatus::Ready, None).unwrap();
+        s.set_status(
+            "d1",
+            DeploymentStatus::Failed,
+            Some("本地端口与远端引擎端口映射不存在或健康检查失败".into()),
+        )
+        .unwrap();
+        let r = s
+            .set_status("d1", DeploymentStatus::Ready, Some("探测恢复".into()))
+            .unwrap();
+        assert_eq!(r.status, DeploymentStatus::Ready);
         std::fs::remove_dir_all(&d).ok();
     }
 

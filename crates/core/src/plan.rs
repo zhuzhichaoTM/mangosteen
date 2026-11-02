@@ -258,6 +258,13 @@ pub struct CloudPlan {
     /// 绝不能关机或销毁——那会影响用户的其它用途。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// 用户在节点选择弹窗里**指定复用的云端实例 ID**。
+    ///
+    /// 有值时部署不再创建新实例，而是直接挂到这台已存在（运行中或已停机）
+    /// 的云实例上：停机实例先开机，运行中实例直接在其上另起一个引擎端口
+    /// 的 llama-server（同机多模型）。为空则按 GPU 型号自动匹配或新建。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reuse_instance_id: Option<String>,
 }
 
 // 云端运行参数由引擎插件生成；CloudPlan 只保留节点配置数据。
@@ -407,7 +414,6 @@ mod tests {
             mmproj_path: None,
             draft_model_path: None,
             auxiliary_downloads: Vec::new(),
-            extra_args: Vec::new(),
             local_port: 11435,
             engine,
             max_price_per_hour: Some(2.5),
@@ -457,7 +463,6 @@ mod tests {
             mmproj_path: None,
             draft_model_path: None,
             auxiliary_downloads: Vec::new(),
-            extra_args: Vec::new(),
             local_port: 12000,
             engine: local,
             max_price_per_hour: None,
@@ -517,7 +522,6 @@ mod tests {
                 mmproj_path: None,
                 draft_model_path: None,
                 auxiliary_downloads: Vec::new(),
-                extra_args: Vec::new(),
                 local_port: 12000,
                 engine: LocalPlan::from_assessment(&s, "/m.gguf", &a, 11435),
                 max_price_per_hour: None,

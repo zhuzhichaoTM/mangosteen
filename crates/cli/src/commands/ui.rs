@@ -213,6 +213,11 @@ fn status_background(args: &Args) -> MnResult<i32> {
 }
 /// 前台兼容入口：`ui --foreground --no-open`。
 pub fn run(args: Args) -> MnResult<i32> {
+    // 选项白名单校验必须在这里也做一次：`run_lifecycle` 只覆盖
+    // `ui start|restart|stop|status` 这条子命令路径，前台直跑 `mangosteen ui`
+    // 走的是本函数。缺了这一步，拼错的参数会被静默忽略，用户只会看到
+    // 「服务起来了但参数没生效」这种更难排查的现象。
+    reject_unknown_options(&args, ALLOWED)?;
     let gw = crate::commands::build_gateway(&args)?;
     let cfg = gw.config().clone();
 

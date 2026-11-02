@@ -204,7 +204,14 @@ impl GatewayServer {
             Ok(g) => g,
             Err(_) => return Response::text(500, "网关状态锁中毒"),
         };
-        match gw.unload(id) {
+        let result = gw.unload(id);
+        drop(gw);
+        // 卸载后必须重建业务转发快照：该模型已不可服务，不能继续留在
+        // 快照里把对话路由到一个已关闭的隧道端口。
+        if result.is_ok() {
+            self.rebuild_backend_snapshot();
+        }
+        match result {
             Ok(outcome) => Response::json(
                 200,
                 &serde_json::json!({
@@ -229,7 +236,12 @@ impl GatewayServer {
             Ok(g) => g,
             Err(_) => return Response::text(500, "网关状态锁中毒"),
         };
-        match gw.stop_service(id) {
+        let result = gw.stop_service(id);
+        drop(gw);
+        if result.is_ok() {
+            self.rebuild_backend_snapshot();
+        }
+        match result {
             Ok(()) => Response::json(
                 200,
                 &serde_json::json!({"ok": true, "id": id, "status": "stopped"}),
@@ -256,7 +268,14 @@ impl GatewayServer {
             Ok(g) => g,
             Err(_) => return Response::text(500, "网关状态锁中毒"),
         };
-        match gw.stop(id) {
+        let result = gw.stop(id);
+        drop(gw);
+        // 停止服务后必须重建业务转发快照：该模型已不可服务，不能继续留在
+        // 快照里把对话路由到一个已关闭的隧道端口。
+        if result.is_ok() {
+            self.rebuild_backend_snapshot();
+        }
+        match result {
             Ok(()) => Response::json(200, &serde_json::json!({"ok": true, "id": id})),
             Err(e) => Response::error(&e),
         }

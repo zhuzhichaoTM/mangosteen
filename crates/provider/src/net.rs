@@ -449,7 +449,33 @@ impl TunnelManager {
         Ok(false)
     }
 
+    /// 按远端端口关闭单条隧道。
+    ///
+    /// 同节点多模型时必须用这个：`close_all` 会把其它模型的业务转发一起
+    /// 切断，而只按 `TunnelSpec` 关闭又要求调用方完整重建 spec。
+    /// key 的格式是 `host:port:remote_port`，因此远端端口足以唯一定位
+    /// 本进程内属于该模型的那条隧道。
+    ///
+    /// 返回是否真的关掉了一条（不存在时为 `false`，保持幂等）。
+    pub fn close_by_remote_port(&mut self, remote_port: u16) -> MnResult<bool> {
+        let suffix = format!(":{remote_port}");
+        let pos = self.tunnels.iter().position(|(k, _)| k.ends_with(&suffix));
+        let Some(pos) = pos else {
+            return Ok(false);
+        };
+        let (_, mut t) = self.tunnels.remove(pos);
+        let port = t.local_port;
+        // 关闭失败也要释放本地端口：ssh 已被 terminate 尝试过，
+        // 端口预留不释放会让反复卸载逐渐吃光端口区间。
+        let closed = t.close();
+        self.allocator.release(port);
+        closed.map(|_| true)
+    }
+
     /// 关闭全部隧道。进程退出前必须调用，否则残留 ssh 进程。
+    ///
+    /// 共享节点卸载时按远端端口关闭单条隧道（`close_by_remote_port`），
+    /// 这样能保留其它模型的隧道和业务转发。全部关闭时使用 `close_all`。
     pub fn close_all(&mut self) -> MnResult<usize> {
         let mut n = 0;
         for (_, mut t) in std::mem::take(&mut self.tunnels) {

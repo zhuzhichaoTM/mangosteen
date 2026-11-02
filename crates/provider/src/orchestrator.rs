@@ -739,7 +739,8 @@ impl CloudOrchestrator {
     pub fn power_off(&self, provider: &str, instance_id: &str) -> MnResult<()> {
         let driver = self.registry.get(provider)?;
         let target = self.service_target(provider, instance_id)?;
-        // 关机前硬校验：仍有 llama-server 时禁止关闭实例。
+        // 仅验证当前实例的指定引擎端口，不把同节点其它模型误判为当前模型。
+        // 关机前由上层按端口停止当前模型，再由这里做最终节点级 llama 检查。
         if mangosteen_device::remote::llama_server_running(&target, &self.config.remote_workdir)? {
             return Err(MnError::bad_request(format!(
                 "实例 {instance_id} 仍有 llama-server 进程运行，已阻止关机；请先停止推理进程后重试"

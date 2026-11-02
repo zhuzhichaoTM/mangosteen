@@ -110,6 +110,13 @@ pub struct DeploymentRequest {
     pub cloud_spec: Option<String>,
     /// 用户选定的 GPU 型号（如 P40、V100S），用于已有实例复用匹配。
     pub gpu_model: Option<String>,
+    /// 用户选定的**已有云端实例**（节点选择弹窗里列出的运行中/已停机机器）。
+    ///
+    /// 有值时部署**不再创建新实例**：直接复用这台机器（停机实例先开机）。
+    /// 这是「方便节点复用」诉求的落点——用户明确挑了机器，就不该再开一台。
+    pub reuse_instance_id: Option<String>,
+    /// 复用目标实例所属的服务商驱动名（实例 ID 跨厂商不保证唯一，必须成对）。
+    pub reuse_provider: Option<String>,
     /// 用户选定的**已保存设备**（设置页「设备列表」里的 SSH 节点）。
     ///
     /// 有值时**不创建云实例**：直接连上这台机器部署。它优先于
@@ -154,6 +161,8 @@ impl Default for DeploymentRequest {
             model_id: None,
             cloud_spec: None,
             gpu_model: None,
+            reuse_instance_id: None,
+            reuse_provider: None,
             device_id: None,
             config_template: None,
             auxiliary_models: Vec::new(),
@@ -532,6 +541,8 @@ mod tests {
             model_id: None,
             cloud_spec: None,
             gpu_model: None,
+            reuse_instance_id: None,
+            reuse_provider: None,
             device_id: None,
             config_template: None,
             auxiliary_models: Vec::new(),

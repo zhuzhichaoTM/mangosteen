@@ -160,7 +160,11 @@ impl GatewayServer {
     /// 测试不必等待真实端口。
     pub fn with_runtime_probe(mut self) -> Self {
         let probe = crate::runprobe::RuntimeProbe::new();
-        crate::runprobe::spawn_runtime_probe(Arc::clone(&self.gateway), probe.clone());
+        crate::runprobe::spawn_runtime_probe(
+            Arc::clone(&self.gateway),
+            Arc::clone(&self.backend_snapshot),
+            probe.clone(),
+        );
         self.runtime_probe = Some(probe);
         self
     }

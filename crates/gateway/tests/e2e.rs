@@ -2174,10 +2174,12 @@ fn e2e_prepared_local_gets_model_path_before_launch() {
     );
 }
 
-/// 部署进度：编排层必须逐步上报阶段，量化步骤如实标「跳过」。
+/// 部署进度：编排层必须逐步上报阶段，评估步骤如实输出资源明细。
 ///
 /// 断言的是**编排层行为**（直接调 `deploy_with_progress`，不经 HTTP），
 /// 这样与前端怎么画无关——进度数据对不对，是后端的事。
+///
+/// 「模型量化」阶段已删除（量化是可选旁路，不占主流程步骤）。
 #[test]
 fn e2e_deploy_reports_stage_progress() {
     use mangosteen_gateway::progress::{DeployStage, StageOutcome};
@@ -2229,7 +2231,6 @@ fn e2e_deploy_reports_stage_progress() {
         DeployStage::Assessing,
         DeployStage::Selecting,
         DeployStage::Configuring,
-        DeployStage::Quantizing,
         DeployStage::Launching,
     ] {
         assert!(
@@ -2242,31 +2243,30 @@ fn e2e_deploy_reports_stage_progress() {
     // 顺序必须满足「配置在下载之前」——用户明确要求的部署流程。
     // 早先下载排在设备选择前面（因为评估要读 GGUF 文件），现在
     // 评估改用远端 Range 预取，下载才能后移。
-    let idx = |st: DeployStage| {
-        events
-            .iter()
-            .position(|(s, _, _)| *s == st)
-            .unwrap_or_else(|| panic!("缺少阶段 {}", st.label()))
-    };
-    assert!(
-        idx(DeployStage::Configuring) < idx(DeployStage::Quantizing),
-        "设备配置必须在量化之前"
-    );
-    assert!(
-        idx(DeployStage::Quantizing) < idx(DeployStage::Launching),
-        "量化必须在启动之前"
-    );
+    if let (Some(cfg_i), Some(dl_i)) = (
+        events.iter().position(|(s, _, _)| *s == DeployStage::Configuring),
+        events.iter().position(|(s, _, _)| *s == DeployStage::Downloading),
+    ) {
+        assert!(
+            cfg_i < dl_i,
+            "设备配置必须在下载之前"
+        );
+    }
 
-    // 「模型评估」当前策略为暂不激活，碰到直接跳过；阶段仍出现但结果为 Skipped。
+    // 模型评估已激活：必须给出 Done 与算力资源明细。
     let assess = events
         .iter()
         .find(|(s, _, _)| *s == DeployStage::Assessing)
         .expect("应有评估阶段记录");
     assert_eq!(
         assess.1,
-        StageOutcome::Skipped,
-        "模型评估暂不激活，必须标 Skipped：{}",
+        StageOutcome::Done,
+        "模型评估已激活，必须标 Done：{}",
         assess.2
+    );
+    assert!(
+        !assess.2.trim().is_empty(),
+        "评估必须输出算力资源明细，不能是空串"
     );
 
     // 设备配置也要给出具体参数，便于排障时核对
@@ -2279,18 +2279,6 @@ fn e2e_deploy_reports_stage_progress() {
         cfg_done.2.contains("端口") && cfg_done.2.contains("线程"),
         "配置结果必须摊开关键参数：{}",
         cfg_done.2
-    );
-
-    // 模型量化暂不激活 → 碰到直接跳过，必须标「跳过」。
-    let q = events
-        .iter()
-        .find(|(s, _, _)| *s == DeployStage::Quantizing)
-        .expect("应有量化阶段记录");
-    assert_eq!(
-        q.1,
-        StageOutcome::Skipped,
-        "模型量化暂不激活，必须标 Skipped：{}",
-        q.2
     );
 
     assert!(

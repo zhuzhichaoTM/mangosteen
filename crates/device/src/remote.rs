@@ -938,7 +938,11 @@ pub fn start_llama_server(
     let script = format!(
         "set -e; mkdir -p {workdir}; \
          if [ -f {pid_file} ]; then \
-           kill -- -$(cat {pid_file}) 2>/dev/null || kill $(cat {pid_file}) 2>/dev/null || true; \
+           P=$(cat {pid_file} 2>/dev/null); \
+           if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
+              && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
+             kill -- -\"$P\" 2>/dev/null || kill \"$P\" 2>/dev/null || true; \
+           fi; \
            rm -f {pid_file}; \
          fi; \
          test -x {bin}; \
@@ -1066,6 +1070,37 @@ pub fn llama_server_running(target: &SshTarget, workdir: &str) -> MnResult<bool>
     Ok(out.trim() == "yes")
 }
 
+/// 指定远端端口对应的 llama-server 是否仍在运行。
+///
+/// 判据按「pid 文件 → 端口监听」依次检查，两种 pid 命名都要看：
+/// 8080 历史上写的是 `llama-server.pid`，其它端口写 `llama-server-<port>.pid`。
+pub fn llama_server_running_on_port(
+    target: &SshTarget,
+    workdir: &str,
+    port: u16,
+) -> MnResult<bool> {
+    let scoped_pid = format!("{workdir}/llama-server-{port}.pid");
+    // 只有 8080 会写历史名 `llama-server.pid`；其它端口绝不能检查它，
+    // 否则会把同节点 8080 的模型误判成当前端口的进程还在。
+    let pid_candidates = if port == 8080 {
+        format!("{scoped_pid} {workdir}/llama-server.pid")
+    } else {
+        scoped_pid
+    };
+    let out = ssh_exec(
+        target,
+        &format!(
+            "for f in {pid_candidates}; do \
+               if [ -f \"$f\" ] && kill -0 $(cat \"$f\") 2>/dev/null; then echo yes; exit 0; fi; \
+             done; \
+             if {listen}; then echo yes; else echo no; fi",
+            listen = listening_probe(port)
+        ),
+        60,
+    )?;
+    Ok(out.trim() == "yes")
+}
+
 /// 停掉指定部署的远端 `llama-server`（**保留实例**）。
 ///
 /// 通过该部署自己的 PID 文件和端口进程定位，不再使用全局
@@ -1090,33 +1125,74 @@ pub fn stop_llama_server_on_port(
     // 多模型节点必须按部署自己的 pid/端口操作；不带端口时才兼容旧的
     // 单模型逻辑。带端口时不允许 `pkill -x llama-server` 兜底。
     let scoped = port.is_some();
-    let pid_path = port
-        .map(|p| format!("{workdir}/llama-server-{p}.pid"))
-        .unwrap_or_else(|| format!("{workdir}/llama-server.pid"));
+    // pid 文件名必须与启动侧 `start_llama_server` 完全一致：
+    // 8080 写的是历史名 `llama-server.pid`，其它端口才带端口号。
+    //
+    // 这里曾一律用 `llama-server-<port>.pid`，于是停止 8080 的模型时
+    // 找不到 pid 文件，`scope_check` 直接为真并 `echo stopped`——
+    // 报告成功但进程根本没被 kill。两个模型共用节点时表现为
+    // 「卸载第二个模型后进程仍在、节点无法关机」。
+    let pid_path = match port {
+        Some(8080) => format!("{workdir}/llama-server.pid"),
+        Some(p) => format!("{workdir}/llama-server-{p}.pid"),
+        None => format!("{workdir}/llama-server.pid"),
+    };
     let term_all = if scoped {
+        // 先校验 pid 确实属于 llama-server 再 kill：pid 文件可能残留
+        // 一个已死 PID，而该 PID 已被别的进程复用，盲杀会误伤无关进程。
         format!(
-                "if [ -f {pid} ]; then kill -TERM -- -$(cat {pid}) 2>/dev/null || kill -TERM $(cat {pid}) 2>/dev/null || true; fi",
-                pid = pid_path
-            )
+            "if [ -f {pid} ]; then P=$(cat {pid} 2>/dev/null); \
+             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
+                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
+               kill -TERM -- -\"$P\" 2>/dev/null || kill -TERM \"$P\" 2>/dev/null || true; \
+             fi; fi",
+            pid = pid_path
+        )
     } else {
         format!(
-            "if [ -f {workdir}/llama-server.pid ]; then kill -TERM -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -TERM $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; pkill -TERM -x llama-server 2>/dev/null || true"
+            "if [ -f {workdir}/llama-server.pid ]; then P=$(cat {workdir}/llama-server.pid 2>/dev/null); \
+             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
+                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
+               kill -TERM -- -\"$P\" 2>/dev/null || kill -TERM \"$P\" 2>/dev/null || true; \
+             fi; fi; pkill -TERM -x llama-server 2>/dev/null || true"
         )
     };
     let kill_all = if scoped {
         format!(
-                "if [ -f {pid} ]; then kill -KILL -- -$(cat {pid}) 2>/dev/null || kill -KILL $(cat {pid}) 2>/dev/null || true; fi",
-                pid = pid_path
-            )
+            "if [ -f {pid} ]; then P=$(cat {pid} 2>/dev/null); \
+             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
+                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
+               kill -KILL -- -\"$P\" 2>/dev/null || kill -KILL \"$P\" 2>/dev/null || true; \
+             fi; fi",
+            pid = pid_path
+        )
     } else {
         format!(
-            "if [ -f {workdir}/llama-server.pid ]; then kill -KILL -- -$(cat {workdir}/llama-server.pid) 2>/dev/null || kill -KILL $(cat {workdir}/llama-server.pid) 2>/dev/null || true; fi; pkill -KILL -x llama-server 2>/dev/null || true"
+            "if [ -f {workdir}/llama-server.pid ]; then P=$(cat {workdir}/llama-server.pid 2>/dev/null); \
+             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
+                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
+               kill -KILL -- -\"$P\" 2>/dev/null || kill -KILL \"$P\" 2>/dev/null || true; \
+             fi; fi; pkill -KILL -x llama-server 2>/dev/null || true"
         )
     };
-    let scope_check = if scoped {
+    // 停止成功后必须删掉 pid 文件。残留文件里是已退出的 PID，
+    // 一旦该 PID 被别的进程复用，后续 `kill -0` 会误判「模型还在跑」，
+    // 甚至在下一次启动前清理时误杀无关进程。
+    //
+    // 带端口时只删本端口的文件，绝不能碰同节点其它模型的 pid 文件。
+    let cleanup = if port.is_some() {
+        format!("rm -f {pid_path}")
+    } else {
+        format!("rm -f {workdir}/llama-server.pid {workdir}/llama-server-*.pid")
+    };
+    // 带端口时：pid 文件里的进程已退出，且该端口不再监听，才算真正停止。
+    // 只检查 pid 文件不够——文件缺失会被误判成「已停止」，这正是
+    // 8080 端口停止假成功的成因。因此必须叠加端口监听兜底。
+    let scope_check = if let Some(p) = port {
         format!(
-            "test ! -f {pid} || ! kill -0 $(cat {pid}) 2>/dev/null",
-            pid = pid_path
+            "(test ! -f {pid} || ! kill -0 $(cat {pid}) 2>/dev/null) && ! ({listen})",
+            pid = pid_path,
+            listen = listening_probe(p)
         )
     } else {
         "! pgrep -x llama-server >/dev/null 2>&1".to_string()
@@ -1126,12 +1202,12 @@ pub fn stop_llama_server_on_port(
         &format!(
             "{term_all}; \
              for i in $(seq 1 20); do \
-               if {scope_check}; then echo stopped; exit 0; fi; \
+               if {scope_check}; then {cleanup}; echo stopped; exit 0; fi; \
                sleep 0.5; \
              done; \
              {kill_all}; sleep 1; \
              if ! ({scope_check}); then echo still-running; exit 1; fi; \
-             echo stopped",
+             {cleanup}; echo stopped",
         ),
         60,
     )?;

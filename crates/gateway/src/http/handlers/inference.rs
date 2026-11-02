@@ -92,6 +92,18 @@ impl GatewayServer {
         self.forward_json("embeddings", &body, &target)
     }
 
+    /// 按台账重建业务转发快照（**整体替换**）。
+    ///
+    /// 部署成功、卸载、停止服务之后都必须调用：只增不减会让已停止的模型
+    /// 继续留在快照里，对话被路由到一个已经关闭的隧道端口，表现为
+    /// 「模型已卸载但对话仍报连接失败」。
+    ///
+    /// 后台探测线程翻转台账状态后也要重建（经 [`rebuild_snapshot`]），
+    /// 否则探测自愈的 `ready` 记录进不了对话路由。
+    pub(crate) fn rebuild_backend_snapshot(&self) {
+        rebuild_snapshot(&self.gateway, &self.backend_snapshot);
+    }
+
     /// 取当前后端。业务转发只读启动/刷新后的快照，不等待部署控制锁。
     pub(crate) fn backend(&self) -> MnResult<BackendTarget> {
         if let Ok(snapshot) = self.backend_snapshot.read() {
@@ -167,5 +179,48 @@ impl GatewayServer {
             }
             Err(e) => Response::error(&e),
         }
+    }
+}
+
+/// 按台账整体重建业务转发快照。
+///
+/// 与 [`GatewayServer::rebuild_backend_snapshot`] 同一逻辑的自由函数
+/// 形态：后台探测线程（`crate::runprobe`）没有 `GatewayServer` 实例，
+/// 只持有 `gateway` 与 `backend_snapshot` 两个 Arc，翻转台账状态后
+/// 通过它同步对话路由，保证探测自愈的模型立刻可对话。
+pub(crate) fn rebuild_snapshot(
+    gateway: &std::sync::Mutex<crate::gateway::Gateway>,
+    snapshot: &std::sync::RwLock<std::collections::BTreeMap<String, BackendTarget>>,
+) {
+    let Ok(gw) = gateway.lock() else {
+        return;
+    };
+    let Ok(records) = gw.list_deployments() else {
+        return;
+    };
+    let Ok(mut snapshot) = snapshot.write() else {
+        return;
+    };
+    snapshot.clear();
+    for record in records {
+        if record.status != mangosteen_base::state::DeploymentStatus::Ready {
+            continue;
+        }
+        let Some(port) = record.plan.local_access_port() else {
+            continue;
+        };
+        let model_id = mangosteen_core::model::ModelEntry::derive_id(
+            &record.plan.model.name,
+            record.plan.model.quant,
+        );
+        snapshot.insert(
+            model_id.clone(),
+            BackendTarget {
+                host: "127.0.0.1".to_string(),
+                port,
+                model_id,
+                origin_label: record.plan.origin.label(),
+            },
+        );
     }
 }
