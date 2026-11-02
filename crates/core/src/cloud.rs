@@ -174,6 +174,15 @@ pub struct NetworkEndpoint {
     /// 隧道优先用这里的值——它一定是这台机器的真实密码。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_password: Option<String>,
+    /// 厂商原生 SSH 登录指令（如优云 `ssh_login_command`），原样透传。
+    ///
+    /// ## 为什么必须保留原文
+    ///
+    /// 不同厂商、甚至同一实例重启前后，SSH 端口都可能变化
+    /// （22 / 23 / 高位映射端口）。厂商返回的登录指令是最权威的数据源；
+    /// 本地按 `user@host -p port` 拼装只做兜底，不能替代原文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_login_command: Option<String>,
 }
 
 impl NetworkEndpoint {

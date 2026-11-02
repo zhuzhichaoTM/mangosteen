@@ -298,3 +298,189 @@ impl Orchestrator {
         Ok(o.teardown(provider, instance_id))
     }
 }
+
+/// 云端实例 SSH 登录信息（厂商 API 实时查询结果）。
+///
+/// 台账里的 `node_ssh_port/node_ssh_user` 是**部署时刻的快照**：实例
+/// 停机再开机后，厂商可能重新映射 SSH 端口（22/23/高位端口都可能），
+/// 快照就过时了。「登陆方式」必须以厂商当前返回为准，本地拼装只做兜底。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct InstanceSshInfo {
+    pub deployment_id: String,
+    pub instance_id: String,
+    pub provider: String,
+    /// 实例当前状态（厂商口径，如 `running`/`stopped`）
+    pub state: String,
+    /// 登录指令：厂商原生指令优先，否则按 `user@host -p port` 组装
+    pub ssh_command: String,
+    pub host: Option<String>,
+    pub port: u16,
+    pub user: String,
+    /// 数据来源：`provider`（厂商原生）/ `assembled`（本地拼装）
+    pub source: String,
+}
+
+/// 由归一化实例组装登录信息（纯函数，便于单测）。
+fn ssh_info_from_instance(
+    deployment_id: &str,
+    provider: &str,
+    user_override: Option<&str>,
+    inst: &mangosteen_core::cloud::Instance,
+) -> InstanceSshInfo {
+    let net = &inst.network;
+    let host = net.ssh_host.clone();
+    let port = net.ssh_port.unwrap_or(22);
+    let user = user_override
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or("root")
+        .to_string();
+    let (command, source) = match net
+        .ssh_login_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(c) => (c.to_string(), "provider"),
+        None => (
+            format!("ssh -p {port} {user}@{}", host.clone().unwrap_or_default()),
+            "assembled",
+        ),
+    };
+    InstanceSshInfo {
+        deployment_id: deployment_id.to_string(),
+        instance_id: inst.id.clone(),
+        provider: provider.to_string(),
+        state: inst.state.as_str().to_string(),
+        ssh_command: command,
+        host,
+        port,
+        user,
+        source: source.to_string(),
+    }
+}
+
+impl Orchestrator {
+    /// 实时查询部署实例的 SSH 登录信息（直连厂商 API，非台账快照）。
+    ///
+    /// 结果缓存 60 秒：UI 轮询会反复调用，逐次打厂商接口既慢又可能限流；
+    /// 端口变化最迟 60 秒内反映，与「登陆方式」的实时性需求匹配。
+    pub fn instance_ssh_info(&self, deployment_id: &str) -> MnResult<Option<InstanceSshInfo>> {
+        let Some(rec) = self.state.get(deployment_id)? else {
+            return Ok(None);
+        };
+        let Some(cloud) = rec.plan.cloud.as_ref() else {
+            return Ok(None);
+        };
+        let instance_id = match &rec.plan.origin {
+            ComputeOrigin::Cloud { instance_id, .. } => instance_id.clone(),
+        };
+        if instance_id.trim().is_empty() {
+            return Ok(None);
+        }
+
+        // 命中未过期缓存直接返回，不打厂商 API。
+        // 键必须含 deployment_id：同节点多模型共享同一实例 ID，
+        // 只用 provider:instance 会让第二个部署拿到第一个的缓存。
+        let key = format!("{}:{}:{}", deployment_id, cloud.provider, instance_id);
+        if let Ok(cache) = self.ssh_info_cache.lock() {
+            if let Some((at, info)) = cache.get(&key) {
+                if at.elapsed() < std::time::Duration::from_secs(60) {
+                    return Ok(Some(info.clone()));
+                }
+            }
+        }
+
+        let o = self
+            .cloud
+            .as_ref()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
+        let driver = o.registry().get(&cloud.provider)?;
+        let inst = driver.describe(&instance_id)?;
+        let info = ssh_info_from_instance(
+            deployment_id,
+            &cloud.provider,
+            cloud.node_ssh_user.as_deref(),
+            &inst,
+        );
+        if let Ok(mut cache) = self.ssh_info_cache.lock() {
+            cache.insert(key, (std::time::Instant::now(), info.clone()));
+        }
+        Ok(Some(info))
+    }
+}
+
+#[cfg(test)]
+mod ssh_info_tests {
+    use super::*;
+
+    fn instance(cmd: Option<&str>, host: Option<&str>, port: Option<u16>) -> mangosteen_core::cloud::Instance {
+        mangosteen_core::cloud::Instance {
+            id: "i-1".into(),
+            provider: "compshare".into(),
+            state: mangosteen_core::cloud::InstanceState::Running,
+            spec: mangosteen_core::cloud::InstanceSpec {
+                gpu: mangosteen_core::cloud::GpuSpec {
+                    model: "P40".into(),
+                    count: 1,
+                    vram_bytes: 24 << 30,
+                },
+                cpu_cores: 16,
+                memory_bytes: 60 << 30,
+                disk_bytes: 50 << 30,
+                image: "img".into(),
+            },
+            network: mangosteen_core::cloud::NetworkEndpoint {
+                ssh_host: host.map(|s| s.to_string()),
+                ssh_port: port,
+                inference_host: None,
+                inference_port: None,
+                public_url: None,
+                ssh_password: None,
+                ssh_login_command: cmd.map(|s| s.to_string()),
+            },
+            created_at: 0,
+            price: None,
+            display_name: None,
+        }
+    }
+
+    #[test]
+    fn provider_command_wins_over_assembly() {
+        let info = ssh_info_from_instance(
+            "dep-1",
+            "compshare",
+            Some("root"),
+            &instance(Some("ssh root@1.2.3.4 -p 60022"), Some("1.2.3.4"), Some(23)),
+        );
+        assert_eq!(info.ssh_command, "ssh root@1.2.3.4 -p 60022");
+        assert_eq!(info.source, "provider");
+        assert_eq!(info.state, "running");
+    }
+
+    #[test]
+    fn falls_back_to_assembly_without_provider_command() {
+        let info = ssh_info_from_instance(
+            "dep-1",
+            "compshare",
+            None,
+            &instance(None, Some("1.2.3.4"), Some(60022)),
+        );
+        assert_eq!(info.ssh_command, "ssh -p 60022 root@1.2.3.4");
+        assert_eq!(info.source, "assembled");
+        assert_eq!(info.user, "root");
+    }
+
+    #[test]
+    fn blank_provider_command_is_ignored() {
+        let info = ssh_info_from_instance(
+            "dep-1",
+            "compshare",
+            Some("ubuntu"),
+            &instance(Some("   "), Some("1.2.3.4"), Some(22)),
+        );
+        assert_eq!(info.ssh_command, "ssh -p 22 ubuntu@1.2.3.4");
+        assert_eq!(info.user, "ubuntu");
+    }
+}

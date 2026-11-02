@@ -676,6 +676,10 @@ impl OllamaEngine {
         let out = std::process::Command::new("curl")
             .arg("--fail")
             .arg("--silent")
+            // 引擎服务通常在 localhost/内网，禁用环境代理避免临时代理
+            // 消亡后探测集体失败
+            .arg("--noproxy")
+            .arg("*")
             .arg("--max-time")
             .arg("5")
             .arg(format!("http://{}:{}/api/tags", self.host, self.port))

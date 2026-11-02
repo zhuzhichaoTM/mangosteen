@@ -263,6 +263,43 @@ impl GatewayServer {
             Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
         }
     }
+    /// 登陆方式：实时向云厂商 API 查询实例的 SSH 登录指令。
+    ///
+    /// 台账里的 `node_ssh_port` 是部署时刻快照，实例停机再开机后端口可能
+    /// 被厂商重新映射（22/23/高位端口都可能）；「登陆方式」必须以厂商
+    /// 当前返回为准。编排层自带 60 秒缓存，UI 轮询不会打爆厂商接口。
+    pub(crate) fn ssh_info(&self, id: &str) -> Response {
+        let gw = match self.gateway.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::text(500, "网关状态锁中毒"),
+        };
+        match gw.instance_ssh_info(id) {
+            Ok(Some(info)) => {
+                let available = info.state == "running";
+                Response::json(
+                    200,
+                    &serde_json::json!({
+                        "ok": true,
+                        "available": available,
+                        "deployment_id": info.deployment_id,
+                        "instance_id": info.instance_id,
+                        "provider": info.provider,
+                        "state": info.state,
+                        "ssh_command": info.ssh_command,
+                        "host": info.host,
+                        "port": info.port,
+                        "user": info.user,
+                        "source": info.source,
+                    }),
+                )
+            }
+            Ok(None) => Response::json(200, &serde_json::json!({"ok": true, "available": false})),
+            Err(e) => Response::json(
+                200,
+                &serde_json::json!({"ok": false, "available": false, "error": e.to_string()}),
+            ),
+        }
+    }
     pub(crate) fn stop(&self, id: &str) -> Response {
         let mut gw = match self.gateway.lock() {
             Ok(g) => g,

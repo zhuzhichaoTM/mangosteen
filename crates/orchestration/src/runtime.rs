@@ -27,6 +27,7 @@ use crate::scheduler::{Decision, Scheduler};
 
 #[path = "cloud.rs"]
 mod cloud_ops;
+pub use cloud_ops::InstanceSshInfo;
 #[path = "deploy.rs"]
 mod deploy;
 #[path = "engine.rs"]
@@ -148,6 +149,13 @@ pub struct Orchestrator {
     engine_version_cache: std::sync::Mutex<Option<(PathBuf, Result<String, String>)>>,
     /// 配置文件存储（设置页写盘用）。
     config_store: Option<ConfigStore>,
+    /// SSH 登录信息缓存：`(provider:instance_id) → (时间, 信息)`。
+    ///
+    /// UI 的「登陆方式」会随部署页轮询查询，每次都打厂商 API 既慢又可能
+    /// 触发限流。这里缓存 60 秒：端口变化（停机再开机重新映射）最迟
+    /// 60 秒内反映，与实时性需求匹配。
+    ssh_info_cache:
+        std::sync::Mutex<std::collections::BTreeMap<String, (std::time::Instant, InstanceSshInfo)>>,
 }
 
 impl Orchestrator {
@@ -230,6 +238,7 @@ impl Orchestrator {
             req_seq: std::sync::atomic::AtomicU64::new(0),
             engine_version_cache: std::sync::Mutex::new(None),
             config_store: None,
+            ssh_info_cache: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
 

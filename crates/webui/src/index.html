@@ -667,6 +667,9 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           <label>实例ID
             <span id="dp-instance-id" class="dp-inline-value dp-node-info">-</span>
           </label>
+          <label>登陆方式
+            <span id="dp-ssh-cmd" class="dp-inline-value dp-node-info">-</span>
+          </label>
           <span class="model-actions" style="margin-left:auto">
             <button class="primary sm" id="dp-deploy-btn">开始</button>
             <button class="primary sm" id="dp-remove-btn">停止</button>
@@ -1562,13 +1565,27 @@ alias: qwen3.8-27b
       // 只保留 ready/provisioning 会让停止后实例ID突然变成空，
       // 看起来像机器被删了。
       //
-      // 匹配必须优先 base 名（":" 前的模型名）精确相等，没有才退回子串：
-      // 否则 qwen3.8-27b 会子串命中 qwen3.8-27b-ud 的台账记录，
-      // 把别的模型的云实例 ID 错挂到本模型上。
+      // 匹配规则（按优先级）：
+      //   1) 运行中/部署中的记录 —— 正在服务的一定优先显示，
+      //      否则旧失败记录会把真实部署盖掉；
+      //   2) base 名（":" 前的模型名）与 UI 模型 id 精确相等的最新记录；
+      //   3) 前缀匹配（base == id 或 base 以 "id-" 开头）的最新记录。
+      // 为什么不用纯子串：qwen3.8-27b 会误命中 qwen3.8-27b-ud 的历史记录；
+      // 为什么不能只精确匹配：台账 base 名跟随 GGUF 文件名
+      // （Qwen3.8-27B-UD-*.gguf → qwen3.8-27b-ud），同一 UI 模型可能
+      // 对应多个 base 名，运行中记录必须能被找到。
       const all = (d.deployments || []).filter((x) => x.status !== "destroyed");
       const baseName = (x) => String(x.model_id || x.model || "").toLowerCase().split(":")[0];
-      let cands = all.filter((x) => baseName(x) === mdef.id);
-      if (!cands.length) cands = all.filter((x) => baseName(x).includes(mdef.id));
+      const isLive = (x) => !!x.running || x.status === "provisioning";
+      const pool = all.filter((x) => {
+        const b = baseName(x);
+        return b === mdef.id || b.startsWith(mdef.id + "-");
+      });
+      const byNew = (a, b) => (b.updated_at || 0) - (a.updated_at || 0);
+      let cands = pool.filter(isLive);
+      if (!cands.length) cands = pool.filter((x) => baseName(x) === mdef.id);
+      if (!cands.length) cands = pool;
+      cands.sort(byNew);
       cands.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
       liveMap[mdef.id] = cands[0] || null;
     });
@@ -1584,15 +1601,49 @@ alias: qwen3.8-27b
     const mdef = currentModelDef();
     const live = liveMap[mdef.id];
 
-    // ---- 实例ID：区分「未部署」与「已部署」的唯一依据 ----
+    // ---- 实例ID / 登陆方式：只在「运行中 / 部署中」时显示 ----
     //
-    // 云厂商实例显示云端容器 ID；自定义节点没有容器 ID，显示绑定的设备 ID。
-    // 首次未部署时为空。
+    // 停止（关机）或失败后节点不可登录、实例对用户而言等于不存在，
+    // 实例ID和登陆方式都必须恢复 "-"。历史 stopped/failed 记录
+    // 只供后端复用判断，不再展示，避免旧实例ID误导用户。
     const dev = $("dp-instance-id");
     const instanceId = live && live.instance_id ? String(live.instance_id) : "";
     const cloudId = live && live.cloud_instance_id ? String(live.cloud_instance_id) : "";
-    dev.textContent = instanceId || "-";
-    dev.title = cloudId || (instanceId ? "自定义节点绑定：" + instanceId : "未部署");
+    const active = !!(live && (live.running || live.status === "provisioning"));
+    dev.textContent = active && instanceId ? instanceId : "-";
+    dev.title = active
+      ? (cloudId || (instanceId ? "自定义节点绑定：" + instanceId : "部署中…"))
+      : "未部署";
+
+    // ---- 登陆方式：节点运行时实时向厂商 API 查询 ----
+    //
+    // 端口可能随停机重启被厂商重新映射（22/23/高位端口都可能），
+    // 台账快照不可靠。走 GET /api/deployments/{id}/ssh-info 实时查询，
+    // 后端带 60s 缓存；UI 侧只在「部署/状态变化或每 30s」时真正发请求。
+    const sshEl = $("dp-ssh-cmd");
+    const sshNow = Date.now();
+    const sshKey = active && live.id
+      ? live.id + "|" + live.status + "|" + Math.floor(sshNow / 30000)
+      : "";
+    if (!sshKey) {
+      sshEl.textContent = "-";
+      sshEl.title = "节点未运行，暂无登录方式";
+    } else if (window.__sshInfoKey !== sshKey) {
+      window.__sshInfoKey = sshKey;
+      sshEl.textContent = "查询中…";
+      api("/api/deployments/" + encodeURIComponent(live.id) + "/ssh-info")
+        .then((r) => {
+          const cmd = r && r.available && r.ssh_command ? r.ssh_command : "-";
+          if (window.__sshInfoKey !== sshKey) return; // 期间已切到其它部署/状态
+          sshEl.textContent = cmd;
+          sshEl.title = cmd === "-"
+            ? "节点未运行或厂商未返回登录信息"
+            : "厂商实时返回的 SSH 登录指令（" + (r.source === "provider" ? "厂商原生" : "本地组装") + "）";
+        })
+        .catch(() => {
+          if (window.__sshInfoKey === sshKey) sshEl.textContent = "-";
+        });
+    }
 
     // ---- 节点信息：区分「运行」与「停止」 ----
     //

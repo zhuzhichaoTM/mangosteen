@@ -107,6 +107,12 @@ impl GatewayServer {
             ("DELETE", p) if p.starts_with("/api/deployments/") => {
                 self.stop(&p["/api/deployments/".len()..])
             }
+            ("GET", p)
+                if p.starts_with("/api/deployments/") && p.ends_with("/ssh-info") =>
+            {
+                let id = &p["/api/deployments/".len()..p.len() - "/ssh-info".len()];
+                self.ssh_info(id)
+            }
             ("GET", p) if p.starts_with("/api/deployments/") => {
                 self.deployment(&p["/api/deployments/".len()..])
             }

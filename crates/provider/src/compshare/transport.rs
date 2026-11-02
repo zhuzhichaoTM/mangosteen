@@ -50,6 +50,11 @@ impl CurlTransport {
             "--location".into(),
             "--max-redirs".into(),
             "0".into(),
+            // 云厂商 API 直连可达，必须显式禁用环境代理：
+            // 守护进程可能从携带临时代理的会话中启动，代理随会话结束
+            // 而消亡，继承它会让所有云端调用集体失败（curl 退出码 7）。
+            "--noproxy".into(),
+            "*".into(),
             "--write-out".into(),
             "\n%{http_code}".into(),
         ];
@@ -156,6 +161,17 @@ mod tests {
             Some("application/x-www-form-urlencoded")
         );
         assert_eq!(r.body.as_deref(), Some("Action=Y"));
+    }
+
+    #[test]
+    fn build_args_disable_env_proxy() {
+        let r = HttpRequest::form_post("https://api.ucloud.cn/", "Action=Y");
+        let args = CurlTransport::default().build_args(&r);
+        let i = args
+            .iter()
+            .position(|a| a == "--noproxy")
+            .expect("curl 参数必须包含 --noproxy");
+        assert_eq!(args[i + 1], "*");
     }
 
     #[test]

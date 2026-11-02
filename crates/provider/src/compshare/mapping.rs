@@ -287,6 +287,9 @@ pub fn pick_linux_image(
 
 /// 网络端点：从 IP 与登录命令推导。
 pub fn network_endpoint(uhost: &UHost) -> NetworkEndpoint {
+    // 厂商原生登录指令原样保留：端口可能随实例重启变化（22/23/高位映射），
+    // 厂商给的 `ssh_login_command` 永远比本地拼装准确。
+    let login_cmd = uhost.ssh_login_command.trim();
     NetworkEndpoint {
         ssh_host: uhost.primary_ip().map(|s| s.to_string()),
         ssh_port: parse_ssh_port(&uhost.ssh_login_command).or(Some(22)),
@@ -295,6 +298,11 @@ pub fn network_endpoint(uhost: &UHost) -> NetworkEndpoint {
         public_url: None,
         // 优云智算不返回密码，由上层主动设置后经 TunnelSpec 传入
         ssh_password: None,
+        ssh_login_command: if login_cmd.is_empty() {
+            None
+        } else {
+            Some(login_cmd.to_string())
+        },
     }
 }
 

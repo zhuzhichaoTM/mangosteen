@@ -1788,6 +1788,7 @@ mod tests {
                     inference_host: None,
                     inference_port: None,
                     public_url: None,
+                    ssh_login_command: None,
                 },
                 created_at: 0,
                 price: Some(PriceQuote {

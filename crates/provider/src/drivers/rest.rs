@@ -595,6 +595,8 @@ impl<T: Transport> RestDriver<T> {
             // 通用 REST profile 未定义密码字段：这类服务商走密钥/agent 认证
             ssh_password: None,
             public_url: None,
+            // 通用 REST profile 没有原生登录指令字段，由 ssh_host/ssh_port 组装
+            ssh_login_command: None,
         };
 
         let price = f.price.as_ref().and_then(|k| {
