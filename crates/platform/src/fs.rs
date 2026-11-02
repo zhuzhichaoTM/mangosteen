@@ -129,6 +129,40 @@ pub fn ensure_dir(path: &Path) -> MnResult<()> {
     fs::create_dir_all(path).map_err(|e| MnError::io(format!("创建目录 {}", path.display()), &e))
 }
 
+/// 确保私密目录存在并收紧权限（Unix 0700）。
+///
+/// 用于存放厂商密钥的 `secrets/` 目录：目录本身不能让同机其它用户
+/// 列目录，否则即使文件 0600 也能被探测到文件名。
+pub fn ensure_private_dir(path: &Path) -> MnResult<()> {
+    ensure_dir(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+/// 写入私密文件（厂商密钥等）：内容落盘并收紧权限（Unix 0600）。
+///
+/// 为什么在 platform：文件权限是平台差异，按基线必须收敛到本层，
+/// 上层（gateway/orchestration）不允许出现 `cfg(unix)`。
+pub fn write_private_file(path: &Path, content: &str) -> MnResult<()> {
+    fs::write(path, content)
+        .map_err(|e| MnError::io(format!("写入 {}", path.display()), &e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| MnError::io(format!("收紧 {} 权限", path.display()), &e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// 查询目录所在分区可用空间（字节）。
 ///
 /// 下载前预检要用：模型动辄几 GiB，等写到一半发现磁盘满，比提前拒绝糟得多
@@ -266,6 +300,29 @@ mod tests {
         let p = d.join("x").join("y").join("z.toml");
         atomic_write_str(&p, "v").unwrap();
         assert!(p.is_file());
+        fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn private_file_and_dir_get_restricted_permissions() {
+        let d = tmpdir("private");
+        let dir = d.join("secrets");
+        ensure_private_dir(&dir).unwrap();
+        assert!(dir.is_dir());
+        let file = dir.join("compshare_private_key");
+        write_private_file(&file, "secret-content\n").unwrap();
+        // 内容原样落盘（不追加/不改写），由读取方 resolve 负责去空白
+        assert_eq!(fs::read_to_string(&file).unwrap(), "secret-content\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dir), 0o700, "secrets 目录必须是 0700");
+            assert_eq!(mode(&file), 0o600, "密钥文件必须是 0600");
+            // 幂等：重复写入仍保持收紧后的权限
+            write_private_file(&file, "rotated").unwrap();
+            assert_eq!(mode(&file), 0o600);
+        }
         fs::remove_dir_all(&d).ok();
     }
 

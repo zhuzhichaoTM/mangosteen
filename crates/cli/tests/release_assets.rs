@@ -30,7 +30,6 @@ fn release_assets_exist() {
         "LICENSE",
         ".gitignore",
         "docs/DESIGN.md",
-        "docs/VERSUS-OLLAMA.md",
         "config/config.example.toml",
         "config/providers/builtin.toml",
         "scripts/build-release.sh",
@@ -177,23 +176,8 @@ fn design_doc_covers_all_layers() {
     }
 }
 
-#[test]
-fn versus_doc_compares_key_dimensions() {
-    let doc = read("docs/VERSUS-OLLAMA.md");
-    for dim in [
-        "资源需求评估",
-        "云端算力调度",
-        "多云厂商统一抽象",
-        "节点选择",
-    ] {
-        assert!(doc.contains(dim), "差异化分析缺少维度 `{dim}`");
-    }
-    // 诚实地列出"不做的事"比罗列优点更重要
-    assert!(
-        doc.contains("不做"),
-        "差异化分析应明确说明 Mangosteen 不做什么"
-    );
-}
+// VERSUS-OLLAMA.md 已随产品定位调整（云端 GPU 编排客户端）移除，
+// 差异化对比不再作为发布资产守护。
 
 // ---------------------------------------------------------------- 版本一致性
 

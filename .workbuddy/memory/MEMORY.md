@@ -23,6 +23,14 @@
 - 测试不写死端口：`bind(("127.0.0.1",0))`；`TestEnv::new(tag)` 用 tag 哈希派生端口段，tag 重复会污染 state 目录
 - `TestEnv::write_gguf` 模型名固定 `qwen2.5-7b-instruct`
 
+## 云端节点复用（用户显式指定）
+- 链路：UI 选择已有节点 → payload 带 reuse_instance_id/reuse_provider → pull.rs 解析 → build_cloud_plan 传播 → provision_resources 顶部显式复用（优先于 GPU 型号自动匹配）
+- 停机实例 wait_until_running 先开机；运行中直接挂载；实例不存在报错绝不静默新建
+- CloudPlan.reuse_provider 与 reuse_instance_id 成对（实例 ID 跨厂商不唯一）
+- preview.cloud_instances = CloudInstanceBrief（含 occupied_models 来自台账活跃记录）；spec_id 前缀 `reuse:provider:instance`
+- 同机多模型远端端口：prepare_inner 的 allocate_remote_engine_port 全局分配已覆盖
+- 共享节点保护：park_failed_instance 也必须走 has_other_active_on_node；回滚停进程必须按 engine_port（stop_llama_server_on_port），隧道只 close(&spec) 不 close_all
+
 ## 引擎管理
 - EngineRegistry::with_builtin 是内置清单唯一来源；已实现 llama.cpp、Ollama
 - Ollama 三差异：常驻服务不为单次部署拉实例；固定11434且无/health(探/api/version)；用自己blob存储不认下载目录.gguf

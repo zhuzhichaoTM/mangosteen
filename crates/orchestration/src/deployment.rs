@@ -207,6 +207,10 @@ pub struct DeploymentPreview {
     pub cloud: Option<CloudPreview>,
     /// 备选节点（按打分排序，最多 5 个）
     pub cloud_candidates: Vec<CloudCandidateBrief>,
+    /// 云端**已有**实例（运行中/已停机）。GPU 节点选择弹窗把它作为
+    /// 「可复用节点」与新购规格并列展示；选中后走复用链路不新建实例。
+    #[serde(default)]
+    pub cloud_instances: Vec<CloudInstanceBrief>,
     /// 选点失败原因（无可用服务商/无满足约束的规格）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud_error: Option<String>,
@@ -220,6 +224,52 @@ pub struct DeploymentPreview {
     pub devices: Vec<DeviceBrief>,
     /// 默认选中的设备 ID（`None` 表示没有设备）。
     pub default_device_id: Option<String>,
+}
+
+/// 节点选择弹窗里的「云端已有实例」条目。
+///
+/// 供 UI 在 GPU 节点选择时展示「已经运行/使用的节点」：用户选中后请求
+/// 携带 `reuse_instance_id`，部署不再新建实例而是直接挂到这台机器上
+/// （停机先开机，运行中另起引擎端口）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CloudInstanceBrief {
+    /// 服务商驱动名
+    pub provider: String,
+    /// 厂商侧实例 ID
+    pub instance_id: String,
+    /// GPU 型号（归一化名）
+    pub gpu_model: String,
+    /// 卡数
+    pub gpu_count: u32,
+    /// 单卡显存字节
+    pub vram_bytes: u64,
+    /// 生命周期状态（running / stopped / created / ...）
+    pub state: String,
+    /// SSH 地址（`host:port`；厂商未返回时为 `None`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_target: Option<String>,
+    /// 时价（元/小时；厂商未报价时为 `None`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_hour: Option<f64>,
+    /// 该实例上当前部署的模型（台账活跃记录的完整模型 ID）
+    pub occupied_models: Vec<String>,
+    /// 厂商侧展示名/备注
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+/// 厂商「无报价」哨兵清洗。
+///
+/// compshare 的规格报价用 `f64::MAX` 表示「暂无报价」（见 provider 的
+/// `mapping::hourly_price`）。这个值 `is_finite()` 为真、大于 0，直接透传
+/// 到 UI 会被格式化成 300 多位数字的价格。排序时它自然排最后（比所有真实
+/// 报价都贵），但**展示**必须折叠为 `None`，让前端渲染「价格待厂商确认」。
+pub fn sane_hourly_price(p: f64) -> Option<f64> {
+    if !p.is_finite() || p <= 0.0 || p >= f64::MAX / 2.0 {
+        None
+    } else {
+        Some(p)
+    }
 }
 
 /// 云端方案预览（含费用）。
@@ -240,12 +290,15 @@ pub struct CloudPreview {
     /// 延迟
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u32>,
-    /// 时价（元/小时）
-    pub price_per_hour: f64,
+    /// 时价（元/小时）。`None` = 厂商未给出有效报价
+    /// （compshare 用 f64::MAX 当「无报价」哨兵，见 `sane_hourly_price`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_hour: Option<f64>,
     /// 预估时长（小时）
     pub estimate_hours: u32,
-    /// 预估总额（元）
-    pub estimate_total: f64,
+    /// 预估总额（元）。无有效报价时为 `None`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_total: Option<f64>,
     /// 该模型在云上需要的显存
     pub required_vram_bytes: u64,
 }
@@ -262,8 +315,10 @@ pub struct CloudCandidateBrief {
     pub gpu_model: String,
     /// 地域
     pub region: String,
-    /// 时价
-    pub price_per_hour: f64,
+    /// 时价。`None` = 厂商无有效报价（内部排序时哨兵值排最后，
+    /// 但展示层不能把 300 多位的天文数字当价格渲染）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_per_hour: Option<f64>,
     /// 显存
     pub vram_bytes: u64,
     /// 延迟

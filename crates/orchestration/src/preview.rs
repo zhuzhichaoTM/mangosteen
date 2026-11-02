@@ -87,6 +87,7 @@ impl Orchestrator {
 
         let cloud = best.map(|c| {
             let hours = default_estimate_hours();
+            let sane = crate::deployment::sane_hourly_price(c.price_per_hour);
             CloudPreview {
                 provider: c.provider.clone(),
                 spec_id: c.spec_id.clone(),
@@ -95,12 +96,17 @@ impl Orchestrator {
                 vram_bytes: c.vram_bytes,
                 region: c.region.clone(),
                 latency_ms: c.latency_ms,
-                price_per_hour: c.price_per_hour,
+                price_per_hour: sane,
                 estimate_hours: hours,
-                estimate_total: c.price_per_hour * hours as f64,
+                estimate_total: sane.map(|p| p * hours as f64),
                 required_vram_bytes: required_vram,
             }
         });
+
+        // 云端**已有**实例（运行中/已停机）：节点选择弹窗把它们作为
+        // 「可复用节点」与新购规格并列展示。查询失败降级为空列表，
+        // 绝不阻断整个预览——复用是可选项，创建链路不受影响。
+        let cloud_instances = self.cloud_instance_briefs();
 
         // 既没有设备也没有云候选 → 明确阻断，前端不得进入下一步
         let nothing_available = devices.is_empty() && cloud.is_none();
@@ -117,6 +123,7 @@ impl Orchestrator {
                 },
                 cloud: None,
                 cloud_candidates: tier_briefs,
+                cloud_instances,
                 cloud_error: Some(
                     "没有可用的部署节点：请在「设置 → 设备列表」添加 SSH 节点，\
                      或配置可用的云服务商凭证"
@@ -144,6 +151,7 @@ impl Orchestrator {
             },
             cloud,
             cloud_candidates: tier_briefs,
+            cloud_instances,
             cloud_error: tier_error,
             blocked: false,
             devices,

@@ -79,6 +79,21 @@ impl GatewayServer {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        // 用户在节点选择弹窗里选定的「已有节点」：有值时部署直接复用这台
+        // 云实例（停机先开机、运行中同机另起端口），不再创建新实例。
+        // provider 必须成对传回：实例 ID 跨厂商不保证唯一。
+        let reuse_instance_id = parsed
+            .get("reuse_instance_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let reuse_provider = parsed
+            .get("reuse_provider")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let auxiliary_models = parsed
             .get("auxiliary_models")
             .and_then(|v| v.as_array())
@@ -321,6 +336,8 @@ impl GatewayServer {
                     r.cloud_spec = cloud_spec.clone();
                     r.device_id = device_id.clone();
                     r.gpu_model = gpu_model.clone();
+                    r.reuse_instance_id = reuse_instance_id.clone();
+                    r.reuse_provider = reuse_provider.clone();
                     r.auxiliary_models = auxiliary_models.clone();
                     r.config_template = config_template.clone();
                     r

@@ -326,6 +326,20 @@ impl GatewayServer {
                 dreq.gpu_model = Some(gpu.to_string());
             }
         }
+        // 用户显式指定的复用实例（与 /api/models/pull 同语义：实例 ID
+        // 跨厂商不保证唯一，provider 必须成对传回）。
+        if let Some(id) = parsed.get("reuse_instance_id").and_then(|v| v.as_str()) {
+            let id = id.trim();
+            if !id.is_empty() {
+                dreq.reuse_instance_id = Some(id.to_string());
+            }
+        }
+        if let Some(p) = parsed.get("reuse_provider").and_then(|v| v.as_str()) {
+            let p = p.trim();
+            if !p.is_empty() {
+                dreq.reuse_provider = Some(p.to_string());
+            }
+        }
         // 算力来源（部署页签的「本地 / 云端」选择）。
         //
         // Mangosteen 当前为纯云端部署：模型一律部署到远端 GPU 节点

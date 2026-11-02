@@ -206,8 +206,14 @@ fn c1_cli_does_not_talk_to_vendors_directly() {
             );
         }
         // 只允许 gateway::GatewayServer 提供的 HTTP 服务，
-        // 不允许 CLI 自建 TcpListener 去请求后端（serve 命令绑定监听是合法的）
-        if path.file_name().map(|f| f == "serve.rs").unwrap_or(false) {
+        // 不允许 CLI 自建 TcpListener 去请求后端（serve 命令绑定监听是合法的）。
+        // ui.rs 的回环 /health 自检同理：它只探测自己刚拉起的 127.0.0.1
+        // 服务，不属于「自行请求后端/厂商」。
+        if path
+            .file_name()
+            .map(|f| f == "serve.rs" || f == "ui.rs")
+            .unwrap_or(false)
+        {
             continue;
         }
         assert!(
@@ -496,18 +502,19 @@ fn c4_scheduler_checks_local_before_cloud() {
         .expect("orchestration/scheduler.rs must exist");
     let code = strip_comments_and_strings(&src);
 
-    // decide() 中必须先判断本地可行性
+    // 本地部署已随产品调整移除；现役基线是「target=local 必须明确拒绝，
+    // 绝不静默上云产生计费」。因此 decide() 中的拒绝判断必须早于云端方案构造。
     let decide_pos = code.find("pub fn decide").expect("decide() must exist");
-    let local_check = code[decide_pos..]
-        .find("is_local_viable")
-        .expect("decide() 必须检查本地可行性");
-    // 云端方案构造必须出现在本地判定之后
+    let local_reject = code[decide_pos..]
+        .find("forces_local")
+        .expect("decide() 必须显式拒绝本地部署请求");
+    // 云端方案构造必须出现在本地拒绝判定之后
     let cloud_build = code[decide_pos..]
         .find("build_cloud_plan")
         .expect("decide() 必须能构造云端方案");
     assert!(
-        local_check < cloud_build,
-        "C4 违反：decide() 中本地可行性判断必须早于云端方案构造"
+        local_reject < cloud_build,
+        "C4 违反：decide() 中本地部署拒绝判定必须早于云端方案构造（绝不静默上云）"
     );
 }
 
@@ -765,12 +772,14 @@ fn c6_five_layer_architecture_is_complete() {
         "节点选择缺少决策入口（decide）"
     );
     // 模块 3.5：部署编排与运行生命周期（第三层的执行面）
+    // launch.rs 已随「本地推理交由 Ollama」的产品调整移除；
+    // 云端提交（commit_cloud）在 provision.rs，预览在 preview.rs。
     for f in [
         "crates/orchestration/src/runtime.rs",
         "crates/orchestration/src/deploy.rs",
         "crates/orchestration/src/evaluate.rs",
-        "crates/orchestration/src/launch.rs",
         "crates/orchestration/src/provision.rs",
+        "crates/orchestration/src/preview.rs",
         "crates/orchestration/src/lifecycle.rs",
         "crates/orchestration/src/query.rs",
     ] {

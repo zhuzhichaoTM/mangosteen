@@ -468,6 +468,10 @@ impl Scheduler {
             node_ssh_user: None,
             // 设备绑定由编排层在选定节点后回填（见 `provision.rs`）
             device_id: req.device_id.clone(),
+            // 用户在节点选择弹窗里显式指定的复用实例（运行中/已停机均可）。
+            // 有值时 provider 直接挂到这台机器上，不再创建新实例。
+            reuse_instance_id: req.reuse_instance_id.clone(),
+            reuse_provider: req.reuse_provider.clone(),
         })
     }
 
@@ -981,6 +985,8 @@ mod tests {
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
+            reuse_instance_id: None,
+            reuse_provider: None,
             local_port: 11500,
             engine: LocalPlan {
                 model_path: "/m".into(),

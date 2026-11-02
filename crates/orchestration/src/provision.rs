@@ -213,9 +213,17 @@ impl Orchestrator {
             provider,
             instance_id,
         } = &rec.plan.origin;
+        // 共享节点保护：用户复用的实例、或同机多模型的自建设备上，
+        // 其它模型的推理可能正在运行。此时绝不能 stop_service（会停掉
+        // 整机全部 llama-server 并关机），只能保留实例运行状态。
+        let shared_node = self.has_other_active_on_node(id, &rec);
 
         let mut note = err.to_string();
-        if vendor_managed && !provider.trim().is_empty() && !instance_id.trim().is_empty() {
+        if vendor_managed
+            && !shared_node
+            && !provider.trim().is_empty()
+            && !instance_id.trim().is_empty()
+        {
             if let Some(o) = self.cloud.as_mut() {
                 // 先停进程（可能已起来），再关机
                 let _ = o.stop_service(provider, instance_id);
@@ -225,10 +233,29 @@ impl Orchestrator {
                     note = format!("{err}；实例 {instance_id} 已停止保存，可再次部署复用");
                 }
             }
+        } else if vendor_managed && shared_node {
+            note = format!("{err}；节点上仍有其它模型的部署在运行，实例保持开机不受影响");
         }
-        let _ = self.device_tunnels.close_all();
-        if let Some(o) = self.cloud.as_mut() {
-            let _ = o.tunnels_mut().close_all();
+        // 隧道只关本次部署自己的（按 node_ip + engine_port 定位）；
+        // 拿不到节点信息时保留隧道不动，绝不 close_all 误伤其它模型。
+        if let Some(host) = cloud.node_ip.clone() {
+            let ssh = SshTarget {
+                host,
+                port: cloud.node_ssh_port.unwrap_or(22),
+                user: cloud.node_ssh_user.clone().unwrap_or_else(|| "root".into()),
+                password: None,
+                identity_file: None,
+            };
+            let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
+                &ssh,
+                cloud.engine_port,
+                false,
+            );
+            if cloud.device_id.is_some() {
+                let _ = self.device_tunnels.close(&spec);
+            } else if let Some(o) = self.cloud.as_mut() {
+                let _ = o.tunnels_mut().close(&spec);
+            }
         }
         let _ = self
             .state
@@ -774,21 +801,47 @@ impl Orchestrator {
         origin: &ComputeOrigin,
         err: &MnError,
     ) {
-        // 先停远端进程：它可能已经起来了但加载失败
-        let _ = mangosteen_device::remote::stop_llama_server(ssh, workdir);
-        let _ = self.device_tunnels.close_all();
+        // 本次部署自己的云端参数：engine_port 是「按端口停进程 / 关隧道」的依据。
+        let own = self
+            .state
+            .get(id)
+            .ok()
+            .flatten()
+            .and_then(|r| r.plan.cloud);
+
+        // 1. 只停**本次部署自己的**引擎进程。共享节点（用户复用的已有实例、
+        //    或同机多模型的自建设备）上其它模型可能正在推理，不带端口的
+        //    全量停止会误杀整台机器的 llama-server。
+        match own.as_ref().map(|c| c.engine_port) {
+            Some(port) => {
+                let _ = mangosteen_device::remote::stop_llama_server_on_port(
+                    ssh, workdir, Some(port),
+                );
+            }
+            None => {
+                let _ = mangosteen_device::remote::stop_llama_server(ssh, workdir);
+            }
+        }
+
+        // 2. 只关本次部署自己的隧道，绝不能 close_all——那会把共享节点上
+        //    其它模型的本地转发一起断掉。
+        if let Some(c) = own.as_ref() {
+            let spec =
+                mangosteen_provider::orchestrator::tunnel_spec_for(ssh, c.engine_port, false);
+            if c.device_id.is_some() {
+                let _ = self.device_tunnels.close(&spec);
+            } else if let Some(o) = self.cloud.as_mut() {
+                let _ = o.tunnels_mut().close(&spec);
+            }
+        }
 
         let ComputeOrigin::Cloud {
             provider,
             instance_id,
         } = origin;
         // 只有云厂商创建的实例才关机；用户自己的机器不能动
-        let vendor_managed = self
-            .state
-            .get(id)
-            .ok()
-            .flatten()
-            .and_then(|r| r.plan.cloud)
+        let vendor_managed = own
+            .as_ref()
             .map(|c| c.device_id.is_none())
             .unwrap_or(false);
         let shared_node = self
@@ -807,9 +860,8 @@ impl Orchestrator {
                     note = format!("{err}；实例 {instance_id} 已停止保存，可再次部署复用");
                 }
             }
-        }
-        if let Some(o) = self.cloud.as_mut() {
-            let _ = o.tunnels_mut().close_all();
+        } else if vendor_managed && shared_node {
+            note = format!("{err}；节点上仍有其它模型的部署在运行，实例保持开机不受影响");
         }
         let _ = self
             .state

@@ -113,7 +113,7 @@ impl Orchestrator {
                     spec_id: c.spec_id.clone(),
                     gpu_model: c.gpu_model.clone(),
                     region: c.region.clone(),
-                    price_per_hour: c.price_per_hour,
+                    price_per_hour: crate::deployment::sane_hourly_price(c.price_per_hour),
                     vram_bytes: c.vram_bytes,
                     latency_ms: c.latency_ms,
                     score_total: c.score_total,
@@ -125,6 +125,81 @@ impl Orchestrator {
             })
             .collect())
     }
+    /// 云端**正在运行**的实例 + 其上占用的模型清单（预览 / 节点选择用）。
+    ///
+    /// ## 为什么不把失败当错误
+    ///
+    /// 复用是可选项：某个服务商查询失败只意味着「看不到它名下的实例」，
+    /// 新购创建链路不受影响。预览是 UI 每次打开弹窗都会调的接口，
+    /// 一次厂商抖动就把整个预览打挂，等于把可选项变成了阻断项。
+    ///
+    /// ## 只返回 Running 实例
+    ///
+    /// 节点选择里只出现两类节点：可新购的空闲规格，和**已经在运行**的
+    /// 已有实例（用户「正在使用」的机器，可直接同机挂载新模型）。
+    /// 已停机（Stopped/Created）实例**不进入选择列表**——但部署时后端
+    /// 会按 GPU 型号在后台自动匹配并开机复用它们（见 provider 的
+    /// `find_reusable_instance`），用户无需关心，也不会误选一台
+    /// 需要等待开机的机器。
+    ///
+    /// `Destroyed` 同样不返回：终态机器与磁盘都没有了，展示只会误导。
+    pub fn cloud_instance_briefs(&self) -> Vec<crate::deployment::CloudInstanceBrief> {
+        use mangosteen_core::cloud::InstanceState;
+
+        let Some(o) = self.cloud.as_ref() else {
+            return Vec::new();
+        };
+        // 台账活跃记录 → (provider, instance_id) → 占用模型清单。
+        // UI 据此展示「这台机器上正在跑哪些模型」，提示复用是同机多模型。
+        let occupied = |provider: &str, instance_id: &str| -> Vec<String> {
+            self.state
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.status.is_active())
+                .filter(|r| match &r.plan.origin {
+                    ComputeOrigin::Cloud {
+                        provider: p,
+                        instance_id: i,
+                    } => p == provider && i == instance_id,
+                })
+                .map(|r| {
+                    mangosteen_core::model::ModelEntry::derive_id(
+                        &r.plan.model.name,
+                        r.plan.model.quant,
+                    )
+                })
+                .collect()
+        };
+
+        let mut out = Vec::new();
+        for (provider, result) in o.list_instances() {
+            let Ok(instances) = result else {
+                continue;
+            };
+            for inst in instances {
+                // 节点选择只展示「正在使用」的实例；停机实例由后端在
+                // 部署时按 GPU 型号后台自动开机复用，不出现在列表里。
+                if !matches!(inst.state, InstanceState::Running) {
+                    continue;
+                }
+                out.push(crate::deployment::CloudInstanceBrief {
+                    provider: provider.clone(),
+                    instance_id: inst.id.clone(),
+                    gpu_model: inst.spec.gpu.model.clone(),
+                    gpu_count: inst.spec.gpu.count,
+                    vram_bytes: inst.spec.gpu.vram_bytes,
+                    state: inst.state.as_str().to_string(),
+                    ssh_target: inst.network.ssh_target(),
+                    price_per_hour: inst.price.as_ref().map(|p| p.per_hour_cny),
+                    occupied_models: occupied(&provider, &inst.id),
+                    display_name: inst.display_name.clone(),
+                });
+            }
+        }
+        out
+    }
+
     /// 云端选点：查询规格 → 打分排序 → 返回排序结果（**不创建资源**）。
     ///
     /// 供 `mangosteen cloud pick` 使用，让用户在花钱前看清决策依据。

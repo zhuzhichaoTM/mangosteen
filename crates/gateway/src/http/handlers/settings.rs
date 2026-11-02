@@ -218,6 +218,9 @@ impl GatewayServer {
                         mangosteen_core::config::SecretRef::None => "none:无需密钥".to_string(),
                     },
                     "secret_configured": p.secret.resolve(mangosteen_platform::paths::real_env).is_ok(),
+                    // 公钥是公开标识（参与签名但不算机密），可回显；
+                    // 私钥绝不回显，只给 secret_configured 状态。
+                    "public_key": p.options.get("public_key"),
                 })
             })
             .collect();
@@ -389,13 +392,39 @@ impl GatewayServer {
             applied.push("storage.default_source".into());
         }
 
-        // ---- providers.<name>.enabled ----
+        // ---- providers.<name>.enabled / options / secret_value ----
+        //
+        // options 合并写入（驱动专属参数，如优云的 public_key/region）；
+        // secret_value 是私钥明文入口：写入 secrets 目录（0700/0600）后
+        // 把 SecretRef 指到该文件，配置文件里**绝不落明文**，也不回显。
         if let Some(ps) = patch.get("providers").and_then(|v| v.as_object()) {
             for (name, p) in ps {
+                let Some(slot) = cfg.providers.get_mut(name) else {
+                    continue;
+                };
                 if let Some(enabled) = p.get("enabled").and_then(|v| v.as_bool()) {
-                    if let Some(slot) = cfg.providers.get_mut(name) {
-                        slot.enabled = enabled;
-                        applied.push(format!("providers.{name}.enabled"));
+                    slot.enabled = enabled;
+                    applied.push(format!("providers.{name}.enabled"));
+                }
+                if let Some(opts) = p.get("options").and_then(|v| v.as_object()) {
+                    for (k, v) in opts {
+                        if let Some(s) = v.as_str() {
+                            slot.options.insert(k.clone(), s.to_string());
+                            applied.push(format!("providers.{name}.options.{k}"));
+                        }
+                    }
+                }
+                if let Some(secret) = p.get("secret_value").and_then(|v| v.as_str()) {
+                    let secret = secret.trim();
+                    if !secret.is_empty() {
+                        match write_provider_secret(name, secret) {
+                            Ok(path) => {
+                                slot.secret =
+                                    mangosteen_core::config::SecretRef::File(path);
+                                applied.push(format!("providers.{name}.secret"));
+                            }
+                            Err(e) => return Response::error(&e),
+                        }
                     }
                 }
             }
@@ -421,16 +450,50 @@ impl GatewayServer {
                 if let Ok(mut gw) = self.gateway.lock() {
                     gw.replace_config(cfg);
                 }
-                Response::json(
-                    200,
-                    &serde_json::json!({
-                        "ok": true,
-                        "path": path.display().to_string(),
-                        "applied": applied,
-                    }),
-                )
+                // 厂商密钥/参数有变更时热重建云端驱动注册表（不动隧道，
+                // 不影响活跃部署）；未生效时给出原因供 UI 提示。
+                let providers_reload = if applied.iter().any(|a| a.starts_with("providers."))
+                {
+                    match self.gateway.lock() {
+                        Ok(mut gw) => {
+                            let (hot, skipped) = gw.reload_cloud_drivers();
+                            Some(serde_json::json!({
+                                "hot_reload": hot,
+                                "skipped": skipped,
+                            }))
+                        }
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+                let mut body = serde_json::json!({
+                    "ok": true,
+                    "path": path.display().to_string(),
+                    "applied": applied,
+                });
+                if let Some(r) = providers_reload {
+                    body["providers_reload"] = r;
+                }
+                Response::json(200, &body)
             }
             Err(e) => Response::error(&e),
         }
     }
+}
+
+/// 把厂商私钥写入用户 secrets 目录（0700 目录 / 0600 文件），返回路径。
+///
+/// 为什么不写 Inline 到 config.toml：配置文件会被备份/复制/进仓库，
+/// 明文密钥一旦扩散无法收回；secrets 目录按基线独立存放（0700）。
+fn write_provider_secret(
+    provider: &str,
+    secret: &str,
+) -> mangosteen_core::MnResult<std::path::PathBuf> {
+    let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
+    let dir = mangosteen_platform::paths::config_dir(env).join("secrets");
+    mangosteen_platform::fs::ensure_private_dir(&dir)?;
+    let path = dir.join(format!("{provider}_private_key"));
+    mangosteen_platform::fs::write_private_file(&path, secret)?;
+    Ok(path)
 }

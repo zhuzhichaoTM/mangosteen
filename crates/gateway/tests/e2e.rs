@@ -918,11 +918,24 @@ fn e2e_web_ui_is_served_and_self_contained() {
     assert!(body.contains("Mangosteen"), "页面应含产品名");
     assert!(body.contains("<textarea"), "页面应有输入框");
 
-    // 自包含：不得引用任何外部资源
-    for bad in ["http://", "https://", "//cdn", "integrity="] {
+    // 自包含：不得**加载**任何外部资源。检查的是资源加载语法
+    // （script/link/img/css 引用），而不是任意 `https://` 文本——
+    // 模板 YAML 里的模型源地址是展示内容，不是外部依赖。
+    for bad in [
+        "<script src=\"http",
+        "<link href=\"http",
+        "src=\"http://",
+        "src=\"https://",
+        "href=\"http://",
+        "href=\"https://",
+        "@import url(http",
+        "url(http",
+        "//cdn",
+        "integrity=",
+    ] {
         assert!(
             !body.contains(bad),
-            "页面不得依赖外部资源（发现 `{bad}`）：内网/离线环境会白屏"
+            "页面不得加载外部资源（发现 `{bad}`）：内网/离线环境会白屏"
         );
     }
 
@@ -932,8 +945,10 @@ fn e2e_web_ui_is_served_and_self_contained() {
         "页面必须调用预估接口做费用确认"
     );
     assert!(body.contains("/v1/chat/completions"), "页面必须能对话");
+    // 云端部署的显式确认动作 = GPU 节点确认弹窗里的「确认节点」按钮
+    // （此前文案为「确认并开始计费」，UI 改版后确认语义收敛在节点选择）。
     assert!(
-        body.contains("确认并开始计费"),
+        body.contains("确认节点"),
         "云端部署必须有显式确认动作"
     );
 }

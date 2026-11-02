@@ -444,6 +444,12 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 .node-form input{min-width:0}
 .node-actions{display:flex;align-items:center;gap:10px;margin-top:14px}
 @media (max-width:680px){.node-form{grid-template-columns:1fr}.node-actions{flex-wrap:wrap}}
+/* 云平台密钥：每个平台一个子块（标题 + 输入 + 保存） */
+.pk-block{padding:14px 0 4px;border-top:1px solid var(--line, rgba(128,128,128,.2))}
+.pk-block:first-child{border-top:none;padding-top:2px}
+.pk-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.pk-title b{font-size:13px}
+.pk-block .node-form.single{grid-template-columns:1fr}
 
 .ov{
   position:fixed;inset:0;background:rgba(10,10,12,.48);backdrop-filter:blur(2px);
@@ -647,8 +653,8 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           </label>
           <span class="model-actions" style="margin-left:auto">
             <button class="primary sm" id="dp-deploy-btn">部署</button>
-            <button class="sm" id="dp-remove-btn">卸载</button>
-            <button class="sm" id="dp-detail-btn">详情</button>
+            <button class="primary sm" id="dp-remove-btn">卸载</button>
+            <button class="primary sm" id="dp-detail-btn">详情</button>
           </span>
         </div>
       </div>
@@ -681,6 +687,12 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
             <button class="primary" id="se-dev-add">添加节点</button>
             <span class="hint" id="se-msg"></span>
           </div>
+        </div>
+
+        <div class="card node-card">
+          <h3>云平台密钥</h3>
+          <div class="hint">为已启用的云平台更新访问密钥。每个平台两个参数：<b>AccessKey ID</b> 是平台公钥标识（保存后回显），<b>AccessKey Secret</b> 是平台私钥（只写入本地 secrets 目录、绝不回显，留空表示不修改）。新密钥由您到对应云平台申请获取；保存后立即生效，无需重启。后续接入新云平台后，这里会自动出现对应配置项。</div>
+          <div id="se-provider-keys" style="margin-top:14px"><div class="empty">加载中…</div></div>
         </div>
       </div>
     </div>
@@ -1580,14 +1592,11 @@ alias: qwen3.8-27b
     deploy.textContent = "部署";
     deploy.disabled = deploying;
 
-    // ---- 卸载：已部署即可点（绿色主操作）----
+    // ---- 卸载：恒定高亮、恒定可点 ----
     //
-    // 卸载只停实例不删机器，所以「已停止」时无需再点——但保留可点是为了
-    // 让用户能对「停止但进程仍在」的异常状态再执行一次停机。
-    const remove = $("dp-remove-btn");
-    const deployed = !!live && !!instanceId;
-    remove.disabled = !deployed;
-    remove.classList.toggle("primary", deployed);
+    // 未部署时点击给出 toast 提示（见 unload()），不做禁用——
+    // 用户明确要求「部署/卸载默认都高亮、都可操作」。
+    $("dp-remove-btn").disabled = false;
   }
 
   /// 在上方部署内容文本区域中显示模板详情（纯文本 YAML）。
@@ -1612,6 +1621,10 @@ alias: qwen3.8-27b
   /// 的规格/资源筛选，必须允许用户继续选择，否则 UI 会把所有合法候选
   /// 错误显示成「实时接口未返回空闲可部署节点」。
   function availability(x) {
+    // 云端已有节点：仅运行中实例会出现在列表里（可直接同机挂载）。
+    // 已停机实例不进选择——部署时后端按 GPU 型号后台自动开机复用。
+    if (x.reuse) return { ok: true, warn: true, reason: "运行中 · 复用该节点，不再新建实例" };
+    // 库存为 0 的规格已在候选构造时过滤；这里兜底标注，正常不会走到。
     if (x.stock === 0) return { ok: false, reason: "库存不足：厂商实时库存为 0" };
     if (x.reference) return { ok: true, warn: true, reason: "参考节点：未提供实时库存，创建时由服务商再次确认" };
     if (x.stock == null) return { ok: true, warn: true, reason: "库存未知：厂商未提供库存字段，创建时由服务商再次确认" };
@@ -1630,7 +1643,6 @@ alias: qwen3.8-27b
     //
     // 不能在进入 GPU 选择前按旧实例直接复用：用户可能选择了不同型号。
     // 统一先展示当前可用规格，确认后把 gpu_model 传给后端，后端再按型号匹配。
-    const existing = liveMap[mdef.id];
     const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, target:"cloud", config_template:template})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
     renderChain(1, "模型评估完成，请选择 GPU 节点后继续");
     const saved = (pv.devices || []).map(d => ({
@@ -1639,7 +1651,32 @@ alias: qwen3.8-27b
       cpu_cores: 0, stock: 1, host: d.host, port: d.port, user: d.user,
       label: d.host + ":" + d.port + " · " + d.user
     }));
-    const candidates = saved.concat((pv.cloud_candidates || []).filter(x => x.stock == null || x.stock > 0));
+    // 云端已有实例（仅运行中）：GPU 节点选择中作为「可复用节点」展示。
+    // spec_id 用 "reuse:provider:instance" 防止与厂商规格 ID / 设备 ID 冲突；
+    // 确认后请求携带 reuse_instance_id / reuse_provider，部署不再新建实例。
+    // 已停机实例由后端按 GPU 型号在后台自动开机复用，不进选择列表。
+    const existing = (pv.cloud_instances || []).map(inst => ({
+      reuse: true,
+      provider: inst.provider,
+      instance_id: inst.instance_id,
+      spec_id: "reuse:" + inst.provider + ":" + inst.instance_id,
+      gpu_model: inst.gpu_model || "GPU",
+      gpu_count: inst.gpu_count || 1,
+      vram_bytes: inst.vram_bytes || 0,
+      cpu_cores: 0, memory_bytes: 0, disk_bytes: 0,
+      region: inst.ssh_target || "云端已有节点",
+      price_per_hour: inst.price_per_hour || 0,
+      stock: 1,
+      state: inst.state || "",
+      occupied_models: inst.occupied_models || [],
+      display_name: inst.display_name || ""
+    }));
+    // 候选 = 自定义节点 + 运行中已有节点 + 有库存的新购规格。
+    // 库存为 0 的规格不展示（用户要求：只显示有库存的 GPU 类型）。
+    const candidates = saved.concat(
+      existing,
+      (pv.cloud_candidates || []).filter(x => x.stock == null || x.stock > 0)
+    );
     if (!candidates.length && pv.cloud) candidates.push(pv.cloud);
     const chosen = await chooseGpu(candidates);
     if (!chosen) { renderChain(1, "已取消：未确认 GPU 节点", true); return; }
@@ -1647,6 +1684,14 @@ alias: qwen3.8-27b
     const source = mdef.source;
     const payload = {model:source, model_id:mdef.id, deploy:true, target:"cloud", config_template:template};
     if (chosen.startsWith("dev-")) payload.device_id = chosen;
+    else if (selectedCandidate.reuse) {
+      // 用户明确挑了已有节点：传复用实例 ID + 服务商，后端严格按
+      // (provider, instance_id) 挂载这台机器，绝不另开新的计费实例。
+      // 同机多模型的远端端口由后端按台账占用情况分配。
+      payload.reuse_instance_id = selectedCandidate.instance_id;
+      payload.reuse_provider = selectedCandidate.provider;
+      payload.gpu_model = selectedCandidate.gpu_model;
+    }
     else {
       payload.cloud_spec = chosen;
       // 关键：选择完成后才把 GPU 型号传给后端。
@@ -1654,7 +1699,9 @@ alias: qwen3.8-27b
       // 不匹配则按当前选择创建新实例。
       payload.gpu_model = selectedCandidate.gpu_model || chosen;
     }
-    renderChain(1, "已选择 " + chosen + "，正在提交节点创建任务");
+    renderChain(1, (selectedCandidate.reuse
+      ? "已选择复用节点 " + selectedCandidate.instance_id
+      : "已选择 " + chosen) + "，正在提交部署任务");
     const r = await api("/api/models/pull", {
       method:"POST", timeoutMs:30000,
       body:JSON.stringify(payload)
@@ -1669,13 +1716,21 @@ alias: qwen3.8-27b
     const usable = cands.filter(x => availability(x).ok);
     return new Promise(resolve => {
       const box = el("div", "gpu-confirm");
-      box.innerHTML = '<h3>确认 GPU 节点</h3><div class="hint">仅列出空闲、可部署的节点；不可部署节点会标注具体原因。</div>';
+      box.innerHTML = '<h3>确认 GPU 节点</h3><div class="hint">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>';
       const list = el("div", "gpu-pick"); let selected = null;
       cands.forEach((x, i) => {
         const av = availability(x);
         const item = el("div", "gpu-item" + (av.ok ? "" : " off")); const id = x.spec_id || x.gpu_model || ("candidate-" + i); item.dataset.spec = id;
-        item.innerHTML = '<div class="gi-main"><b>' + esc(x.gpu_model || "GPU") + ' × ' + (x.gpu_count || 1) + '</b><span class="gi-sub">' + esc(x.provider || "云厂商") + ' · ' + esc(x.region || "未知") + ' · ' + esc(id) + '</span></div><div class="gi-meta"><span>显存 ' + gib(x.vram_bytes || 0) + '</span><span>CPU ' + (x.cpu_cores || "—") + ' 核</span><span>内存 ' + gib(x.memory_bytes || 0) + '</span><span>磁盘 ' + gib(x.disk_bytes || 0) + '</span><span>' + (x.reference ? "参考（价格待报价）" : cny(x.price_per_hour || 0) + "/h") + '</span></div>' +
-          (av.ok ? (av.warn ? '<div class="gi-reason warn">' + esc(av.reason) + '</div>' : "") : '<div class="gi-reason">' + esc(av.reason) + '</div>');
+        const occupied = (x.occupied_models && x.occupied_models.length)
+          ? " · 已部署：" + x.occupied_models.join("、")
+          : " · 未部署模型";
+        const priceTag = x.reuse ? "复用 · 不新建实例"
+          : (x.price_per_hour == null ? "价格待厂商确认"
+            : (x.reference ? "参考（价格待报价）" : cny(x.price_per_hour) + "/h"));
+        item.innerHTML = '<div class="gi-main"><b>' + esc(x.gpu_model || "GPU") + ' × ' + (x.gpu_count || 1) + '</b><span class="gi-sub">' + esc(x.provider || "云厂商") + ' · ' + esc(x.region || "未知") + ' · ' + esc(x.reuse ? (x.instance_id || id) : id) + '</span></div><div class="gi-meta"><span>显存 ' + gib(x.vram_bytes || 0) + '</span><span>CPU ' + (x.cpu_cores || "—") + ' 核</span><span>内存 ' + gib(x.memory_bytes || 0) + '</span><span>磁盘 ' + gib(x.disk_bytes || 0) + '</span><span>' + priceTag + '</span></div>' +
+          (x.reuse
+            ? '<div class="gi-reason warn">' + esc("运行中 · 复用该节点，不再新建实例" + occupied) + '</div>'
+            : (av.ok ? (av.warn ? '<div class="gi-reason warn">' + esc(av.reason) + '</div>' : "") : '<div class="gi-reason">' + esc(av.reason) + '</div>'));
         if (av.ok) {
           item.onclick = () => { selected = id; list.querySelectorAll(".gpu-item").forEach(n => n.classList.toggle("on", n === item)); };
         } else {
@@ -1813,7 +1868,64 @@ Tabs.register("setting", (() => {
   let mounted = false;
 
   async function load() {
-    await loadDevices();
+    await Promise.all([loadDevices(), loadProviderKeys()]);
+  }
+
+  // 云平台密钥：按已启用的云平台动态渲染，天然支持后续接入新平台。
+  // 每个平台固定两个参数：
+  //   AccessKey ID  → 平台公钥（如优云 PublicKey），保存后回显；
+  //   AccessKey Secret → 平台私钥（如优云 PrivateKey），只写本地 secrets 目录，绝不回显。
+  // 平台是否用公钥由后端 settings 返回（public_key 字段是否存在）决定，
+  // UI 不写死任何平台的密钥模型——只用 AccessKey ID/Secret 两个通用参数名。
+  async function loadProviderKeys() {
+    const box = $("se-provider-keys");
+    try {
+      const s = await api("/api/settings");
+      const ps = (s.providers || []).filter((p) => p.enabled);
+      if (!ps.length) { box.innerHTML = '<div class="empty">暂无已启用的云平台（可在 config.toml 中启用）</div>'; return; }
+      box.innerHTML = "";
+      ps.forEach((p) => {
+        const sec = el("div", "pk-block");
+        const hasPk = typeof p.public_key === "string";
+        const st = p.secret_configured ? "密钥已配置" : "未配置密钥";
+        sec.innerHTML =
+          '<div class="pk-title"><b>' + esc(p.display_name || p.name) + '</b>' +
+          '<span class="gi-sub">' + esc(p.name) + ' · ' + st + '</span></div>' +
+          '<div class="node-form' + (hasPk ? "" : " single") + '">' +
+          (hasPk
+            ? '<input class="pk-id" placeholder="AccessKey ID（平台公钥标识）" value="' + esc(p.public_key) + '">'
+            : "") +
+          '<input class="pk-secret" type="password" placeholder="AccessKey Secret（平台私钥，留空表示不修改）">' +
+          '</div>' +
+          '<div class="node-actions"><button class="primary sm pk-save">保存密钥</button><span class="hint pk-msg"></span></div>';
+        sec.querySelector(".pk-save").onclick = () => saveProviderKeys(p.name, sec);
+        box.appendChild(sec);
+      });
+    } catch (e) { box.innerHTML = '<div class="empty">云平台密钥读取失败：' + esc(e.message) + '</div>'; }
+  }
+
+  // 保存某个平台的密钥。公钥仅在输入非空时提交（避免误清空）；
+  // 私钥仅在有输入时提交；两者都空则提示。
+  async function saveProviderKeys(name, sec) {
+    const msg = sec.querySelector(".pk-msg");
+    const idInput = sec.querySelector(".pk-id");
+    const secretInput = sec.querySelector(".pk-secret");
+    const pubKey = idInput ? idInput.value.trim() : "";
+    const secret = secretInput.value.trim();
+    if (!pubKey && !secret) { msg.textContent = "请填写要更新的密钥内容"; return; }
+    const platform = {};
+    if (idInput && pubKey) platform.options = { public_key: pubKey };
+    if (secret) platform.secret_value = secret;
+    try {
+      const r = await api("/api/settings", { method: "PUT", body: JSON.stringify({ providers: { [name]: platform } }) });
+      secretInput.value = "";
+      const reload = r.providers_reload || {};
+      let text = reload.hot_reload ? "密钥已保存并立即生效" : "密钥已保存（重启后完全生效）";
+      if (reload.skipped && reload.skipped.length) text += "；跳过：" + reload.skipped.map(x => x[0] + "（" + x[1] + "）").join("、");
+      msg.textContent = text;
+      toast(text, "ok");
+      await loadProviderKeys();
+    } catch (e) { msg.textContent = ""; toast("密钥保存失败：" + e.message, "err"); }
   }
 
   async function loadDevices() {

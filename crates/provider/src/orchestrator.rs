@@ -173,6 +173,14 @@ impl CloudOrchestrator {
         &self.registry
     }
 
+    /// 用新的驱动注册表替换当前注册表（设置页热更新厂商密钥后调用）。
+    ///
+    /// 驱动无状态（每次调用独立发 curl），替换不影响活跃部署；
+    /// 隧道管理器与节点选择器保持原样。
+    pub fn replace_registry(&mut self, registry: DriverRegistry) {
+        self.registry = registry;
+    }
+
     /// 隧道管理器引用。
     pub fn tunnels(&self) -> &TunnelManager {
         &self.tunnels
@@ -763,6 +771,37 @@ impl CloudOrchestrator {
         self.wait_until_running(driver, &mut instance, Some(plan.engine_port))
     }
 
+    /// 按 `(provider, instance_id)` 精确查找用户指定复用的实例。
+    ///
+    /// `provider` 为空时跨全部驱动查找兜底（实例 ID 跨厂商不保证唯一，
+    /// UI 必须成对传回；这里的遍历只为兼容旧调用方）。
+    /// 实例不存在（已销毁）时返回明确错误——不能静默改走创建流程，
+    /// 否则用户以为在复用旧机器，实际又开了一台新的计费实例。
+    fn find_instance_by_id(
+        &self,
+        provider: Option<&str>,
+        instance_id: &str,
+    ) -> MnResult<(String, Instance)> {
+        if let Some(name) = provider.map(str::trim).filter(|s| !s.is_empty()) {
+            let d = self.registry.get(name)?;
+            return d.describe(instance_id).map(|inst| (name.to_string(), inst)).map_err(|e| {
+                MnError::bad_request(format!(
+                    "要复用的云实例 {instance_id} 不可用（{name}）：{e}。\
+                     实例可能已被销毁，请重新选择 GPU 节点"
+                ))
+            });
+        }
+        for (name, result) in self.list_instances() {
+            let Ok(list) = result else { continue };
+            if let Some(inst) = list.into_iter().find(|i| i.id == instance_id) {
+                return Ok((name, inst));
+            }
+        }
+        Err(MnError::bad_request(format!(
+            "未找到要复用的云实例 {instance_id}：实例可能已被销毁，请重新选择 GPU 节点"
+        )))
+    }
+
     /// 查询可复用的同 GPU 型号实例（跨服务商）。
     ///
     /// 只接受能够继续进入 Running 的实例状态：Created、Stopped、Starting
@@ -1073,6 +1112,40 @@ impl CloudOrchestrator {
         // 先查询云端现有实例。这里是当前部署编排实际使用的入口（区别于
         // 旧的 provision_with_progress），因此复用逻辑必须在这里执行；否则
         // UI 选择 P40 后仍会直接走 pick/create，重复创建 uhost 实例。
+        //
+        // 用户显式指定了复用实例（节点选择弹窗里挑的「已有节点」）时，
+        // 严格按 (provider, id) 复用，优先级高于 GPU 型号自动匹配：
+        // 用户明确挑了机器，就不该再开一台新的计费实例。停机实例先开机，
+        // 运行中实例直接挂载——同机多模型由编排层分配互不冲突的引擎端口。
+        if let Some(want_id) = plan
+            .reuse_instance_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let (provider, mut instance) =
+                self.find_instance_by_id(plan.reuse_provider.as_deref(), want_id)?;
+            eprintln!(
+                "[cloud] ✓ 复用用户指定实例 {provider} · {}（状态 {}）",
+                instance.id, instance.state
+            );
+            let driver = self.registry.get(&provider)?;
+            if !instance.state.is_serving() {
+                self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
+            }
+            let ssh = vendor_password_target(&instance, &self.config)?;
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
+            let local_port = self
+                .tunnels
+                .establish(&spec, self.config.tunnel_timeout)?
+                .local_port;
+            return Ok(ProvisionedResources {
+                instance: Some(instance),
+                ssh,
+                workdir: self.config.remote_workdir.trim_end_matches('/').to_string(),
+                local_port,
+            });
+        }
         let requested_gpu_owned = plan
             .requested_gpu_model
             .as_deref()
@@ -1660,6 +1733,10 @@ mod tests {
         with_ssh: bool,
         /// 规格列表
         specs: Vec<AvailableSpec>,
+        /// describe 是否失败（模拟实例已销毁/查不到）
+        fail_describe: bool,
+        /// list 返回的既有实例（模拟厂商名下已有的机器）
+        listed: Vec<Instance>,
     }
 
     impl FakeDriver {
@@ -1675,6 +1752,8 @@ mod tests {
                 fail_destroy: false,
                 with_ssh: true,
                 specs: vec![spec_entry(name, 24, 2.0)],
+                fail_describe: false,
+                listed: Vec::new(),
             }
         }
 
@@ -1818,6 +1897,13 @@ mod tests {
         }
         fn describe(&self, id: &str) -> MnResult<Instance> {
             self.record(&format!("describe:{id}"));
+            if self.fail_describe {
+                return Err(MnError::Provider {
+                    provider: self.name.into(),
+                    code: "not_found".into(),
+                    message: format!("实例 {id} 不存在"),
+                });
+            }
             let mut s = self.state_script.lock().unwrap();
             let state = if s.is_empty() {
                 InstanceState::Running
@@ -1827,7 +1913,7 @@ mod tests {
             Ok(self.make_instance(id, state))
         }
         fn list(&self) -> MnResult<Vec<Instance>> {
-            Ok(vec![])
+            Ok(self.listed.clone())
         }
     }
 
@@ -1900,6 +1986,8 @@ mod tests {
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
+            reuse_instance_id: None,
+            reuse_provider: None,
             provider: "fake".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -2112,6 +2200,112 @@ mod tests {
             !c.iter().any(|s| s.starts_with("destroy")),
             "回滚不得删除实例，实际调用：{c:?}"
         );
+    }
+
+    /// 显式复用已停机实例：必须先开机，且**绝不** create 新实例。
+    ///
+    /// 隧道/密码步骤在测试环境无法走通，但实例查找与开机都发生在它们
+    /// 之前，用调用记录断言即可覆盖复用语义。
+    #[test]
+    fn provision_resources_reuses_stopped_instance_without_create() {
+        let d = FakeDriver::new(
+            "alpha",
+            vec![InstanceState::Stopped, InstanceState::Starting, InstanceState::Running],
+        );
+        let calls = d.calls.clone();
+        let mut o = orchestrator(vec![Box::new(d)]);
+        let mut p = plan();
+        p.reuse_instance_id = Some("reuse-1".into());
+        p.reuse_provider = Some("alpha".into());
+        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None);
+        let c = calls.lock().unwrap().clone();
+        assert!(c.iter().any(|s| s == "describe:reuse-1"), "{c:?}");
+        assert!(
+            c.iter().any(|s| s == "start:reuse-1"),
+            "停机实例必须先开机再挂载：{c:?}"
+        );
+        assert!(
+            !c.iter().any(|s| s.starts_with("create")),
+            "显式复用绝不新建实例：{c:?}"
+        );
+    }
+
+    /// 运行中的实例直接挂载：不得重启（start），也不得新建。
+    #[test]
+    fn provision_resources_reuse_keeps_running_instance_without_restart() {
+        let d = FakeDriver::new("alpha", vec![InstanceState::Running]);
+        let calls = d.calls.clone();
+        let mut o = orchestrator(vec![Box::new(d)]);
+        let mut p = plan();
+        p.reuse_instance_id = Some("reuse-1".into());
+        p.reuse_provider = Some("alpha".into());
+        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None);
+        let c = calls.lock().unwrap().clone();
+        assert!(c.iter().any(|s| s == "describe:reuse-1"), "{c:?}");
+        assert!(
+            !c.iter().any(|s| s.starts_with("start")),
+            "运行中实例不得重启：{c:?}"
+        );
+        assert!(!c.iter().any(|s| s.starts_with("create")), "{c:?}");
+    }
+
+    /// 用户显式挑选的实例优先于 GPU 型号自动匹配：即使型号匹配能命中
+    /// 另一台机器，也必须按用户挑选的实例走。
+    #[test]
+    fn provision_resources_explicit_reuse_beats_gpu_auto_match() {
+        let mut d = FakeDriver::new("alpha", vec![InstanceState::Running]);
+        d.listed = vec![d.make_instance("shared-1", InstanceState::Running)];
+        let calls = d.calls.clone();
+        let mut o = orchestrator(vec![Box::new(d)]);
+        let mut p = plan();
+        p.requested_gpu_model = Some("RTX 4090".into()); // 自动匹配本可命中 shared-1
+        p.reuse_instance_id = Some("chosen-1".into());
+        p.reuse_provider = Some("alpha".into());
+        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None);
+        let c = calls.lock().unwrap().clone();
+        assert!(
+            c.iter().any(|s| s == "describe:chosen-1"),
+            "显式复用必须按用户挑选的实例走：{c:?}"
+        );
+        assert!(!c.iter().any(|s| s.starts_with("create")), "{c:?}");
+    }
+
+    /// 指定实例不存在（已销毁）时明确报错，**不得**静默改走创建流程——
+    /// 否则用户以为在复用旧机器，实际又开了一台新的计费实例。
+    #[test]
+    fn provision_resources_missing_reuse_instance_fails_without_create() {
+        let mut d = FakeDriver::new("alpha", vec![]);
+        d.fail_describe = true;
+        let calls = d.calls.clone();
+        let mut o = orchestrator(vec![Box::new(d)]);
+        let mut p = plan();
+        p.reuse_instance_id = Some("ghost-1".into());
+        p.reuse_provider = Some("alpha".into());
+        let e = o
+            .provision_resources(&SelectionConstraints::default(), &p, None)
+            .unwrap_err();
+        let msg = e.to_string();
+        assert!(
+            msg.contains("实例可能已被销毁") || msg.contains("未找到要复用的云实例"),
+            "{msg}"
+        );
+        let c = calls.lock().unwrap().clone();
+        assert!(
+            !c.iter().any(|s| s.starts_with("create")),
+            "实例不存在时也不得静默新建：{c:?}"
+        );
+    }
+
+    /// 未指明服务商时按实例 ID 跨厂商兜底查找；找不到时报错。
+    #[test]
+    fn find_instance_by_id_falls_back_to_cross_provider_list() {
+        let mut d = FakeDriver::new("alpha", vec![]);
+        d.listed = vec![d.make_instance("x-1", InstanceState::Running)];
+        let o = orchestrator(vec![Box::new(d)]);
+        let (provider, inst) = o.find_instance_by_id(None, "x-1").unwrap();
+        assert_eq!(provider, "alpha");
+        assert_eq!(inst.id, "x-1");
+        assert!(o.find_instance_by_id(None, "missing").is_err());
     }
 
     #[test]

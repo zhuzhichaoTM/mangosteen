@@ -449,6 +449,8 @@ mod tests {
                 node_ssh_port: None,
                 node_ssh_user: None,
                 device_id: None,
+                reuse_instance_id: None,
+                reuse_provider: None,
             }),
             assessment,
             created_at: 1_700_000_000,

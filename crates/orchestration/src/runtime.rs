@@ -293,6 +293,29 @@ impl Orchestrator {
             .set_port_range(cfg.local.port_range_start, cfg.local.port_range_end);
         self.config = cfg;
     }
+
+    /// 用当前配置重建云端驱动注册表（设置页更新厂商密钥/参数后调用）。
+    ///
+    /// 只换驱动：驱动无状态、按调用独立发请求，替换不影响活跃部署与
+    /// 隧道。返回 `(是否已生效, 跳过的服务商及原因)`：
+    ///
+    /// * 重建结果为空（如唯一服务商的密钥被清空）→ **保留旧注册表**，
+    ///   避免活跃部署的生命周期操作因注册表突然变空而失效；
+    /// * 本进程启动时没有云能力（`cloud == None`）→ 无法热建，需重启。
+    pub fn reload_cloud_drivers(&mut self) -> (bool, Vec<(String, String)>) {
+        let build = mangosteen_provider::build_registry(&self.config);
+        if build.registry.is_empty() {
+            return (false, build.skipped);
+        }
+        match self.cloud.as_mut() {
+            Some(o) => {
+                o.replace_registry(build.registry);
+                (true, build.skipped)
+            }
+            // 启动时无云能力（无云端 TunnelManager 等），无法安全热建
+            None => (false, build.skipped),
+        }
+    }
 }
 
 /// 把 `SchedulerConfig` 转成调度器可用的形式（便于 CLI 覆盖）。

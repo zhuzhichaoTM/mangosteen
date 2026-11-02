@@ -265,6 +265,11 @@ pub struct CloudPlan {
     /// 的 llama-server（同机多模型）。为空则按 GPU 型号自动匹配或新建。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reuse_instance_id: Option<String>,
+    /// [`Self::reuse_instance_id`] 所属的服务商驱动名。
+    ///
+    /// 实例 ID 跨厂商不保证唯一，复用必须 `(provider, instance_id)` 成对。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reuse_provider: Option<String>,
 }
 
 // 云端运行参数由引擎插件生成；CloudPlan 只保留节点配置数据。
@@ -401,6 +406,8 @@ mod tests {
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
+            reuse_instance_id: None,
+            reuse_provider: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -450,6 +457,8 @@ mod tests {
             node_ssh_port: None,
             node_ssh_user: None,
             device_id: None,
+            reuse_instance_id: None,
+            reuse_provider: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -509,6 +518,10 @@ mod tests {
                 node_ssh_port: None,
                 node_ssh_user: None,
                 device_id: None,
+                // 复用字段必须参与序列化往返：UI 传给后端后要落台账，
+                // 丢失会导致「选了复用节点却新建实例」。
+                reuse_instance_id: Some("i-keep".into()),
+                reuse_provider: Some("autodl".into()),
                 provider: "autodl".into(),
                 gpu_model: "RTX 4090".into(),
                 gpu_count: 1,
