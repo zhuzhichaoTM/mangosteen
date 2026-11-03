@@ -536,6 +536,15 @@ impl SshTarget {
             "LogLevel=ERROR".to_string(),
             "-o".to_string(),
             "ConnectTimeout=15".to_string(),
+            // 应用层保活：长命令（apt-get、解压、启动等待循环）可能几十秒
+            // 没有任何输出，中间 NAT/网关会把静默连接掐掉。SSP 每 15 秒发
+            // 一次心跳，连续 4 次无响应才判定断连——既保活又能及时发现真断。
+            "-o".to_string(),
+            "ServerAliveInterval=15".to_string(),
+            "-o".to_string(),
+            "ServerAliveCountMax=4".to_string(),
+            "-o".to_string(),
+            "TCPKeepAlive=yes".to_string(),
             "-p".to_string(),
             self.port.to_string(),
         ];
@@ -724,8 +733,79 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
 /// 在远端执行一条命令，返回 stdout。
 ///
 /// 命令用 `sh -c` 包一层，避免引号/管道在本地被解释成别的东西。
+///
+/// ## 为什么内置重试
+///
+/// 每条命令都是**全新的 SSH 连接**。厂商 SSH 网关对连接频率与时长有阈值
+/// （下载轮询期间每 2 秒一条连接，持续几十分钟），会随机掐断部分连接：
+/// 客户端表现为退出码 255、stderr 为空。这类「连接层中断」与密码错误、
+/// 命令失败不同，重发一次通常就成功——不重试会把瞬时抖动放大成部署失败。
+///
+/// 只重试「255 且无真实 stderr」的中断；认证失败（stderr 有
+/// Permission denied）与远端命令非零退出（业务失败）都立即报错，
+/// 绝不掩盖真实问题。
 pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<String> {
-    let askpass = target.write_askpass()?;
+    // 超时参数当前由 `ConnectTimeout` 与各调用方的轮询/预算逻辑共同约束，
+    // 保留在签名里是为了让调用方表达意图；此处显式消费避免未用告警。
+    let _ = timeout_secs;
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last: Option<SshFailure> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match ssh_exec_once(target, cmd) {
+            Ok(out) => return Ok(out),
+            Err(f) => {
+                let transient = matches!(f, SshFailure::Transient(_));
+                last = Some(f);
+                if !transient || attempt == MAX_ATTEMPTS {
+                    break;
+                }
+                // 500ms / 1500ms 退避：给网关喘息，也避免密集重试加剧限流
+                let wait = std::time::Duration::from_millis(500 * attempt as u64 * 3);
+                eprintln!(
+                    "[ssh] 连接层中断（第 {attempt}/{MAX_ATTEMPTS} 次），{}ms 后重试：{}",
+                    wait.as_millis(),
+                    match &last {
+                        Some(SshFailure::Transient(r)) => r.as_str(),
+                        _ => "",
+                    }
+                );
+                std::thread::sleep(wait);
+            }
+        }
+    }
+    Err(match last {
+        Some(SshFailure::Transient(reason)) => MnError::Network {
+            stage: "远端执行命令".to_string(),
+            reason: format!(
+                "{reason}。已自动重试 {MAX_ATTEMPTS} 次仍中断，节点可能已失联（实例被回收/重启，\
+                 或厂商网关持续限流），请到部署页确认节点状态后重试"
+            ),
+        },
+        Some(SshFailure::Fatal(reason)) => MnError::Network {
+            stage: "远端执行命令".to_string(),
+            reason,
+        },
+        None => MnError::Network {
+            stage: "远端执行命令".to_string(),
+            reason: "未知失败".to_string(),
+        },
+    })
+}
+
+/// [`ssh_exec`] 的失败分类：决定能否安全重试。
+enum SshFailure {
+    /// 连接层中断（退出码 255 且无真实 stderr）。每条命令都是新连接，
+    /// 重发不影响远端状态。
+    Transient(String),
+    /// 认证失败、远端命令非零退出等真实失败。重试无意义甚至有害。
+    Fatal(String),
+}
+
+/// 执行一次（无重试）。
+fn ssh_exec_once(target: &SshTarget, cmd: &str) -> Result<String, SshFailure> {
+    let askpass = target
+        .write_askpass()
+        .map_err(|e| SshFailure::Fatal(e.to_string()))?;
     let mut args = target.base_opts();
     args.push(format!("{}@{}", target.user, target.host));
     args.push(cmd.to_string());
@@ -741,9 +821,8 @@ pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<St
     if let Some(ap) = &askpass {
         ap.cleanup();
     }
-    let out = out.map_err(|e| MnError::Network {
-        stage: "远端执行命令".to_string(),
-        reason: format!("无法启动 ssh：{e}"),
+    let out = out.map_err(|e| {
+        SshFailure::Fatal(format!("无法启动 ssh：{e}"))
     })?;
 
     // UserKnownHostsFile=/dev/null + accept-new：每次连接都会往 stderr
@@ -780,12 +859,13 @@ pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<St
                 real.iter().take(3).cloned().collect::<Vec<_>>().join(" / ")
             )
         };
-        return Err(MnError::Network {
-            stage: "远端执行命令".to_string(),
-            reason,
+        // 只有「255 且无真实 stderr」才是连接层中断；有真实 stderr
+        // （如 Permission denied）说明 SSH 层给出了明确原因，重试无意义。
+        return Err(match (out.status.code(), real.is_empty()) {
+            (Some(255), true) => SshFailure::Transient(reason),
+            _ => SshFailure::Fatal(reason),
         });
     }
-    let _ = timeout_secs;
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
@@ -1473,6 +1553,26 @@ pub fn download_model_remote_with_progress(
     let mut attempts_in_round: u32 = 0;
     // 最近一次采样文件是否仍在增长（失败原因里要如实说明）
     let mut growing: bool;
+    // 连续轮询失败计数：短暂抖动靠 ssh_exec 内部重试消化，仍失败时先
+    // 容忍（下一跳大概率恢复），连续多次失败才判死——否则一条 stat 被
+    // 网关掐断就终结整个下载，等于把瞬时抖动放大成部署失败。
+    let mut failed_polls: u32 = 0;
+
+    // 每个采样点只开**一条** SSH 连接，同时取回三样东西：
+    // 文件大小、成功标记内容、下载器进程状态。
+    //
+    // ## 为什么必须合并
+    //
+    // 旧实现每 2 秒开 3 条独立连接（stat / cat .ok / kill -0），几 GB 的
+    // 下载持续几十分钟就是上千次握手，厂商 SSH 网关会因连接频率限流而
+    // 随机掐断连接（退出码 255），轮询反而成了部署失败的根源。
+    // 合并后连接频率降为 1/3，且三样东西取自同一瞬间，状态不会互相矛盾。
+    let poll_cmd = format!(
+        "S=0; if [ -f {q_dest} ]; then S=$(stat -c %s {q_dest} 2>/dev/null || echo 0); fi; \
+         O=0; if [ -f {q_ok} ]; then O=$(cat {q_ok} 2>/dev/null || echo 0); fi; \
+         A=dead; if kill -0 $(cat {q_pid} 2>/dev/null) 2>/dev/null; then A=alive; fi; \
+         echo \"size=$S\"; echo \"ok=$O\"; echo \"state=$A\""
+    );
 
     loop {
         if should_cancel.map(|check| check()).unwrap_or(false) {
@@ -1482,24 +1582,50 @@ pub fn download_model_remote_with_progress(
             });
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
-        let size = remote_file_size(target, dest)?;
+
+        // 一次连接取回三态；解析失败按 0 处理并计入连续失败。
+        let (size, completed, is_dead) = match ssh_exec(target, &poll_cmd, 60) {
+            Ok(out) => {
+                failed_polls = 0;
+                let mut size = 0u64;
+                let mut ok_val = String::new();
+                let mut dead = true;
+                for line in out.lines() {
+                    if let Some(v) = line.trim().strip_prefix("size=") {
+                        size = v.trim().parse().unwrap_or(0);
+                    } else if let Some(v) = line.trim().strip_prefix("ok=") {
+                        ok_val = v.trim().to_string();
+                    } else if let Some(v) = line.trim().strip_prefix("state=") {
+                        dead = v.trim() != "alive";
+                    }
+                }
+                let completed = !ok_val.is_empty() && ok_val != "0";
+                (size, completed, dead)
+            }
+            Err(e) => {
+                failed_polls += 1;
+                if failed_polls >= 10 {
+                    return Err(MnError::Network {
+                        stage: "云端下载模型".to_string(),
+                        reason: format!(
+                            "下载状态轮询连续 {failed_polls} 次失败（含自动重试），\
+                             判定节点连接不可用：{e}。已下载约 {last_size} 字节，\
+                             断点续传文件已保留，恢复连接后重新部署可从断点继续"
+                        ),
+                    });
+                }
+                eprintln!(
+                    "[download] 轮询失败（第 {failed_polls} 次连续），跳过本次采样：{e}"
+                );
+                continue;
+            }
+        };
         if let Some(cb) = on_progress {
             cb(size, expected_bytes);
         }
         growing = size > last_size;
         // 完成判定优先看远端写的成功标记（仅下载器自身以 0 退出时才写）。
         // 这样就不需要「大小 == 计划里的期望字节数」这个容易误判的前提。
-        let completed = match ssh_exec(
-            target,
-            &format!("if [ -f '{q_ok}' ]; then cat '{q_ok}'; fi"),
-            60,
-        ) {
-            Ok(out) => {
-                let s = out.trim();
-                !s.is_empty() && s != "0"
-            }
-            Err(_) => false,
-        };
         if completed && size > 0 {
             return Ok(size);
         }
@@ -1508,15 +1634,6 @@ pub fn download_model_remote_with_progress(
                 return Ok(size);
             }
         }
-        // 下载进程还活着吗
-        let alive = ssh_exec(
-            target,
-            &format!(
-                "if kill -0 $(cat '{pid_file}' 2>/dev/null) 2>/dev/null; then echo alive; else echo dead; fi"
-            ),
-            60,
-        )?;
-        let is_dead = alive.contains("dead");
 
         // 停滞计数：进程活着但连续多轮采样大小不变（约 12s 无增长）
         if !is_dead && !growing {
