@@ -364,12 +364,12 @@ model_id: qwen3.8-27b
 quantization: 4-bit (Q4_K_M)
 device: ssh
 source: https://hf-mirror.com/
-repository: HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF
+repository: JonathanColetti/Qwen3.8-27B-Uncensored-GGUF
 framework: llama.cpp
 binary: llama-server
-model: Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf
+model: Qwen3.8-27B-Uncensored-Q4_K_M.gguf
 auxiliary_models:
-  - mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf (多模态投影)
+  - mmproj-Qwen3.8-27B-Uncensored-F16.gguf (多模态投影)
 context: 65536
 gpu_layers: 99
 parallel: 1
@@ -387,13 +387,11 @@ speculative:
   type: draft-mtp
   draft_n_max: 2
 multimodal:
-  mmproj: mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf
+  mmproj: mmproj-Qwen3.8-27B-Uncensored-F16.gguf
 host: 0.0.0.0
 alias: qwen3.8-27b
 # port: 由部署调度器按节点占用情况动态分配
-# 注：本模板**不使用外置草稿模型**。HauhauCS 仓库的 FastMTP-32K 侧车
-# 必须搭配其私有 llama.cpp 补丁才能加载（官方预编译版会报
-# tensor 'output.weight' has wrong shape; expected 5120,248320, got 5120,32768）。
+# 注：本模板**不使用外置草稿模型**。
 # 主权重 GGUF 自带 Qwen3.8 原生内嵌 MTP 头，只传 --spec-type draft-mtp
 # 即可获得投机解码加速，无需任何额外文件。"#,
     ),
@@ -642,40 +640,37 @@ pub fn resolve(model: &str, text: &str) -> MnResult<ModelDeploySpec> {
 mod tests {
     use super::*;
 
-    const UNCENSORED: &str = r#"template: Uncensored
+    /// 内置 uncensored 模板的**真实正文**。
+    ///
+    /// 绝不在这里复制一份硬编码副本：曾经那样做，结果源码里的模板换了
+    /// 仓库/文件名，测试仍然对着旧副本断言并全部通过——测试成了「自我
+    /// 确认」，完全掩盖了改动。模板只能有一个真源（`BUILTIN_TEMPLATES`），
+    /// 测试也从那里取。
+    fn uncensored() -> &'static str {
+        BUILTIN_TEMPLATES
+            .iter()
+            .find(|(m, s, _, _)| *m == "qwen3.8-27b" && *s == "uncensored")
+            .map(|(_, _, _, t)| *t)
+            .expect("内置模板必须包含 qwen3.8-27b/uncensored")
+    }
+
+    /// 一段**专供解析器语法测试**的合成正文：带嵌套与列表，不参与业务断言。
+    ///
+    /// 与内置模板解耦——它测的是「解析器能否理解这种结构」，而不是
+    /// 「我们的模板长什么样」。后者必须由真实模板来断言。
+    const SYNTHETIC_NESTED: &str = r#"template: Synthetic
 model_id: qwen3.8-27b
-quantization: 4-bit (Q4_K_M)
-device: ssh
-source: https://hf-mirror.com/
-repository: HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF
-framework: llama.cpp
-binary: llama-server
-model: Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf
+repository: example/synthetic-GGUF
+model: synthetic-Q4_K_M.gguf
 auxiliary_models:
-  - mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf (多模态投影)
-  - Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf (MTP draft)
-context: 65536
+  - mmproj-synthetic-F16.gguf (多模态投影)
+context: 8192
 gpu_layers: 99
-parallel: 1
-batch: 2048
-ubatch: 512
-cache_k: q4_0
-cache_v: q4_0
-flash_attn: on
-image_max_tokens: 768
-mtmd_batch_max_tokens: 256
 speculative:
   type: draft-mtp
-  draft_model_path: Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf
-  draft_gpu_layers: 99
-  draft_n_max: 4
-  draft_cache_k: q4_0
-  draft_cache_v: q4_0
+  draft_n_max: 2
 multimodal:
-  mmproj: mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf
-host: 0.0.0.0
-alias: qwen3.8-27b
-# port: 由部署调度器按节点占用情况动态分配"#;
+  mmproj: mmproj-synthetic-F16.gguf"#;
 
     const DEFAULT_05B: &str = r#"template: default
 model_id: qwen2.5-0.5b
@@ -696,12 +691,11 @@ cache_v: q4_0"#;
 
     #[test]
     fn parses_nested_and_lists() {
-        let t = parse_raw(UNCENSORED).unwrap();
-        assert_eq!(t.name, "Uncensored");
+        let t = parse_raw(SYNTHETIC_NESTED).unwrap();
+        assert_eq!(t.name, "Synthetic");
         assert_eq!(t.get_nested("speculative", "type"), Some("draft-mtp"));
-        assert_eq!(t.get_list("auxiliary_models").len(), 2);
-        assert_eq!(t.get_u64("context"), Some(65536));
-        assert!(t.get_bool("flash_attn").unwrap());
+        assert_eq!(t.get_list("auxiliary_models").len(), 1);
+        assert_eq!(t.get_u64("context"), Some(8192));
     }
 
     #[test]
@@ -720,29 +714,43 @@ cache_v: q4_0"#;
 
     #[test]
     fn qwen38_schema_extracts_multimodal_and_draft() {
-        let spec = resolve("qwen3.8-27b", UNCENSORED).unwrap();
+        let spec = resolve("qwen3.8-27b", uncensored()).unwrap();
         assert_eq!(spec.template_name, "Uncensored");
         assert_eq!(
             spec.model_file,
-            "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf"
+            "Qwen3.8-27B-Uncensored-Q4_K_M.gguf"
         );
         // 下载地址必须来自模板 repository，而不是硬编码
-        assert!(spec.download_url.contains("HauhauCS/Qwen3.8-27B-Uncensored"));
+        assert!(
+            spec.download_url
+                .contains("JonathanColetti/Qwen3.8-27B-Uncensored-GGUF"),
+            "下载地址应来自模板 repository：{}",
+            spec.download_url
+        );
         assert!(!spec.download_url.contains("unsloth"), "绝不能回落到默认仓库");
-        assert_eq!(spec.aux_files.len(), 2);
+        // 融合版主权重已内嵌 MTP，模板只声明投影器一个辅助文件
+        assert_eq!(spec.aux_files.len(), 1);
         assert_eq!(
             spec.mmproj.as_deref(),
-            Some("mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf")
+            Some("mmproj-Qwen3.8-27B-Uncensored-F16.gguf")
         );
-        assert_eq!(
-            spec.draft_model.as_deref(),
-            Some("Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf")
+        // **不使用外置草稿模型**：仓库的 fused 文件自带 MTP 头
+        assert!(
+            spec.draft_model.is_none(),
+            "uncensored 不应声明外置草稿：{:?}",
+            spec.draft_model
         );
-        assert_eq!(spec.draft_n_max, Some(4));
+        assert_eq!(spec.draft_n_max, Some(2));
         assert_eq!(spec.context, 65536);
+        assert_eq!(spec.cache_k, "q8_0");
+        assert_eq!(spec.cache_v, "q8_0");
         // 模板里的 parallel / image_max_tokens 转成额外参数
         assert!(spec.extra_args.contains(&"--parallel".to_string()));
         assert!(spec.extra_args.contains(&"--spec-draft-n-max".to_string()));
+        assert!(spec.extra_args.contains(&"--ubatch-size".to_string()));
+        assert!(spec.extra_args.contains(&"--cache-reuse".to_string()));
+        assert!(spec.extra_args.contains(&"--jinja".to_string()));
+        assert!(spec.extra_args.contains(&"--metrics".to_string()));
     }
 
     #[test]
@@ -763,7 +771,7 @@ cache_v: q4_0"#;
     /// 同一个模型换模板正文，产出完全不同的部署规格——这正是用户要的能力。
     #[test]
     fn same_model_different_template_yields_different_spec() {
-        let a = resolve("qwen3.8-27b", UNCENSORED).unwrap();
+        let a = resolve("qwen3.8-27b", uncensored()).unwrap();
         let b = resolve(
             "qwen3.8-27b",
             "template: default\nsource: https://hf-mirror.com/\n\
@@ -798,11 +806,38 @@ cache_v: q4_0"#;
 
     #[test]
     fn aux_url_points_to_same_repo() {
-        let spec = resolve("qwen3.8-27b", UNCENSORED).unwrap();
-        let url = spec.aux_url("mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf");
-        assert!(url.unwrap().starts_with(
-            "https://hf-mirror.com/HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF/resolve/main/"
-        ));
+        let spec = resolve("qwen3.8-27b", uncensored()).unwrap();
+        let url = spec
+            .aux_url("mmproj-Qwen3.8-27B-Uncensored-F16.gguf")
+            .expect("投影器必须在辅助清单里");
+        // 辅助文件必须与主权重同仓库：跨仓库拼 URL 必然 404
+        assert!(
+            url.starts_with(
+                "https://hf-mirror.com/JonathanColetti/Qwen3.8-27B-Uncensored-GGUF/resolve/main/"
+            ),
+            "辅助文件应跟随模板 repository：{url}"
+        );
+    }
+
+    /// 内置模板的内容必须与「用户实际会部署的东西」一致。
+    ///
+    /// 这条测试守的是「测试自己维护模板副本」这个反模式：曾经测试里
+    /// 硬编码了一份旧模板，源码换成新仓库后测试依旧全绿，把改动掩盖了。
+    /// 现在断言直接从 `BUILTIN_TEMPLATES` 取正文，任何字段漂移都会红。
+    #[test]
+    fn builtin_uncensored_points_at_current_repo() {
+        let spec = resolve("qwen3.8-27b", uncensored()).unwrap();
+        assert_eq!(spec.model_file, "Qwen3.8-27B-Uncensored-Q4_K_M.gguf");
+        assert!(
+            spec.download_url.contains("JonathanColetti"),
+            "内置模板必须指向当前仓库：{}",
+            spec.download_url
+        );
+        assert!(
+            !spec.download_url.contains("HauhauCS"),
+            "不应残留旧仓库引用：{}",
+            spec.download_url
+        );
     }
 
     #[test]
