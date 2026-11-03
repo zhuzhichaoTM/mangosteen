@@ -456,8 +456,16 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 .node-form input{min-width:0}
 .node-actions{display:flex;align-items:center;gap:10px;margin-top:14px}
 @media (max-width:680px){.node-form{grid-template-columns:1fr}.node-actions{flex-wrap:wrap}}
-/* 云平台密钥：每个平台一个子块（标题 + 输入 + 保存） */
-.pk-block{padding:14px 0 4px;border-top:1px solid var(--line, rgba(128,128,128,.2))}
+/* 模型配置模板：列表行 + 摘要 + 下载地址 */
+.tpl-row{border-top:1px solid var(--line);padding:10px 0 8px}
+.tpl-row:first-of-type{border-top:none}
+.tpl-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.tpl-sum{color:var(--text2);font-size:12px;margin-top:3px}
+.tpl-url{color:var(--muted);font:11px/1.5 var(--mono);margin-top:2px;word-break:break-all}
+.tpl-field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--text2)}
+.tpl-field select,.tpl-field input{font-size:12px;padding:0 9px;border-radius:6px;min-height:28px}
+
+/* 云平台密钥：每个平台一个子块（标题 + 输入 + 保存） */.pk-block{padding:14px 0 4px;border-top:1px solid var(--line, rgba(128,128,128,.2))}
 .pk-block:first-child{border-top:none;padding-top:2px}
 .pk-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
 /* 与卡片标题（h3：13px/650 字重）一致，不用 <b> 的 700 加粗 */
@@ -655,11 +663,7 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
             <select id="dp-model-sel"></select>
           </label>
           <label>配置模板
-            <select id="dp-template-sel">
-              <option value="default">default</option>
-              <option value="mode1">mode1</option>
-              <option value="mode2">mode2</option>
-            </select>
+            <select id="dp-template-sel"></select>
           </label>
           <label>节点信息
             <span id="dp-node-info" class="dp-inline-value dp-node-info">-</span>
@@ -694,6 +698,16 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
           <div id="se-devices" style="margin-top:14px"><div class="empty">加载中…</div></div>
           <div class="node-actions">
             <button class="primary sm" id="se-dev-open">添加</button>
+          </div>
+        </div>
+
+        <div class="card node-card">
+          <h3>模型配置<button class="qmark" type="button" aria-label="显示说明"
+            onclick="const h=this.closest('h3').nextElementSibling; h.hidden=!h.hidden">?</button></h3>
+          <div class="hint" hidden>用于<b>模型差异化运行定义</b>：为同一个模型准备多套部署方案（不同仓库/量化/上下文/推理参数），部署页按「模型名称 + 配置模板」选用。<br>只支持系统已内置解析的模型：<b id="se-tpl-supported"></b>。其他模型不受支持，新增模型需升级系统版本。<br>自定义模板的键名不能与系统内置模板重叠（重叠会被拒绝）；自定义之间同名则以<b>后保存的为准</b>。</div>
+          <div id="se-templates" style="margin-top:14px"><div class="empty">加载中…</div></div>
+          <div class="node-actions">
+            <button class="primary sm" id="se-tpl-open">新增 / 修改</button>
           </div>
         </div>
 
@@ -743,6 +757,34 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
       <button id="se-dev-cancel" class="sm">取消</button>
       <div class="grow"></div>
       <button class="primary sm" id="se-dev-add">添加节点</button>
+    </div>
+  </div>
+</div>
+
+<!-- 模型配置模板编辑弹窗 -->
+<div class="ov" id="ov-tpl">
+  <div class="modal" style="max-width:760px">
+    <h2>模型配置模板</h2>
+    <div class="msub">模型下载与模型启动都按这份正文执行。保存前会先校验语法与必需字段。</div>
+    <div class="mbody">
+      <div class="node-form" style="grid-template-columns:1fr 1fr">
+        <label class="tpl-field">模型名（键名 a）
+          <select id="se-tpl-model"></select>
+        </label>
+        <label class="tpl-field">配置模板名（键名 b）
+          <input id="se-tpl-slot" type="text" placeholder="如 uncensored">
+        </label>
+      </div>
+      <div style="margin-top:10px">
+        <textarea id="se-tpl-text" spellcheck="false" placeholder="配置正文（YAML）"
+          style="width:100%;min-height:320px;font:12px/1.6 var(--mono);padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--text);resize:vertical"></textarea>
+      </div>
+      <div class="hint" id="se-tpl-msg" style="margin-top:10px"></div>
+    </div>
+    <div class="mfoot">
+      <button id="se-tpl-cancel" class="sm">取消</button>
+      <div class="grow"></div>
+      <button class="primary sm" id="se-tpl-save">保存</button>
     </div>
   </div>
 </div>
@@ -1407,7 +1449,13 @@ async function loadEngines() {
 Tabs.register("deploy", (() => {
   let timer = null;
   let currentJob = null;
-  const templates = {
+  // 配置模板：`模型名 → { 槽位名 → YAML 正文 }`。
+  //
+  // **唯一真源在后端配置里**（设置页维护，`/api/model-templates`）。
+  // 这里初始为空，由 `loadTemplates()` 从后端灌入——UI 不再自带一份
+  // 可能过期的副本。下面的常量仅作为后端不可达时的兜底，保证页面
+  // 仍能渲染出可选项（而不是一片空白）。
+  const defaultTemplates = {
     "qwen2.5-0.5b": {
       default: `template: default
 model_id: qwen2.5-0.5b
@@ -1461,10 +1509,64 @@ multimodal:
 host: 0.0.0.0
 alias: qwen3.8-27b
 # port: 由部署调度器按节点占用情况动态分配`,
-      mode1: "template: mode1\nbase: default\nprofile: low-memory",
+      mode1: `template: Uncensored
+model_id: qwen3.8-27b
+quantization: 4-bit (Q4_K_M)
+device: ssh
+source: https://hf-mirror.com/
+repository: HauhauCS/Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-MTP-GGUF
+framework: llama.cpp
+binary: llama-server
+model: Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf
+auxiliary_models:
+  - mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf (多模态投影)
+  - Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf (MTP draft)
+context: 65536
+gpu_layers: 99
+parallel: 1
+batch: 2048
+ubatch: 512
+cache_k: q4_0
+cache_v: q4_0
+flash_attn: on
+image_max_tokens: 768
+mtmd_batch_max_tokens: 256
+speculative:
+  type: draft-mtp
+  draft_model_path: Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf
+  draft_gpu_layers: 99
+  draft_n_max: 4
+  draft_cache_k: q4_0
+  draft_cache_v: q4_0
+multimodal:
+  mmproj: mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf
+host: 0.0.0.0
+alias: qwen3.8-27b
+# port: 由部署调度器按节点占用情况动态分配`,
       mode2: "template: mode2\nbase: default\nprofile: high-throughput",
     },
   };
+  // 运行时模板表：由后端配置灌入（设置页是唯一维护入口）。
+  // 初始用兜底常量填充，`loadTemplates()` 成功后被真实配置替换。
+  const templates = JSON.parse(JSON.stringify(defaultTemplates));
+
+  /// 从后端拉取模型配置模板，覆盖本地兜底表。
+  ///
+  /// 返回 true 表示拿到了后端配置。失败不抛错——保留兜底让页面可用，
+  /// 由调用方决定是否提示（设置页里会显示读取失败原因）。
+  async function loadTemplates() {
+    const r = await api("/api/model-templates").catch(() => null);
+    if (!r || !Array.isArray(r.models)) return false;
+    // 用后端结果整体替换：既要新增用户自定义模板，也要反映删除。
+    Object.keys(templates).forEach((k) => delete templates[k]);
+    r.models.forEach((m) => {
+      const slots = {};
+      (m.templates || []).forEach((t) => { slots[t.slot] = t.text; });
+      if (Object.keys(slots).length) templates[m.model] = slots;
+    });
+    return true;
+  }
+
   const models = [
     { id: "qwen2.5-0.5b", name: "Qwen2.5-0.5B", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
     { id: "qwen3.8-27b", name: "Qwen3.8-27B", source: "hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" },
@@ -1543,7 +1645,7 @@ alias: qwen3.8-27b
     if (!msel.dataset.built) {
       msel.innerHTML = models.map(x => '<option value="' + esc(x.id) + '">' + esc(x.name) + "</option>").join("");
       msel.dataset.built = "1";
-      msel.onchange = refreshStatus;
+      msel.onchange = () => { renderTemplateOptions(); refreshStatus(); };
       $("dp-template-sel").onchange = () => { if ($("dp-detail").hidden === false) showDetail($("dp-template-sel").value); };
       $("dp-deploy-btn").onclick = () => { const mdef = currentModelDef(); begin(mdef, $("dp-template-sel").value, registry[mdef.id]); };
       $("dp-chain-abort").onclick = cancelDeployment;
@@ -1589,12 +1691,52 @@ alias: qwen3.8-27b
       cands.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
       liveMap[mdef.id] = cands[0] || null;
     });
+    renderTemplateOptions();
     refreshStatus();
   }
 
   function currentModelDef() {
     const id = $("dp-model-sel").value || models[0].id;
     return models.find(x => x.id === id) || models[0];
+  }
+
+  /// 模板下拉框选项按「当前模型」动态渲染。
+  ///
+  /// 为什么不写死 option：不同模型的同名槽位（mode1/mode2）语义不同——
+  /// qwen3.8-27b 的 mode1 是 Uncensored 变体，qwen2.5-0.5b 的不是。
+  /// 标签直接从模板正文首行 `template: xxx` 派生，保证下拉框始终
+  /// 与实际会展示/提交的模板一致，不会出现「选着 mode1 实际是别的」。
+  /// 模板**正文**：按「模型 id + 模板槽位名」取 YAML 全文。
+  ///
+  /// 部署/preview 必须把它一并发给后端——后端据此解析下载源与启动参数。
+  /// 只发槽位名（mode1）后端无从得知配置内容。
+  function templateText(modelId, slot) {
+    const modelTemplates = templates[modelId] || templates["qwen2.5-0.5b"];
+    const body = modelTemplates[slot] || modelTemplates.default;
+    return typeof body === "string" ? body : "";
+  }
+
+  /// 模板**显示名**：正文首行 `template:` 的值（如 Uncensored）。
+  ///
+  /// 槽位名（mode1/mode2）只是内部键，不该展示给用户——用户看到的名字
+  /// 必须与实际生效的配置正文一致。
+  function templateLabel(modelId, slot) {
+    const text = templateText(modelId, slot);
+    const m = text.match(/^\s*template\s*:\s*(.+)$/m);
+    return m ? m[1].trim() : slot;
+  }
+
+  function renderTemplateOptions() {
+    const sel = $("dp-template-sel");
+    if (!sel) return;
+    const modelTemplates = templates[currentModelDef().id] || templates["qwen2.5-0.5b"];
+    const prev = sel.value;
+    const keys = Object.keys(modelTemplates);
+    sel.innerHTML = keys
+      .map(k => '<option value="' + esc(k) + '">' + esc(templateLabel(currentModelDef().id, k)) + "</option>")
+      .join("");
+    if (keys.indexOf(prev) >= 0) sel.value = prev;
+    if (keys.indexOf(sel.value) < 0 && keys.length) sel.value = keys[0];
   }
 
   function refreshStatus() {
@@ -1720,13 +1862,19 @@ alias: qwen3.8-27b
     lastChainIndex = 0;
     lastChainNote = "";
     renderChain(0, "正在读取模型规格；随后会等待云端节点创建完成");
-    $("dp-chain-model").textContent = mdef.name + " · 模板 " + template;
+    // 显示模板的**显示名**（正文首行 `template:` 的值，如 Uncensored），
+    // 而不是内部槽位名（mode1）。用户看到的就是实际会生效的那份配置。
+    $("dp-chain-model").textContent = mdef.name + " · 模板 " + templateLabel(mdef.id, template);
 
     // ---- GPU 选择后再决定「复用还是创建」 ----
     //
     // 不能在进入 GPU 选择前按旧实例直接复用：用户可能选择了不同型号。
     // 统一先展示当前可用规格，确认后把 gpu_model 传给后端，后端再按型号匹配。
-    const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, target:"cloud", config_template:template})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
+    // 带上模板**正文**：后端据此解析下载源与启动参数。
+    // 只传槽位名（mode1）后端拿不到配置内容，只能退回按模型名硬编码——
+    // 那正是「选 Uncensored 却下载 default 权重」的根因。
+    const tplText = templateText(mdef.id, template);
+    const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, model_id:mdef.id, target:"cloud", config_template:template, config_template_text:tplText})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
     renderChain(1, "模型评估完成，请选择 GPU 节点后继续");
     const saved = (pv.devices || []).map(d => ({
       id: d.id, custom: true, gpu_model: d.name || "自定义 GPU 节点", provider: "本地自定义",
@@ -1765,7 +1913,7 @@ alias: qwen3.8-27b
     if (!chosen) { renderChain(1, "已取消：未确认 GPU 节点", true); return; }
     const selectedCandidate = candidates.find(x => (x.spec_id || x.gpu_model) === chosen) || {};
     const source = mdef.source;
-    const payload = {model:source, model_id:mdef.id, deploy:true, target:"cloud", config_template:template};
+    const payload = {model:source, model_id:mdef.id, deploy:true, target:"cloud", config_template:template, config_template_text:tplText};
     if (chosen.startsWith("dev-")) payload.device_id = chosen;
     else if (selectedCandidate.reuse) {
       // 用户明确挑了已有节点：传复用实例 ID + 服务商，后端严格按
@@ -1840,6 +1988,7 @@ alias: qwen3.8-27b
     $("dp-deploy-btn").disabled = false;
     $("dp-deploy-btn").textContent = "开始";
     $("dp-model-sel").selectedIndex = 0;
+    renderTemplateOptions();
     $("dp-template-sel").selectedIndex = 0;
   }
 
@@ -1931,8 +2080,18 @@ alias: qwen3.8-27b
     }
     await loadModels();
   }
+
+  // 供设置页在保存/删除模板后调用：重新灌入模板表并重绘下拉框。
+  // 放在 window 上是因为两个页签是独立模块作用域，无法直接互相引用。
+  window.__refreshDeployTemplates = () => {
+    try { renderTemplateOptions(); } catch (_) { /* 未挂载时无下拉框，忽略 */ }
+  };
+
   return {
     async mount() {
+      // 先同步模板表：下拉框的选项与显示名都来自它。
+      // 设置页保存模板后会调用 window.__refreshDeployTemplates 重新灌入。
+      await loadTemplates().catch(() => false);
       await loadModels();
       // 周期刷新部署状态：运行态由后端后台探测（5 秒一轮），
       // 这里按同样量级拉取，用户才能看到「运行 ⇄ 停止」自动反映。
@@ -1949,9 +2108,145 @@ alias: qwen3.8-27b
 
 Tabs.register("setting", (() => {
   let mounted = false;
+  // 设置页自己的模板正文缓存。不能依赖部署页模块的 templates：
+  // 用户自定义模板必须以本页刚从 API 读取的内容为准，才能可靠查看/编辑。
+  const modelTemplateText = new Map();
 
   async function load() {
-    await Promise.all([loadDevices(), loadProviderKeys()]);
+    await Promise.all([loadDevices(), loadProviderKeys(), loadModelTemplates()]);
+  }
+
+  // ---- 模型配置模板：设置页是唯一维护入口 ----
+  //
+  // 只列**用户自己新增**的模板（`builtin !== true`）。内置模板由系统随
+  // 版本提供，出现在部署页下拉框里；在这里列出来只会诱导用户误删基线配置。
+  // 每行展示后端解析出的摘要，让用户不用等部署就能确认「这份正文会按
+  // 哪个文件名下、用什么上下文跑」。
+  async function loadModelTemplates() {
+    const box = $("se-templates");
+    try {
+      const r = await api("/api/model-templates");
+      box.innerHTML = "";
+      // 模型下拉框的选项只能来自「系统已支持」的模型清单——
+      // 新增模型需要版本升级（后端注册解析器），用户不能自己造。
+      // 该清单与部署页「模型名称」下拉框完全一致，避免出现部署页
+      // 根本没有的选项（配了也选不中，等于死配置）。
+      const supported = r.supported || [];
+      $("se-tpl-supported").textContent = supported.join("、") || "（无）";
+      const sel = $("se-tpl-model");
+      sel.innerHTML = supported
+        .map((m) => '<option value="' + esc(m) + '">' + esc(m) + "</option>")
+        .join("");
+
+      const rows = [];
+      modelTemplateText.clear();
+      (r.models || []).forEach((m) => {
+        (m.templates || []).forEach((t) => {
+          if (t.builtin) return; // 内置的不列
+          // 缓存正文：列表本身不展示正文，只有点「查看/编辑」时才带出来。
+          modelTemplateText.set(templateKey(m.model, t.slot), t.text || "");
+          const s = t.summary || {};
+          const ok = s.ok !== false;
+          const detail = ok
+            ? "文件 " + esc(s.model_file || "-") + " · 上下文 " + (s.context || "-") +
+              (s.mmproj ? " · 多模态" : "") + (s.draft_model ? " · 投机解码" : "")
+            : "解析失败：" + esc(s.error || "");
+          // 正文不在这里渲染：配置内容只在「查看/编辑」弹窗里展示。
+          rows.push(
+            '<div class="tpl-row" data-model="' + esc(m.model) + '" data-slot="' + esc(t.slot) + '">' +
+            '<div class="tpl-head"><b>' + esc(t.name || t.slot) + '</b>' +
+            '<span class="gi-sub">' + esc(m.model) + ' · ' + esc(t.slot) + '</span></div>' +
+            '<div class="tpl-sum">' + detail + '</div>' +
+            '<div class="node-actions"><button class="sm tpl-edit">查看/编辑</button>' +
+            '<button class="sm tpl-del">删除</button></div></div>');
+        });
+      });
+      if (!rows.length) {
+        box.innerHTML = '<div class="empty">暂无自定义配置模板</div>';
+        return;
+      }
+      box.innerHTML = rows.join("");
+      box.querySelectorAll(".tpl-edit").forEach((btn) => {
+        btn.onclick = () => {
+          const row = btn.closest(".tpl-row");
+          openTplModal(row.dataset.model, row.dataset.slot);
+        };
+      });
+      box.querySelectorAll(".tpl-del").forEach((btn) => {
+        btn.onclick = () => {
+          const row = btn.closest(".tpl-row");
+          deleteTemplate(row.dataset.model, row.dataset.slot);
+        };
+      });
+    } catch (e) {
+      box.innerHTML = '<div class="empty">模型配置读取失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  /// 模型名 + 模板名的稳定缓存键。
+  function templateKey(model, slot) {
+    return model + "\\u0000" + slot;
+  }
+
+  /// 打开模板查看/编辑弹窗。正文只在这里展示。
+  ///
+  /// 不再从部署页 `templates` 读取：设置页的缓存来自刚刚完成的 API 请求，
+  /// 因此查看到的一定是服务端当前保存的最新内容。
+  function openTplModal(model, slot) {
+    const sel = $("se-tpl-model");
+    sel.disabled = !!model; // 编辑既有模板时不允许改模型，避免误建副本
+    if (model) sel.value = model;
+    $("se-tpl-slot").value = slot || "";
+    $("se-tpl-slot").disabled = !!slot;
+    const text = model && slot
+      ? (modelTemplateText.get(templateKey(model, slot)) || "")
+      : "";
+    $("se-tpl-text").value = text;
+    $("se-tpl-msg").textContent = "";
+    $("ov-tpl").classList.add("show");
+  }
+
+  async function saveTemplate() {
+    const model = $("se-tpl-model").value.trim();
+    const slot = $("se-tpl-slot").value.trim();
+    const text = $("se-tpl-text").value;
+    const msg = $("se-tpl-msg");
+    if (!model) { msg.textContent = "请选择模型（键名 a）"; return; }
+    if (!slot) { msg.textContent = "请填写配置模板名（键名 b）"; return; }
+    if (!text.trim()) { msg.textContent = "请填写配置正文"; return; }
+    msg.textContent = "保存中…";
+    try {
+      const r = await api("/api/model-templates", {
+        method: "PUT",
+        body: JSON.stringify({ model, slot, text }),
+      });
+      const s = r.summary || {};
+      msg.textContent = "已保存：" + (s.model_file || "");
+      toast("模板已保存：「" + (r.name || slot) + "」· " + (s.model_file || ""), "ok");
+      $("ov-tpl").classList.remove("show");
+      // 保存后立刻刷新：① 设置页列表 ② 部署页两个下拉框
+      await loadModelTemplates();
+      await loadTemplates();
+      if (typeof window.__refreshDeployTemplates === "function") window.__refreshDeployTemplates();
+    } catch (e) {
+      msg.textContent = "";
+      toast("保存失败：" + e.message, "err");
+    }
+  }
+
+  async function deleteTemplate(model, slot) {
+    if (!confirm("确定删除模板「" + slot + "」（模型 " + model + "）？")) return;
+    try {
+      await api("/api/model-templates/" + encodeURIComponent(model) + "/" + encodeURIComponent(slot), {
+        method: "DELETE",
+      });
+      toast("模板已删除", "ok");
+      await loadModelTemplates();
+      await loadTemplates();
+      if (typeof window.__refreshDeployTemplates === "function") window.__refreshDeployTemplates();
+    } catch (e) {
+      toast("删除失败：" + e.message, "err");
+    }
   }
 
   // 云平台密钥：按已启用的云平台动态渲染，天然支持后续接入新平台。
@@ -2069,6 +2364,11 @@ Tabs.register("setting", (() => {
         $("se-dev-open").onclick = openNodeModal;
         $("se-dev-add").onclick = addDevice;
         $("se-dev-cancel").onclick = () => $("ov-node").classList.remove("show");
+        // 模型配置模板
+        $("se-tpl-open").onclick = () => openTplModal("", "");
+        $("se-tpl-save").onclick = saveTemplate;
+        $("se-tpl-cancel").onclick = () => $("ov-tpl").classList.remove("show");
+        $("ov-tpl").onclick = (ev) => { if (ev.target === $("ov-tpl")) $("ov-tpl").classList.remove("show"); };
         // 点遮罩空白处关闭（点弹窗本体不关）
         $("ov-node").onclick = (ev) => { if (ev.target === $("ov-node")) $("ov-node").classList.remove("show"); };
         mounted = true;
