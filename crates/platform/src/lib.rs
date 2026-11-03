@@ -21,6 +21,7 @@
 //! | [`dlpath`] | 动态库搜索路径探测（解决 llama-server 找不到 .dylib/.so） |
 //! | [`resmon`] | 实时资源采样（CPU 占用率、可用内存、进程 RSS） |
 //! | [`docconv`] | 富文档转换命令选择（各平台工具差异收敛点） |
+//! | [`ssh`] | SSH 客户端适配：askpass 脚本、可执行名、`/dev/null` 等价物 |
 
 pub mod dlpath;
 pub mod docconv;
@@ -29,6 +30,7 @@ pub mod hardware;
 pub mod paths;
 pub mod process;
 pub mod resmon;
+pub mod ssh;
 
 /// 当前平台标识。用于日志与诊断输出，不参与业务决策。
 pub const fn os_name() -> &'static str {

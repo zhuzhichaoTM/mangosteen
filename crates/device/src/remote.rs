@@ -378,9 +378,22 @@ mod tests {
         );
     }
 
+    /// 公钥路径必须是 `<私钥>.pub` 的同名文件。
+    ///
+    /// 这里刻意用字符串拼接而不是 `with_extension`：两者对 `id_ed25519`
+    /// 结果一致（Rust 只替换最后一个 `.` 之后的部分），但拼接的语义更明确——
+    /// 「公钥就是私钥名加 .pub」，不受扩展名解析规则影响。
     #[test]
-    fn first_line_prefers_json_error_field() {
-        assert_eq!(
+    fn public_key_path_is_private_key_plus_pub() {
+        let key = PathBuf::from("/home/u/.ssh/id_ed25519");
+        let pub_key = PathBuf::from(format!("{}.pub", key.display()));
+        assert_eq!(pub_key, PathBuf::from("/home/u/.ssh/id_ed25519.pub"));
+        // 与 with_extension 的结果一致，证明当前实现不会丢文件名前缀
+        assert_eq!(key.with_extension("pub"), pub_key);
+    }
+
+    #[test]
+    fn first_line_prefers_json_error_field() {        assert_eq!(
             first_line(r#"{"error":"model not found"}"#),
             "model not found"
         );
@@ -487,26 +500,21 @@ impl SshTarget {
         Ok(())
     }
 
-    /// 生成一个临时 askpass 脚本，返回路径。
+    /// 生成一个临时 askpass 脚本，返回它连同密码 sidecar。
     ///
-    /// 脚本权限 0700、内容只有 `printf '%s\n' '<密码>'`。调用方必须在
-    /// 命令结束后**立刻删除**——明文密码不该在 /tmp 里多留一秒。
-    fn write_askpass(&self) -> MnResult<Option<PathBuf>> {
+    /// 实际形态由平台层决定（`mangosteen_platform::ssh`）：macOS/Linux 是
+    /// `#!/bin/sh` 脚本，Windows 是 `.cmd` 批处理。上层不能假设 `/bin/sh` 存在。
+    /// 调用方必须在命令结束后**立刻** `cleanup()`——明文密码不该在临时目录里多留一秒。
+    fn write_askpass(&self) -> MnResult<Option<mangosteen_platform::ssh::Askpass>> {
         let Some(pw) = self.password.as_deref() else {
             return Ok(None);
         };
-        let path = std::env::temp_dir().join(format!(
-            "mn-askpass-{}-{}.sh",
+        let tag = format!(
+            "{}-{}",
             std::process::id(),
             mangosteen_core::time::now_unix_millis()
-        ));
-        let escaped = pw.replace('\'', r#"'\''"#);
-        std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' '{escaped}'\n"))
-            .map_err(|e| MnError::io(format!("写入 askpass 脚本 {}", path.display()), &e))?;
-        // askpass 是由 ssh 直接 exec 的脚本，必须有执行位（0700）；
-        // 普通 secret/config 文件才使用 0600。平台层按文件名区分。
-        mangosteen_platform::fs::set_private_permissions(&path)?;
-        Ok(Some(path))
+        );
+        mangosteen_platform::ssh::write_askpass(&tag, Some(pw))
     }
 
     /// 公共 ssh 选项。
@@ -515,8 +523,14 @@ impl SshTarget {
             "-o".to_string(),
             "StrictHostKeyChecking=accept-new".to_string(),
             "-o".to_string(),
-            "UserKnownHostsFile=/dev/null".to_string(),
-            // /dev/null 不保存指纹时，OpenSSH 会把首次连接提示写到
+            // 丢弃式的 known_hosts 路径是平台差异：Unix 是 /dev/null，
+            // Windows 是 NUL。写死 /dev/null 会让 OpenSSH for Windows 把它
+            // 当成相对路径去创建文件而报错。
+            format!(
+                "UserKnownHostsFile={}",
+                mangosteen_platform::ssh::null_device_path()
+            ),
+            // 丢弃主机指纹时，OpenSSH 会把首次连接提示写到
             // stderr；这是正常现象，但会污染远端命令错误信息。
             "-o".to_string(),
             "LogLevel=ERROR".to_string(),
@@ -583,34 +597,66 @@ fn authorized_keys_append_cmd(pub_text: &str) -> String {
 ///    与我们自己的参数无关，无法通过调参规避。
 ///    改成「本地读公钥 → ssh 追加到远端 authorized_keys」这条只用
 ///    ssh 一条链路的方式，行为完全可控。
-pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
+/// 本机 SSH 用户目录（`~/.ssh`）。
+///
+/// Windows 没有 `HOME`，必须回退到 `USERPROFILE`；两者都取不到就明确报错，
+/// 而不是默默把密钥生成到进程的当前目录。
+fn ssh_home_dir() -> MnResult<PathBuf> {
     let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .ok_or_else(|| MnError::config("HOME", "无法确定本机 HOME 目录"))?;
-    let ssh_dir = home.join(".ssh");
-    std::fs::create_dir_all(&ssh_dir)
-        .map_err(|e| MnError::io(format!("创建 SSH 目录 {}", ssh_dir.display()), &e))?;
+        .ok_or_else(|| MnError::config("HOME", "无法确定本机用户主目录"))?;
+    let dir = home.join(".ssh");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| MnError::io(format!("创建 SSH 目录 {}", dir.display()), &e))?;
+    Ok(dir)
+}
+
+/// 本机默认私钥路径（`~/.ssh/id_ed25519`）。
+///
+/// **不**保证文件存在；只用于「尝试用已有密钥登录」的探测场景。
+pub fn default_identity_key() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let key = PathBuf::from(home).join(".ssh").join("id_ed25519");
+    key.is_file().then_some(key)
+}
+
+/// 返回本机默认可用的 ed25519 私钥路径，不存在时用 `ssh-keygen` 无交互生成。
+///
+/// 密钥是「装一次、长期复用」的：后续所有 SSH 都走密钥认证，不再需要密码。
+/// 生成时 `-N ""` 表示空口令——隧道与自动化命令无人值守，带口令的密钥
+/// 会在 ssh 启动时卡在交互输入上。
+fn ensure_identity_key() -> MnResult<PathBuf> {
+    let ssh_dir = ssh_home_dir()?;
     let key = ssh_dir.join("id_ed25519");
     let pub_key = ssh_dir.join("id_ed25519.pub");
-    if !key.is_file() || !pub_key.is_file() {
-        let status = Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-            .arg(&key)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .status()
-            .map_err(|e| MnError::Network {
-                stage: "生成 SSH 密钥".to_string(),
-                reason: e.to_string(),
-            })?;
-        if !status.success() || !key.is_file() || !pub_key.is_file() {
-            return Err(MnError::Network {
-                stage: "生成 SSH 密钥".to_string(),
-                reason: "本机没有默认公钥且 ssh-keygen 无法无交互生成密钥".to_string(),
-            });
-        }
+    if key.is_file() && pub_key.is_file() {
+        return Ok(key);
     }
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .status()
+        .map_err(|e| MnError::Network {
+            stage: "生成 SSH 密钥".to_string(),
+            reason: e.to_string(),
+        })?;
+    if !status.success() || !key.is_file() || !pub_key.is_file() {
+        return Err(MnError::Network {
+            stage: "生成 SSH 密钥".to_string(),
+            reason: "本机没有默认公钥且 ssh-keygen 无法无交互生成密钥".to_string(),
+        });
+    }
+    Ok(key)
+}
+
+pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
+    let key = ensure_identity_key()?;
+    // 公钥 = 私钥名 + `.pub`，用拼接表达这个语义（与 with_extension 结果一致）
+    let pub_key = PathBuf::from(format!("{}.pub", key.display()));
 
     // ---- 步骤 1：公钥可能已装好，先探测，避免重复导入 ----
     //
@@ -684,16 +730,16 @@ pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<St
     args.push(format!("{}@{}", target.user, target.host));
     args.push(cmd.to_string());
 
-    let mut c = Command::new("ssh");
+    let mut c = Command::new(mangosteen_platform::ssh::ssh_binary_name());
     c.args(&args).stdin(Stdio::null());
-    if let Some(p) = &askpass {
-        c.env("SSH_ASKPASS", p.display().to_string())
+    if let Some(ap) = &askpass {
+        c.env("SSH_ASKPASS", ap.script_arg())
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env("DISPLAY", ":0");
     }
     let out = c.output();
-    if let Some(p) = &askpass {
-        let _ = std::fs::remove_file(p);
+    if let Some(ap) = &askpass {
+        ap.cleanup();
     }
     let out = out.map_err(|e| MnError::Network {
         stage: "远端执行命令".to_string(),
@@ -767,16 +813,16 @@ pub fn scp_upload(target: &SshTarget, local: &std::path::Path, remote: &str) -> 
     let mut args = target.base_opts();
     args.push(local.display().to_string());
     args.push(format!("{}@{}:{}", target.user, target.host, remote));
-    let mut c = Command::new("scp");
+    let mut c = Command::new(mangosteen_platform::ssh::scp_binary_name());
     c.args(&args).stdin(Stdio::null());
-    if let Some(p) = &askpass {
-        c.env("SSH_ASKPASS", p.display().to_string())
+    if let Some(ap) = &askpass {
+        c.env("SSH_ASKPASS", ap.script_arg())
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env("DISPLAY", ":0");
     }
     let out = c.output();
-    if let Some(p) = &askpass {
-        let _ = std::fs::remove_file(p);
+    if let Some(ap) = &askpass {
+        ap.cleanup();
     }
     let out = out.map_err(|e| MnError::Network {
         stage: "上传云端推理引擎".to_string(),

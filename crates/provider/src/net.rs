@@ -87,10 +87,10 @@ pub struct Tunnel {
     pub established_at: i64,
     /// SSH 目标（供日志）
     pub target: String,
-    /// 密码认证用的 askpass 脚本。只在隧道真正关闭时才删除：
+    /// 密码认证用的 askpass 脚本 + 密码 sidecar。只在隧道真正关闭时才删除：
     /// ssh 是「延迟」调用 askpass 取密码的，脚本存活期必须覆盖
     /// 整个认证窗口，否则 ssh 拿不到密码退出 255 且 stderr 为空。
-    askpass: Option<std::path::PathBuf>,
+    askpass: Option<mangosteen_platform::ssh::Askpass>,
 }
 
 impl Tunnel {
@@ -120,9 +120,9 @@ impl Tunnel {
     /// 关闭隧道。
     pub fn close(&mut self) -> MnResult<()> {
         let r = self.child.terminate(Duration::from_secs(3));
-        // 认证此刻必然已经结束（无论成败），可安全删除密码脚本。
-        if let Some(p) = self.askpass.take() {
-            let _ = std::fs::remove_file(p);
+        // 认证此刻必然已经结束（无论成败），可安全删除密码脚本与 sidecar。
+        if let Some(ap) = self.askpass.take() {
+            ap.cleanup();
         }
         r
     }
@@ -230,25 +230,34 @@ impl TunnelManager {
         //     表现是隧道卡在密码提示）；
         //  2. 禁用 pubkey，只留 password —— 否则 ssh 会先尝试一堆不存在的
         //     密钥，每次失败都多几秒，隧道建立时间从 1 秒变成十几秒。
-        let mut askpass: Option<PathBuf> = None;
+        //
+        // 脚本本身由平台层生成（`mangosteen_platform::ssh`）：macOS/Linux 是
+        // `#!/bin/sh`，Windows 是 `.cmd`——上层不能出现 `/bin/sh` 这种 Unix 假设。
+        //
+        // 文件名 tag 必须每次调用唯一：只按 pid+端口命名会在「调度器逐个评估候选
+        // 实例、本地端口被复用」时让不同候选的脚本落到同一路径——一个候选的隧道
+        // 清理会误删另一个候选正在用的脚本，ssh exec 时报
+        // `ssh_askpass: exec(...): No such file or directory` → 拿不到密码 →
+        // `Permission denied` → 退出码 255。这里加毫秒时间戳保证唯一。
+        let mut askpass: Option<mangosteen_platform::ssh::Askpass> = None;
         if let Some(pw) = effective.password.as_deref() {
-            let script = std::env::temp_dir()
-                .join(format!("mn-askpass-{}-{local_port}.sh", std::process::id()));
-            // 单引号转义：密码里可能有 $ 或反引号，直接塞进 shell 会被解释
-            let escaped = pw.replace('\'', r#"'\''"#);
-            std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{escaped}'\n")).map_err(
-                |e| {
-                    self.allocator.release(local_port);
-                    MnError::io(format!("写入 askpass 脚本 {}", script.display()), &e)
-                },
-            )?;
-            // 权限收敛统一走平台层（Windows 无 POSIX 权限位，那里是无操作）
-            let _ = mangosteen_platform::fs::set_private_permissions(&script);
-            args.push("-o".to_string());
-            args.push("PreferredAuthentications=password".to_string());
-            args.push("-o".to_string());
-            args.push("PubkeyAuthentication=no".to_string());
-            askpass = Some(script);
+            let tag = format!(
+                "{}-{}-{}",
+                std::process::id(),
+                local_port,
+                mangosteen_core::time::now_unix_millis()
+            );
+            let ap = mangosteen_platform::ssh::write_askpass(&tag, Some(pw)).map_err(|e| {
+                self.allocator.release(local_port);
+                e
+            })?;
+            if let Some(ap) = ap {
+                args.push("-o".to_string());
+                args.push("PreferredAuthentications=password".to_string());
+                args.push("-o".to_string());
+                args.push("PubkeyAuthentication=no".to_string());
+                askpass = Some(ap);
+            }
         }
 
         let mut opts = SpawnOptions::new(PathBuf::from(&self.ssh_bin), args, "ssh-tunnel");
@@ -259,9 +268,9 @@ impl TunnelManager {
         if self.log_dir.is_none() {
             opts.capture_output = true;
         }
-        if let Some(script) = &askpass {
+        if let Some(ap) = &askpass {
             opts = opts
-                .with_env("SSH_ASKPASS", script.display().to_string())
+                .with_env("SSH_ASKPASS", ap.script_arg())
                 .with_env("SSH_ASKPASS_REQUIRE", "force")
                 .with_env("DISPLAY", ":0");
         }
@@ -271,10 +280,10 @@ impl TunnelManager {
         }
 
         let mut child = opts.spawn().map_err(|e| {
-            // 启动失败要归还端口
+            // 启动失败要归还端口，并清掉含密码的临时文件
             self.allocator.release(local_port);
-            if let Some(s) = &askpass {
-                let _ = std::fs::remove_file(s);
+            if let Some(ap) = &askpass {
+                ap.cleanup();
             }
             MnError::Network {
                 stage: "启动 ssh 隧道".to_string(),
@@ -307,8 +316,8 @@ impl TunnelManager {
                 if let Some(code) = child.exit_code() {
                     let tail = child.stderr_tail(8);
                     self.allocator.release(local_port);
-                    if let Some(p) = &askpass {
-                        let _ = std::fs::remove_file(p);
+                    if let Some(ap) = &askpass {
+                        ap.cleanup();
                     }
                     return Err(MnError::Network {
                         stage: "建立 ssh 隧道".to_string(),
@@ -336,8 +345,8 @@ impl TunnelManager {
             if let Some(code) = child.exit_code() {
                 let tail = child.stderr_tail(8);
                 self.allocator.release(local_port);
-                if let Some(p) = &askpass {
-                    let _ = std::fs::remove_file(p);
+                if let Some(ap) = &askpass {
+                    ap.cleanup();
                 }
                 return Err(MnError::Network {
                     stage: "建立 ssh 隧道".to_string(),
@@ -369,8 +378,8 @@ impl TunnelManager {
                 let tail = child.stderr_tail(8);
                 let _ = child.terminate(Duration::from_millis(800));
                 self.allocator.release(local_port);
-                if let Some(p) = &askpass {
-                    let _ = std::fs::remove_file(p);
+                if let Some(ap) = &askpass {
+                    ap.cleanup();
                 }
                 return Err(MnError::Network {
                     stage: "等待隧道就绪".to_string(),

@@ -935,9 +935,23 @@ pub fn configure_existing_ssh_access(
     target: &mangosteen_device::remote::SshTarget,
 ) -> MnResult<mangosteen_device::remote::SshTarget> {
     if target.password.is_none() {
+        // 没给密码但可能已经装过公钥（同机重复部署、用户手动 ssh-copy-id）。
+        // 这种情况不该直接拒绝——先试用本机默认密钥。
+        if let Some(key) = mangosteen_device::remote::default_identity_key() {
+            let key_target = mangosteen_device::remote::SshTarget {
+                host: target.host.clone(),
+                port: target.port,
+                user: target.user.clone(),
+                password: None,
+                identity_file: Some(key),
+            };
+            if mangosteen_device::remote::ssh_exec(&key_target, "true", 10).is_ok() {
+                return Ok(key_target);
+            }
+        }
         return Err(MnError::Network {
             stage: "节点配置环境 / SSH 免密登录".to_string(),
-            reason: "自定义节点未提供登录密码，无法安装 SSH 公钥".to_string(),
+            reason: "自定义节点未提供登录密码，且本机密钥无法直接登录".to_string(),
         });
     }
 
@@ -1062,6 +1076,58 @@ fn vendor_ssh_target(
     })
 }
 
+/// 为云端实例建立**密钥认证**的 SSH 通道。
+///
+/// ## 为什么必须走密钥，而不是密码 askpass
+///
+/// 密码认证只能通过 askpass 协议传给 ssh：写一个临时脚本、靠环境变量
+/// `SSH_ASKPASS` 让 ssh 去 exec 它。这条路在真实环境里非常脆：
+///
+/// * ssh 是**延迟**调用 askpass 的（TCP 握手 + 密钥交换之后），脚本必须
+///   活到那一刻。清理逻辑稍早一步，ssh 就报
+///   `exec(...): No such file or directory` → `Permission denied` → 退出 255，
+///   而 stderr 往往还是空的，完全看不出原因；
+/// * Windows 上没有 `/bin/sh`，同一套脚本根本跑不起来；
+/// * 每次建隧道都要铺一遍临时文件，并发/端口复用时还会互相踩。
+///
+/// 所以正确做法是：**密码只用于「第一次把本机公钥装进远端 authorized_keys」**，
+/// 之后所有连接（探测、下载、启动、隧道）一律用密钥 + `BatchMode=yes`。
+/// 密钥认证没有交互、没有临时文件、没有时序依赖，天然可靠。
+///
+/// 密钥安装失败时才退回密码——那是「能用但脆」的降级路径，不是主路径。
+fn ensure_key_target(
+    instance: &Instance,
+    config: &OrchestratorConfig,
+) -> MnResult<mangosteen_device::remote::SshTarget> {
+    let base = vendor_password_target(instance, config)?;
+    // 已经在装过公钥的机器上重复部署时，这一步会直接命中探测分支，无额外开销。
+    match mangosteen_device::remote::install_ssh_copy_id(&base) {
+        Ok(key) => {
+            eprintln!(
+                "[cloud] ✓ 实例 {} 已切换到 SSH 密钥认证（{}）",
+                instance.id,
+                key.display()
+            );
+            Ok(mangosteen_device::remote::SshTarget {
+                host: base.host,
+                port: base.port,
+                user: base.user,
+                password: None,
+                identity_file: Some(key),
+            })
+        }
+        Err(e) => {
+            // 降级而非中止：用户至少还能把模型跑起来。但必须留下明显痕迹，
+            // 否则下次又会在隧道阶段看到那个「退出码 255、stderr 空」的谜题。
+            eprintln!(
+                "[cloud] ⚠ 实例 {} 安装 SSH 公钥失败，暂时退回密码认证：{e}",
+                instance.id
+            );
+            Ok(base)
+        }
+    }
+}
+
 /// 由远端连接信息构造隧道参数（云实例与自建设备共用）。
 pub fn tunnel_spec_for(
     ssh: &mangosteen_device::remote::SshTarget,
@@ -1133,7 +1199,8 @@ impl CloudOrchestrator {
             if !instance.state.is_serving() {
                 self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
             }
-            let ssh = vendor_password_target(&instance, &self.config)?;
+            // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
+            let ssh = ensure_key_target(&instance, &self.config)?;
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
             let local_port = self
                 .tunnels
@@ -1161,7 +1228,7 @@ impl CloudOrchestrator {
                 if !instance.state.is_serving() {
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
-                let ssh = vendor_password_target(&instance, &self.config)?;
+                let ssh = ensure_key_target(&instance, &self.config)?;
                 let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
                 let local_port = self
                     .tunnels
@@ -1198,9 +1265,9 @@ impl CloudOrchestrator {
         let driver = self.registry.get(&provider)?;
 
         let result = (|| -> MnResult<ProvisionedResources> {
-            // 这里只确认实例 Running、正式 SSH IP/端口和厂商下发的密码信息。
-            // 密码重置、ssh-copy-id 和密钥登录属于后续“节点配置环境”。
-            let ssh = vendor_password_target(&instance, &self.config)?;
+            // 确认实例 Running 后立刻安装公钥：后续下载、启动、隧道全部走密钥，
+            // 不再依赖密码 askpass（它对时序极敏感，是本模块最脆的一环）。
+            let ssh = ensure_key_target(&instance, &self.config)?;
             // 节点创建完成后只建立基础隧道；模型与引擎准备由编排层按阶段执行。
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
             let local_port = self
