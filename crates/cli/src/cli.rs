@@ -176,7 +176,10 @@ fn commands() -> &'static [(&'static str, &'static str)] {
             "cloud",
             "云端算力：providers / specs / pick / instances / destroy",
         ),
-        ("config", "配置管理：show / init / path / validate"),
+        (
+            "config",
+            "配置管理：show / init / path / validate / reset-templates",
+        ),
         ("serve", "仅启动 API 网关 HTTP 服务"),
         ("tui", "启动全屏交互界面"),
         ("doctor", "环境自检（引擎、硬件、配置、权限）"),
