@@ -67,6 +67,14 @@ impl GatewayServer {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        // 配置模板正文（YAML 全文）。这是部署的唯一真源：下哪个仓库的哪个
+        // 文件、用什么参数启动，全部由它决定。只传名称会让后端只能靠模型名
+        // 硬编码特判，用户选 Uncensored 却下载 default 权重正是这么来的。
+        let config_template_text = parsed
+            .get("config_template_text")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty());
         let model_id = parsed
             .get("model_id")
             .and_then(|v| v.as_str())
@@ -216,22 +224,28 @@ impl GatewayServer {
             }
         }
 
-        // 磁盘空间预检（已知大小时才有意义）
-        if let Some(need) = opts.expected_bytes {
-            if let Ok(avail) = mangosteen_platform::fs::available_space(&cfg.storage.models_dir) {
-                let required = need + need / 20 + (128 << 20);
-                if avail < required {
-                    return Response::json(
-                        400,
-                        &ErrorResponse::bad_request(
-                            format!(
-                                "磁盘空间不足：需要约 {}，可用 {}",
-                                mangosteen_platform::fs::human_bytes(required),
-                                mangosteen_platform::fs::human_bytes(avail)
+        // 磁盘空间预检（已知大小时才有意义）。
+        // 仅「本地部署」需要校验**本地**模型库目录：模型会下载到本机 `models_dir`。
+        // 云端 / 自定义 SSH 节点的模型在**远端**下载，本地磁盘剩余空间与本次部署
+        // 完全无关——绝不能用本机剩余空间去拦云端部署，否则本地盘一紧张，
+        // 远端 32G V100 这种明明够用的机器也开不起来。
+        if deploy_target == "local" {
+            if let Some(need) = opts.expected_bytes {
+                if let Ok(avail) = mangosteen_platform::fs::available_space(&cfg.storage.models_dir) {
+                    let required = need + need / 20 + (128 << 20);
+                    if avail < required {
+                        return Response::json(
+                            400,
+                            &ErrorResponse::bad_request(
+                                format!(
+                                    "磁盘空间不足：需要约 {}，可用 {}",
+                                    mangosteen_platform::fs::human_bytes(required),
+                                    mangosteen_platform::fs::human_bytes(avail)
+                                ),
+                                None,
                             ),
-                            None,
-                        ),
-                    );
+                        );
+                    }
                 }
             }
         }
@@ -340,6 +354,7 @@ impl GatewayServer {
                     r.reuse_provider = reuse_provider.clone();
                     r.auxiliary_models = auxiliary_models.clone();
                     r.config_template = config_template.clone();
+                    r.config_template_text = config_template_text.clone();
                     r
                 };
 
