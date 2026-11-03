@@ -319,6 +319,15 @@ impl Orchestrator {
                     i + 1
                 ),
             );
+            sink(
+                DeployStage::Downloading,
+                StageOutcome::Running,
+                format!(
+                    "[{}/{total}] {kind} {name}：准备下载 {}",
+                    i + 1,
+                    url.as_deref().unwrap_or("（无地址）")
+                ),
+            );
             let file_plan = mangosteen_core::plan::CloudPlan {
                 model_path: path.clone(),
                 download_url: url,
@@ -335,12 +344,40 @@ impl Orchestrator {
             // 这里按 5% 粒度节流上报：既能让用户看到「在下、下了多少」，
             // 又不会因为每秒几十次回调把 trail 撑爆（trail 是全量保留的）。
             let seen_pct = std::sync::atomic::AtomicU64::new(0);
-            let staged = |done: u64, total: Option<u64>| {
-                progress(done, total);
-                let Some(total) = total.filter(|t| *t > 0) else {
+            // 注意命名：外层 `total` 是**文件总数**（用于 [i/N]），
+            // 闭包参数是**当前文件的字节总量**。两者不能同名，否则
+            // 格式化里 {total} 会取到字节数。
+            let staged = |done: u64, grand: Option<u64>| {
+                progress(done, grand);
+                // 没有总大小（源站不返回 Content-Length，辅助文件常见）时
+                // 也必须上报，否则整个下载期间 trail 一条新事件都没有，
+                // 前端就停在「等待阶段输出」。按 64 MiB 粒度报增量。
+                let Some(grand) = grand.filter(|t| *t > 0) else {
+                    let step = done / (64 << 20);
+                    let prev = seen_pct.load(std::sync::atomic::Ordering::Relaxed);
+                    if step > prev
+                        && seen_pct
+                            .compare_exchange(
+                                prev,
+                                step,
+                                std::sync::atomic::Ordering::Relaxed,
+                                std::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        sink(
+                            DeployStage::Downloading,
+                            StageOutcome::Running,
+                            format!(
+                                "[{}/{total}] {kind} {name}：已下载 {}",
+                                i + 1,
+                                mangosteen_platform::fs::human_bytes(done)
+                            ),
+                        );
+                    }
                     return;
                 };
-                let pct = done.saturating_mul(100) / total;
+                let pct = done.saturating_mul(100) / grand;
                 let bucket = pct / 5 * 5;
                 let prev = seen_pct.load(std::sync::atomic::Ordering::Relaxed);
                 if bucket > prev && bucket <= 100 {
@@ -361,7 +398,7 @@ impl Orchestrator {
                                 i + 1,
                                 bucket,
                                 mangosteen_platform::fs::human_bytes(done),
-                                mangosteen_platform::fs::human_bytes(total)
+                                mangosteen_platform::fs::human_bytes(grand)
                             ),
                         );
                     }

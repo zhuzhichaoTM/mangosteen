@@ -141,6 +141,57 @@ mod tests {
         plan
     }
 
+    /// 真实模板驱动：uncensored 与 default 生成的命令必须包含全部
+    /// 用户在模板里声明的参数，且 **uncensored 不得引用外置草稿模型**。
+    ///
+    /// 这条测试守的是「模板字段 → CLI 参数」的翻译完整性：`ubatch` 曾经
+    /// 只被解析、从不翻译成 `--ubatch-size`（死字段），用户在模板里改它
+    /// 毫无效果。
+    #[test]
+    fn builtin_templates_translate_to_expected_cli() {
+        use mangosteen_core::template::BUILTIN_TEMPLATES;
+
+        for (model, slot, _name, text) in BUILTIN_TEMPLATES {
+            if *model != "qwen3.8-27b" || *slot != "uncensored" {
+                continue;
+            }
+            let spec = mangosteen_core::template::resolve(model, text).expect("模板可解析");
+            let mut p = plan();
+            p.context_size = spec.context;
+            p.batch_size = spec.batch;
+            p.gpu_layers = spec.gpu_layers;
+            p.flash_attention = spec.flash_attn;
+            p.mmproj_path = spec.mmproj.clone();
+            p.draft_model_path = spec.draft_model.clone();
+            p.extra_args = spec.extra_args.clone();
+
+            let args = llama_cpp_args(&p, "0.0.0.0", 8080);
+            let joined = args.join(" ");
+
+            // 模板声明的参数必须全部出现在命令行里
+            for flag in ["--ubatch-size", "--cache-reuse", "--jinja", "--metrics"] {
+                assert!(joined.contains(flag), "缺少模板声明的 {flag}：{joined}");
+            }
+            assert!(joined.contains("512"), "ubatch 的值应下发：{joined}");
+            assert!(joined.contains("--spec-draft-n-max"), "{joined}");
+            assert!(
+                joined.contains("--mmproj"),
+                "多模态投影必须下发：{joined}"
+            );
+
+            // uncensored 不带外置草稿：FastMTP 侧车需要私有补丁，
+            // 官方 llama-server 加载会报 output.weight 形状错误。
+            assert!(
+                !joined.contains("--model-draft"),
+                "uncensored 模板不应引用外置草稿模型：{joined}"
+            );
+            assert!(
+                !args.iter().any(|a| a.contains("FastMTP")),
+                "不应出现 FastMTP 侧车路径：{joined}"
+            );
+        }
+    }
+
     /// 同一 flag 绝不允许出现两次。
     ///
     /// 实测踩到：适配器硬编码 `--spec-draft-n-max 4`，模板的

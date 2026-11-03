@@ -334,18 +334,21 @@ gpu_layers: 99
 parallel: 1
 batch: 2048
 ubatch: 512
-cache_k: q4_0
-cache_v: q4_0
+cache_k: q8_0
+cache_v: q8_0
 flash_attn: on
-image_max_tokens: 768
-mtmd_batch_max_tokens: 256
+image_max_tokens: 1024
+mtmd_batch_max_tokens: 512
+cache_reuse: 256
+jinja: on
+metrics: on
 speculative:
   type: draft-mtp
   draft_model_path: MTP/mtp-Qwen3.8-27B-Q4_0.gguf
   draft_gpu_layers: 99
-  draft_n_max: 4
-  draft_cache_k: q4_0
-  draft_cache_v: q4_0
+  draft_n_max: 2
+  draft_cache_k: q8_0
+  draft_cache_v: q8_0
 multimodal:
   mmproj: mmproj-BF16.gguf
 host: 0.0.0.0
@@ -367,29 +370,32 @@ binary: llama-server
 model: Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf
 auxiliary_models:
   - mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf (多模态投影)
-  - Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf (MTP draft)
 context: 65536
 gpu_layers: 99
 parallel: 1
 batch: 2048
 ubatch: 512
-cache_k: q4_0
-cache_v: q4_0
+cache_k: q8_0
+cache_v: q8_0
 flash_attn: on
-image_max_tokens: 768
-mtmd_batch_max_tokens: 256
+image_max_tokens: 1024
+mtmd_batch_max_tokens: 512
+cache_reuse: 256
+jinja: on
+metrics: on
 speculative:
   type: draft-mtp
-  draft_model_path: Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-FastMTP-32K.gguf
-  draft_gpu_layers: 99
-  draft_n_max: 4
-  draft_cache_k: q4_0
-  draft_cache_v: q4_0
+  draft_n_max: 2
 multimodal:
   mmproj: mmproj-Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-BF16.gguf
 host: 0.0.0.0
 alias: qwen3.8-27b
-# port: 由部署调度器按节点占用情况动态分配"#,
+# port: 由部署调度器按节点占用情况动态分配
+# 注：本模板**不使用外置草稿模型**。HauhauCS 仓库的 FastMTP-32K 侧车
+# 必须搭配其私有 llama.cpp 补丁才能加载（官方预编译版会报
+# tensor 'output.weight' has wrong shape; expected 5120,248320, got 5120,32768）。
+# 主权重 GGUF 自带 Qwen3.8 原生内嵌 MTP 头，只传 --spec-type draft-mtp
+# 即可获得投机解码加速，无需任何额外文件。"#,
     ),
 ];
 
@@ -487,7 +493,22 @@ impl ModelTemplateSchema for Qwen38Schema {
             .get_nested("speculative", "draft_n_max")
             .and_then(|s| s.trim().parse::<u32>().ok());
 
-        // 模型专属的额外参数：只有真正有值才下发，避免覆盖引擎默认
+        // 模型专属的额外参数：只有真正有值才下发，避免覆盖引擎默认。
+        //
+        // ## 这些字段为什么走 extra_args 而不是 LocalPlan 结构
+        //
+        // `LocalPlan` 是「推理意图」的通用表达（上下文、层数、KV 精度…），
+        // 每个引擎适配器都要能解释它。而 `ubatch` / `cache-reuse` / `jinja`
+        // / `metrics` 是 **llama.cpp 专属开关**，塞进 LocalPlan 会强迫别的
+        // 引擎适配器为它们写空实现。放进 `extra_args` 由适配器原样透传，
+        // 语义边界更干净。
+        //
+        // ## 为什么必须显式下发 ubatch
+        //
+        // 模板里 `ubatch: 512` 曾经只被解析进 `ModelDeploySpec.ubatch`
+        // 却从未翻译成 CLI 参数——一个彻头彻尾的**死字段**：用户改了它，
+        // 进程命令行毫无变化，实测最终启动命令里根本没有 `--ubatch-size`。
+        // 现在把它接进 extra_args，模板写什么就下发什么。
         let mut extra_args = Vec::new();
         for key in [
             "parallel",
@@ -497,6 +518,22 @@ impl ModelTemplateSchema for Qwen38Schema {
             if let Some(v) = raw.get(key) {
                 extra_args.push(format!("--{}", key.replace('_', "-")));
                 extra_args.push(v.to_string());
+            }
+        }
+        // `ubatch` 字段名与 CLI 不同名（`--ubatch-size`），单独映射
+        if let Some(v) = raw.get_u32("ubatch") {
+            extra_args.push("--ubatch-size".to_string());
+            extra_args.push(v.to_string());
+        }
+        // 下列为「开关型/单值型」参数：模板给了值就下发。
+        // 布尔开关（jinja / metrics）约定写 `on`/`true`/`yes` 即为启用。
+        if let Some(v) = raw.get_u32("cache_reuse") {
+            extra_args.push("--cache-reuse".to_string());
+            extra_args.push(v.to_string());
+        }
+        for key in ["jinja", "metrics"] {
+            if raw.get_bool(key).unwrap_or(false) {
+                extra_args.push(format!("--{key}"));
             }
         }
         if let Some(n) = draft_n_max {
