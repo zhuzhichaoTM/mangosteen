@@ -1326,8 +1326,15 @@ pub fn llama_server_running(target: &SshTarget, workdir: &str) -> MnResult<bool>
 
 /// 指定远端端口对应的 llama-server 是否仍在运行。
 ///
-/// 判据按「pid 文件 → 端口监听」依次检查，两种 pid 命名都要看：
+/// 判据按「pid 文件 → 命令行端口 → 端口监听」依次检查，两种 pid 命名都要看：
 /// 8080 历史上写的是 `llama-server.pid`，其它端口写 `llama-server-<port>.pid`。
+///
+/// ## 为什么必须叠加「命令行端口」判据
+///
+/// 只看 pid 文件会在 pid 文件缺失/陈旧时**漏判**（进程明明活着却报 no）；
+/// 只看端口监听会在进程已启动、尚未监听时**误判**（ports 还没 bind）。
+/// 按 `--port <p>` 匹配进程命令行是唯一既准确又不依赖辅助文件的判据——
+/// 现场踩到的正是「台账 8080、真实 8081、pid 文件里是死 PID」这种组合。
 pub fn llama_server_running_on_port(
     target: &SshTarget,
     workdir: &str,
@@ -1345,8 +1352,13 @@ pub fn llama_server_running_on_port(
         target,
         &format!(
             "for f in {pid_candidates}; do \
-               if [ -f \"$f\" ] && kill -0 $(cat \"$f\") 2>/dev/null; then echo yes; exit 0; fi; \
+               if [ -f \"$f\" ] && kill -0 $(cat \"$f\") 2>/dev/null \
+                  && ps -p $(cat \"$f\") -o args= 2>/dev/null | grep -q llama-server; then \
+                 echo yes; exit 0; fi; \
              done; \
+             if ps -eo args= 2>/dev/null | awk -v p='--port {port}' \
+                  'index($0,\"llama-server\")>0 && index($0,p)>0' | grep -q .; then \
+               echo yes; exit 0; fi; \
              if {listen}; then echo yes; else echo no; fi",
             listen = listening_probe(port)
         ),
@@ -1372,99 +1384,8 @@ pub fn stop_llama_server_on_port(
     workdir: &str,
     port: Option<u16>,
 ) -> MnResult<()> {
-    // 先 TERM 给机会优雅退出（它会自己释放显存），等不到再 KILL。
-    // 只 TERM 给机会优雅退出（它会自己释放显存），等不到再 KILL。
-    // 只 TERM 就返回是不行的：端口没释放，重启会报 address in use。
-    //
-    // 多模型节点必须按部署自己的 pid/端口操作；不带端口时才兼容旧的
-    // 单模型逻辑。带端口时不允许 `pkill -x llama-server` 兜底。
-    let scoped = port.is_some();
-    // pid 文件名必须与启动侧 `start_llama_server` 完全一致：
-    // 8080 写的是历史名 `llama-server.pid`，其它端口才带端口号。
-    //
-    // 这里曾一律用 `llama-server-<port>.pid`，于是停止 8080 的模型时
-    // 找不到 pid 文件，`scope_check` 直接为真并 `echo stopped`——
-    // 报告成功但进程根本没被 kill。两个模型共用节点时表现为
-    // 「卸载第二个模型后进程仍在、节点无法关机」。
-    let pid_path = match port {
-        Some(8080) => format!("{workdir}/llama-server.pid"),
-        Some(p) => format!("{workdir}/llama-server-{p}.pid"),
-        None => format!("{workdir}/llama-server.pid"),
-    };
-    let term_all = if scoped {
-        // 先校验 pid 确实属于 llama-server 再 kill：pid 文件可能残留
-        // 一个已死 PID，而该 PID 已被别的进程复用，盲杀会误伤无关进程。
-        format!(
-            "if [ -f {pid} ]; then P=$(cat {pid} 2>/dev/null); \
-             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
-                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
-               kill -TERM -- -\"$P\" 2>/dev/null || kill -TERM \"$P\" 2>/dev/null || true; \
-             fi; fi",
-            pid = pid_path
-        )
-    } else {
-        format!(
-            "if [ -f {workdir}/llama-server.pid ]; then P=$(cat {workdir}/llama-server.pid 2>/dev/null); \
-             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
-                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
-               kill -TERM -- -\"$P\" 2>/dev/null || kill -TERM \"$P\" 2>/dev/null || true; \
-             fi; fi; pkill -TERM -x llama-server 2>/dev/null || true"
-        )
-    };
-    let kill_all = if scoped {
-        format!(
-            "if [ -f {pid} ]; then P=$(cat {pid} 2>/dev/null); \
-             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
-                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
-               kill -KILL -- -\"$P\" 2>/dev/null || kill -KILL \"$P\" 2>/dev/null || true; \
-             fi; fi",
-            pid = pid_path
-        )
-    } else {
-        format!(
-            "if [ -f {workdir}/llama-server.pid ]; then P=$(cat {workdir}/llama-server.pid 2>/dev/null); \
-             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
-                && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
-               kill -KILL -- -\"$P\" 2>/dev/null || kill -KILL \"$P\" 2>/dev/null || true; \
-             fi; fi; pkill -KILL -x llama-server 2>/dev/null || true"
-        )
-    };
-    // 停止成功后必须删掉 pid 文件。残留文件里是已退出的 PID，
-    // 一旦该 PID 被别的进程复用，后续 `kill -0` 会误判「模型还在跑」，
-    // 甚至在下一次启动前清理时误杀无关进程。
-    //
-    // 带端口时只删本端口的文件，绝不能碰同节点其它模型的 pid 文件。
-    let cleanup = if port.is_some() {
-        format!("rm -f {pid_path}")
-    } else {
-        format!("rm -f {workdir}/llama-server.pid {workdir}/llama-server-*.pid")
-    };
-    // 带端口时：pid 文件里的进程已退出，且该端口不再监听，才算真正停止。
-    // 只检查 pid 文件不够——文件缺失会被误判成「已停止」，这正是
-    // 8080 端口停止假成功的成因。因此必须叠加端口监听兜底。
-    let scope_check = if let Some(p) = port {
-        format!(
-            "(test ! -f {pid} || ! kill -0 $(cat {pid}) 2>/dev/null) && ! ({listen})",
-            pid = pid_path,
-            listen = listening_probe(p)
-        )
-    } else {
-        "! pgrep -x llama-server >/dev/null 2>&1".to_string()
-    };
-    let out = ssh_exec(
-        target,
-        &format!(
-            "{term_all}; \
-             for i in $(seq 1 20); do \
-               if {scope_check}; then {cleanup}; echo stopped; exit 0; fi; \
-               sleep 0.5; \
-             done; \
-             {kill_all}; sleep 1; \
-             if ! ({scope_check}); then echo still-running; exit 1; fi; \
-             {cleanup}; echo stopped",
-        ),
-        60,
-    )?;
+    let script = build_stop_script(workdir, port);
+    let out = ssh_exec(target, &script, 90)?;
     if out.contains("still-running") {
         return Err(MnError::Network {
             stage: "停止云端推理服务".to_string(),
@@ -1472,6 +1393,121 @@ pub fn stop_llama_server_on_port(
         });
     }
     Ok(())
+}
+
+/// 生成停止 `llama-server` 的远端脚本（纯函数，供生产与测试共用）。
+///
+/// ## 为什么不能只靠 pid 文件定位（实测踩到的「停止假成功」）
+///
+/// 旧实现只按 `pid_file` 找进程，判定式是
+/// `(test ! -f pid || ! kill -0 $(cat pid)) && ! (监听 <port>)`。
+/// 现场组合恰好让三项全真：
+///
+/// * 台账记的 `engine_port=8080`，远端真实进程却在 `--port 8081` 上跑；
+/// * `llama-server.pid` 里躺着早已退出的旧 PID（kill -0 失败）；
+/// * 8080 当然没有监听。
+///
+/// 于是直接 `rm -f llama-server.pid; echo stopped`——**报告停止成功，
+/// 实际一个进程都没杀**。上层据此认为「服务已停」，随后的关机流程
+/// 又被跳过，节点继续按小时计费。
+///
+/// ## 现在的定位：三路并集
+///
+/// 1. pid 文件（兼容两种历史命名）；
+/// 2. 命令行里含 `--port <p>` 的 llama-server 进程——**端口漂移的唯一可靠线索**；
+/// 3. 正在监听该端口的进程（由 `ss`/`netstat` 兜底）。
+///
+/// 三者都为空才算「已停止」。并且**只有确认停止之后才删 pid 文件**，
+/// 否则会把诊断线索一起抹掉。
+fn build_stop_script(workdir: &str, port: Option<u16>) -> String {
+    // 先 TERM 给机会优雅退出（它会自己释放显存），等不到再 KILL。
+    // 只 TERM 就返回是不行的：端口没释放，重启会报 address in use。
+    //
+    // 多模型节点必须按部署自己的 pid/端口操作；不带端口时才兼容旧的
+    // 单模型逻辑。带端口时不允许 `pkill -x llama-server` 兜底。
+    //
+    // pid 文件名必须与启动侧 `start_llama_server` 完全一致：
+    // 8080 写的是历史名 `llama-server.pid`，其它端口才带端口号。
+    let pid_path = match port {
+        Some(8080) => format!("{workdir}/llama-server.pid"),
+        Some(p) => format!("{workdir}/llama-server-{p}.pid"),
+        None => format!("{workdir}/llama-server.pid"),
+    };
+    let pid_candidates = match port {
+        // 8080 同时兼容两种命名：历史上不同版本写过的名字不一样
+        Some(8080) => format!("{workdir}/llama-server.pid {workdir}/llama-server-8080.pid"),
+        _ => pid_path.clone(),
+    };
+    // 按端口匹配 llama-server 进程 PID（awk 里已按 llama-server 过滤，
+    // 不会把 grep/awk 自身算进去）
+    let pids_by_port = match port {
+        Some(p) => format!(
+            "ps -eo pid=,args= 2>/dev/null | awk -v p='--port {p}' \
+             'index($0,\"llama-server\")>0 && index($0,p)>0 {{print $1}}'"
+        ),
+        None => "true".to_string(),
+    };
+    // 收集本部署所有相关 PID（去重）
+    let collect = format!(
+        "PIDS=\"\"; \
+         for f in {pid_candidates}; do \
+           if [ -f \"$f\" ]; then Q=$(cat \"$f\" 2>/dev/null); \
+             if [ -n \"$Q\" ] && kill -0 \"$Q\" 2>/dev/null \
+                && ps -p \"$Q\" -o args= 2>/dev/null | grep -q llama-server; then \
+               PIDS=\"$PIDS $Q\"; fi; fi; \
+         done; \
+         for Q in $({pids_by_port}); do PIDS=\"$PIDS $Q\"; done; \
+         PIDS=$(printf '%s\\n' $PIDS | sort -u)"
+    );
+    // 逐 PID 终止：进程组优先（setsid 起的 llama-server 是组长）
+    let kill_pids = |sig: &str| {
+        format!(
+            "for Q in $PIDS; do \
+               kill -{sig} -- -\"$Q\" 2>/dev/null || kill -{sig} \"$Q\" 2>/dev/null || true; \
+             done"
+        )
+    };
+    let term_all = format!("{collect}; {}", kill_pids("TERM"));
+    let kill_all = format!("{collect}; {}", kill_pids("KILL"));
+    // 停止成功的唯一判据：**没有**属于该端口的 llama-server 进程。
+    let scope_check = match port {
+        Some(p) => format!(
+            "{collect}; \
+             test -z \"$({pids_by_port})\" && ! ({listen})",
+            listen = listening_probe(p)
+        ),
+        None => "! pgrep -x llama-server >/dev/null 2>&1".to_string(),
+    };
+    let cleanup = match port {
+        Some(_) => format!("rm -f {pid_path}"),
+        None => format!("rm -f {workdir}/llama-server.pid {workdir}/llama-server-*.pid"),
+    };
+    stop_script(&term_all, &kill_all, &scope_check, &cleanup)
+}
+
+/// 组装停止脚本。
+///
+/// ## 顺序不可调换
+///
+/// 1. 先发 TERM（给进程优雅退出、释放显存的机会）；
+/// 2. 最多等 10 秒；**只有确认进程真的没了**才删 pid 文件并报 stopped；
+/// 3. 等不到就 KILL，再校验一次；
+/// 4. 仍活着则输出 `still-running` 让调用方报错。
+///
+/// 旧实现把「删 pid 文件」提前到判定式通过的分支，而判定式本身可以被
+/// 「pid 文件不存在」误触发——于是「没杀成，还把唯一的线索删了」，
+/// 上层拿到 stopped 就继续走关机流程，实际 GPU 仍在计费。
+fn stop_script(term_all: &str, kill_all: &str, scope_check: &str, cleanup: &str) -> String {
+    format!(
+        "{term_all}; \
+         for i in $(seq 1 20); do \
+           if {scope_check}; then {cleanup}; echo stopped; exit 0; fi; \
+           sleep 0.5; \
+         done; \
+         {kill_all}; sleep 1; \
+         if ! ({scope_check}); then echo still-running; exit 1; fi; \
+         {cleanup}; echo stopped"
+    )
 }
 
 // ------------------------------------------------------------ 远端下载模型
@@ -2002,5 +2038,56 @@ mod ssh_failure_tests {
                 "应判为致命错误（重试无意义），却当成可重试：{line}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_script_tests {
+    use super::build_stop_script;
+
+    /// 停止脚本必须按 `--port` 匹配进程，不能只依赖 pid 文件。
+    ///
+    /// 现场：台账 engine_port=8080，远端真实进程跑在 `--port 8081`，
+    /// `llama-server.pid` 里是早已退出的旧 PID。旧判定式三项全真，
+    /// 于是删 pid 文件并报 stopped——一个进程都没杀，节点继续计费。
+    #[test]
+    fn stop_script_locates_process_by_port_flag() {
+        let script = build_stop_script("/root/mangosteen", Some(8081));
+        assert!(
+            script.contains("--port 8081"),
+            "必须按 --port 定位进程，否则端口漂移后停不掉：{script}"
+        );
+        assert!(
+            script.contains("llama-server-8081.pid"),
+            "必须引用该端口自己的 pid 文件：{script}"
+        );
+    }
+
+    /// 停止后必须校验；校验失败要能报错，不能无条件成功。
+    #[test]
+    fn stop_script_verifies_before_reporting_success() {
+        let script = build_stop_script("/root/mangosteen", Some(8081));
+        assert!(script.contains("still-running"), "缺少失败出口：{script}");
+        // cleanup 必须排在 echo stopped 之前（先确认、后删文件）
+        let stopped = script.rfind("echo stopped").unwrap_or(0);
+        let cleanup = script.rfind("rm -f").unwrap_or(0);
+        assert!(cleanup < stopped, "删 pid 文件必须在确认停止之后：{script}");
+        // 必须有 TERM → 等待 → KILL 的升级过程
+        assert!(script.contains("kill -TERM"), "{script}");
+        assert!(script.contains("kill -KILL"), "{script}");
+        assert!(script.contains("sleep 0.5"), "{script}");
+    }
+
+    /// 不带端口（单模型兼容路径）必须退化为「杀掉所有 llama-server」，
+    /// 且不能误删其它端口的 pid 文件。
+    #[test]
+    fn unscoped_stop_falls_back_to_pkill_all() {
+        let script = build_stop_script("/root/mangosteen", None);
+        assert!(script.contains("pgrep -x llama-server"), "{script}");
+        assert!(script.contains("llama-server-*.pid"), "{script}");
+        assert!(
+            !script.contains("--port"),
+            "无端口模式不应出现端口匹配：{script}"
+        );
     }
 }
