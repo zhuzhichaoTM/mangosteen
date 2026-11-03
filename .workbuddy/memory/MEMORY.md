@@ -16,12 +16,37 @@
 6. 配置驱动
 7. 产品边界：不集群/多租户/分布式；云端优先4090/5090
 
+## 多平台兼容原则（用户强制规则，最高优先级）
+**本程序必须同时运行在 macOS / Windows / Linux。任何"只在本机 macOS 能跑"的实现都是缺陷，不是可接受的捷径。**
+
+编码时必须遵守：
+1. **禁止 macOS 专属假设**：`/dev/null`（Windows 是 `NUL`）、`/bin/sh`、`bash -c`、POSIX 权限位、`~` 展开、`$HOME`（Windows 是 `USERPROFILE`）、`ps`/`pgrep`/`kill`/`lsof`/`ss`/`netstat`/`chmod`/`setsid`/`nohup`、`LD_LIBRARY_PATH`（Windows 是 `PATH`）等一律不得在业务代码直接出现
+2. **平台差异只能落在 `mangosteen-platform`**：`cfg(target_os)` / `cfg(unix)` / `cfg(windows)` 禁止出现在 platform 之外的 crate（`cli/tests/layering.rs` 卡这条）；需要平台能力时从 platform 取函数或 trait 实例
+3. **路径一律用 `PathBuf`/`Path` 拼接**，禁止字符串拼 `/`；用户目录用 `platform::paths`，不用硬编码 `~/.mangosteen`
+4. **外部命令必须经 `platform::process`**：可执行名带平台后缀（`ssh.exe`/`llama-server.exe`），shell 语义命令不得直接 `sh -c`
+5. **新增平台分支必须补测试**：至少在 `#[cfg(...)]` 两侧各断言一次行为，或断言命名/路径常量符合当前平台
+6. **审计义务**：任何一次改动若引入平台假设，必须在提交前自查；发现历史遗留的 macOS 定制实现应主动记录到「平台兼容待办」
+
+已知历史欠账见 `.workbuddy/memory/platform-audit.md`（全量梳理结果与重构方案）。
+
 ## 技术约定
 - Rust 2021, MSRV 1.75，依赖极简（serde/serde_json/toml/sha2/libc/windows-sys）。不用 reqwest(走curl)/axum(手写HTTP)/clap/ratatui/UUID/chrono/dirs/base64(手写)
 - 生产代码禁滥用 unwrap（layering 卡 <3/kloc），统一 MnError
 - 提交前必跑 `cargo test --workspace`，零警告
 - 测试不写死端口：`bind(("127.0.0.1",0))`；`TestEnv::new(tag)` 用 tag 哈希派生端口段，tag 重复会污染 state 目录
 - `TestEnv::write_gguf` 模型名固定 `qwen2.5-7b-instruct`
+
+## 提交与版本控制规则（用户强制规则，立即生效）
+- 每个独立的改动，只要「编译验证 OK」（目标 crate `cargo build` 零警告；必要时 `cargo test` 全过）就**自动做本地 git commit**，不等用户确认
+- Commit message 格式（参考现有提交 `0f684ca`）：
+  - 标题：`feat|fix|refactor(<范围>): <中文摘要>`
+  - 正文：先用一句话说明本次按反馈改了什么
+  - 「支撑改动：」逐条列出底层/关联改动
+  - 「验证：」列出 refactor-check / e2e / 真实浏览器或 API 验证结论
+  - 末尾固定 `Co-Authored-By: Claude <noreply@anthropic.com>`
+- Author 固定 `forrest zhu <rtmdk@163.com>`（仓库已配置）
+- 同一会话的多个改动要拆成**逻辑独立的 commit**，不要混成一个大杂烩；新文件与主改动一起提交
+- 工作树里若混有非本会话的遗留改动，先确认范围再提交，避免把无关改动塞进同一 commit
 
 ## 云端节点复用（用户显式指定）
 - 链路：UI 选择已有节点 → payload 带 reuse_instance_id/reuse_provider → pull.rs 解析 → build_cloud_plan 传播 → provision_resources 顶部显式复用（优先于 GPU 型号自动匹配）
@@ -104,9 +129,11 @@
 - 云端 gpu_layers 必须 = spec.n_layers（本机无GPU时是0，搬云端变CPU推理）
 - 创建失败按价格顺序换下一个候选：无库存/售罄重试；实例建出但起不来(failed/destroyed/start_timeout)清理后也换下一个；鉴权/参数/余额立刻中止
 - 销毁要重试 destroy_with_retry：厂商状态变更时返回8903 UHost is in the task
-- SSH 密码认证：SSH_ASKPASS + SSH_ASKPASS_REQUIRE=force，临时脚本0700；本机无sshpass
-- askpass 脚本不能 spawn 后立刻删：要等隧道建成/明确失败后再删
+- SSH askpass 仅在装公钥时用一次：SSH_ASKPASS + SSH_ASKPASS_REQUIRE=force；本机无 sshpass
 - 密码优先级：Instance.network.ssh_password > [cloud].ssh_password；厂商已给密码不要 reset_root_password
+- **SSH 一律走密钥认证**（勿改回密码 askpass）：密码只用于第一次 install_ssh_copy_id 装公钥，之后 ensure_key_target 返回 identity_file + BatchMode。askpass 靠临时脚本传密码，ssh 延迟调用它、时序极敏感，脚本被提前删就是「退出码255 + stderr空」；且 /bin/sh 在 Windows 不存在
+- platform/ssh.rs 是 SSH 平台差异唯一收口：askpass 脚本（Unix sh / Windows cmd）、密码走独立 sidecar（脚本正文不含密码，规避 cmd 转义）、ssh/scp 可执行名、null_device_path()
+- device：ensure_identity_key 生成/复用 ~/.ssh/id_ed25519（HOME 兼容 USERPROFILE）；default_identity_key 只探测不创建
 - 隧道进程必须捕获 stderr
 - scheduler.require_stock：优云库存是模拟调度必须关；AutoDL较准
 - 「最便宜」未知价格 f64::INFINITY 排最后不能当0元；价格哨兵 hourly_price 拒 ≥MAX/2 及 >1000元/h
@@ -152,3 +179,21 @@
 - 11434 是 Ollama；网关默认11516，引擎从11435起；清理进程别误杀
 - ~/.cargo/bin 需手动加PATH；本机有 expect、无 sshpass
 - 用户配置在 ~/Library/Application Support/mangosteen/；密钥放 secrets/(0700)
+
+## SSH 可靠性约定
+- 远端命令 255+空 stderr = 连接层中断：ssh_exec 自动重试 3 次；有真实 stderr 立即报错
+- 远端轮询类操作必须合并为单条 SSH 命令（一次连接取回多态），禁止高频多条连接——厂商网关按连接频率限流
+- 长命令依赖 ServerAliveInterval=15 保活（base_opts 统一注入）
+- **隧道禁用 ControlMaster**：厂商 SSH 入口是共享网关，未指定 ControlPath 时套接字按 host:port 复用会撞车，表现为 Connection closed by remote host
+- 隧道建连加 ConnectionAttempts=5 + ConnectTimeout=10 覆盖「连上即被关闭」窗口；establish 外壳对瞬时错误重试 4 次，认证失败不重试
+- 隧道运行期断开必须用 TunnelManager::heal(remote_port) 原地重建（按记录的 TunnelSpec）；ensure_alive/local_port_for_remote 历史上从未被生产代码调用，勿再依赖
+- **ssh_exec 重试判定**：只对「255 且未命中认证/配置类关键词」重试（Connection closed/refused/reset/timeout 都算瞬时）；Permission denied/Host key verification/Too many auth failures/Could not resolve 判死。切勿改回「stderr 为空才重试」——那会把最常见的网关中断判成致命错误
+- **atomic_write 临时名必须唯一**（pid+seq+nanos）：固定名 `.<name>.tmp` 在并发写时会互相截断，实测把 config.toml 写成半截 UTF-8
+- 配置加载区分语法损坏（隔离为 .corrupt-<ts> + 回落内置默认）与语义错误（原样报错），不可混为一谈
+- **停止必须按端口定位进程**，不能只认 pid 文件：台账 engine_port 会与远端实际 `--port` 漂移，pid 文件会缺失/陈旧。判据是「无该端口 llama-server 进程」，且**确认停止后才删 pid 文件**（旧顺序导致「没杀成还删线索」）
+- 停止脚本唯一实现 `build_stop_script(workdir, port)`；有 3 条测试锁住「按 --port 匹配 / 必须校验 / 先确认后删」
+- CLI 无「关机保留」子命令：需要停实例时用 `cargo run -p mangosteen-provider --example instance_power -- stop <uhost-id>`（需 COMPSHARE_PUBLIC_KEY/PRIVATE_KEY）
+- **内置模板改进需手动送达**：seed_builtin_templates 只在槽位缺失时插入（保护用户自定义），改了内置模板后用 `mangosteen config reset-templates --yes` + `ui restart`，否则用户仍跑旧模板
+- **模板字段必须翻译成 CLI 参数**：ubatch 曾是死字段（解析了但没生成 --ubatch-size）。新增模板字段时务必同时改 Qwen38Schema 的 extra_args 映射并补 builtin_templates_translate_to_expected_cli 断言
+- **uncensored 模板禁用外置草稿**：FastMTP-32K 侧车需 HauhauCS 私有 llama.cpp 补丁，官方预编译报 output.weight 形状错误；走内嵌 MTP（只传 --spec-type draft-mtp）
+- **测试严禁写真实配置**：Gateway::build 的种子写入必须用注入的 ConfigStore（GatewayBuilder::config_store），曾因硬编码 platform_default(None) 让每次 e2e 把开发者本机 config.toml 改成测试临时路径且 providers 清空。新增任何"启动时落盘"的逻辑都要检查这一点
