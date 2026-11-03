@@ -862,11 +862,24 @@ fn ssh_exec_once(target: &SshTarget, cmd: &str) -> Result<String, SshFailure> {
                 )
             }
         } else {
+            // 保留尾部 12 行并用换行分隔，而不是只取前 3 行用 " / " 拼成一行。
+            //
+            // 远端命令的 stderr 往往是「先说结论、再贴细节」——例如启动失败
+            // 时先打 `--- 启动失败，关键日志 ---`，真正原因在随后的几行。
+            // 只取前 3 行会恰好把结论留下、把原因丢掉；压成一行则让多行
+            // 日志（参数回显、堆栈）彻底不可读。
+            let tail: Vec<&str> = real
+                .iter()
+                .rev()
+                .take(12)
+                .rev()
+                .cloned()
+                .collect();
             format!(
-                "`{}` 失败（退出码 {:?}）：{}",
+                "`{}` 失败（退出码 {:?}）：\n{}",
                 truncate_cmd(cmd),
                 out.status.code(),
-                real.iter().take(3).cloned().collect::<Vec<_>>().join(" / ")
+                tail.join("\n")
             )
         };
         // 判定「值不值得重试」不能只看 stderr 是否为空。
@@ -1172,13 +1185,14 @@ pub fn start_llama_server(
            sleep 0.5; \
            if [ ! -f {pid_file} ] || ! kill -0 $(cat {pid_file}) 2>/dev/null; then \
              if [ $i -lt 2 ]; then continue; fi; \
-             echo '--- 启动失败，日志尾部 ---' >&2; tail -40 {log} >&2; exit 1; \
+             echo '--- 启动失败，关键日志 ---' >&2; {failure_digest}; exit 1; \
            fi; \
            if {listen_probe}; then started=1; break; fi; \
          done; \
          if [ $started -eq 1 ] || kill -0 $(cat {pid_file}) 2>/dev/null; then echo started; exit 0; fi; \
-         echo '--- 启动超时，日志尾部 ---' >&2; tail -40 {log} >&2; exit 1",
-        args = quoted.join(" ")
+         echo '--- 启动超时，关键日志 ---' >&2; {failure_digest}; exit 1",
+        args = quoted.join(" "),
+        failure_digest = failure_digest_script(&log)
     );
     ssh_exec(target, &script, 180)?;
     Ok(())
@@ -1202,6 +1216,29 @@ fn port_from_args(args: &[String]) -> u16 {
         .and_then(|i| args.get(i + 1))
         .and_then(|p| p.parse().ok())
         .unwrap_or(LLAMA_CPP_PORT)
+}
+
+/// 生成「提取启动失败关键信息」的远端 shell 片段。
+///
+/// ## 为什么不能直接 `tail -40`
+///
+/// llama-server 启动时会先打十几行参数回显和 DEPRECATED 警告，真正的
+/// 失败原因（如 `error while handling argument "--model-draft"`、
+/// `failed to load model`、CUDA OOM）往往在**更靠前**的位置，或者被
+/// 淹没在警告里。`tail -40` 拿到的是「最后一屏噪音」，再看 ssh_exec 只
+/// 展示前 3 行，用户看到的就是一条与真实原因无关的 `DEPRECATED: ...`。
+///
+/// 这里按优先级取：
+/// 1. 命中错误关键词的行（error/failed/abort/not found/cannot/out of memory）
+/// 2. 上述为空时退回尾部 15 行（至少能看到最后在做什么）
+///
+/// 结果交给调用方原样展示，不再由 ssh_exec 二次截断。
+fn failure_digest_script(log: &str) -> String {
+    format!(
+        "D=$(grep -iE 'error|fail|abort|not found|cannot|out of memory|invalid' {log} 2>/dev/null | grep -viE 'DEPRECATED|^\\s*$' | tail -8); \
+         if [ -z \"$D\" ]; then D=$(tail -15 {log} 2>/dev/null); fi; \
+         printf '%s\\n' \"$D\" >&2"
+    )
 }
 
 /// 读取指定部署的远端启动诊断信息，不修改远端状态。

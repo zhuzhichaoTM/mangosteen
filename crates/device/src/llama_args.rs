@@ -51,8 +51,6 @@ pub fn llama_cpp_args(plan: &LocalPlan, bind_host: &str, port: u16) -> Vec<Strin
             "draft-mtp".to_string(),
             "--n-gpu-layers-draft".to_string(),
             plan.gpu_layers.to_string(),
-            "--spec-draft-n-max".to_string(),
-            "4".to_string(),
             "--spec-draft-type-k".to_string(),
             plan.kv_cache_type_k.as_cli_value().to_string(),
             "--spec-draft-type-v".to_string(),
@@ -61,7 +59,38 @@ pub fn llama_cpp_args(plan: &LocalPlan, bind_host: &str, port: u16) -> Vec<Strin
     }
     // 特定模型模板的 llama.cpp 参数由调度器注入；动态端口和模型路径
     // 仍由本适配器统一生成，防止模板覆盖节点端口映射。
-    args.extend(plan.extra_args.iter().cloned());
+    //
+    // ## 去重：同一个 flag 只能出现一次
+    //
+    // 历史上 `--spec-draft-n-max` 在这里硬编码为 `4`，而模板的
+    // `draft_n_max: 4` 又经 `extra_args` 追加一次。llama-server 对重复参数
+    // 只发 warning 并取最后一个值——但那行 warning 会顶掉真正有用的启动
+    // 诊断，排障时看到 `specified multiple times` 很容易误判成失败原因。
+    //
+    // 规则：适配器已生成的 flag 一律不让模板重复添加；模板独有的 flag
+    // 照常追加（模板是模型专属调参，优先级最高）。
+    let adapter_flags: Vec<String> = args
+        .iter()
+        .filter(|a| a.starts_with("--"))
+        .cloned()
+        .collect();
+    let mut skip_next = false;
+    for extra in &plan.extra_args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if extra.starts_with("--") {
+            if adapter_flags.contains(extra) {
+                // 连同紧随的取值一起跳过，避免取值被当成独立位置参数
+                skip_next = true;
+                continue;
+            }
+            args.push(extra.clone());
+        } else {
+            args.push(extra.clone());
+        }
+    }
     args
 }
 
@@ -110,6 +139,39 @@ mod tests {
         let mut plan = LocalPlan::from_assessment(&spec, "/models/q.gguf", &assessment, 11516);
         plan.engine = InferenceEngine::LlamaCpp;
         plan
+    }
+
+    /// 同一 flag 绝不允许出现两次。
+    ///
+    /// 实测踩到：适配器硬编码 `--spec-draft-n-max 4`，模板的
+    /// `draft_n_max: 4` 又经 extra_args 追加一次。llama-server 只发一行
+    /// DEPRECATED warning 并取最后一个值——那行 warning 会占据启动日志的
+    /// 显著位置，把真正的失败原因挤下去，排障方向直接被带偏。
+    #[test]
+    fn duplicated_flag_is_not_emitted_twice() {
+        let mut p = plan();
+        p.draft_model_path = Some("/models/draft.gguf".into());
+        p.extra_args = vec![
+            "--parallel".into(),
+            "1".into(),
+            "--spec-draft-n-max".into(),
+            "4".into(),
+        ];
+        let args = llama_cpp_args(&p, "0.0.0.0", 8080);
+        let n = args.iter().filter(|a| *a == "--spec-draft-n-max").count();
+        assert_eq!(n, 1, "flag 重复注入：{args:?}");
+        // 模板独有的参数必须保留
+        assert!(args.contains(&"--parallel".to_string()), "{args:?}");
+    }
+
+    /// 适配器已生成、模板未声明的 flag 也不该被模板覆盖成两份。
+    #[test]
+    fn template_flag_does_not_duplicate_adapter_flag() {
+        let mut p = plan();
+        p.extra_args = vec!["--ctx-size".into(), "4096".into()];
+        let args = llama_cpp_args(&p, "0.0.0.0", 8080);
+        let n = args.iter().filter(|a| *a == "--ctx-size").count();
+        assert_eq!(n, 1, "适配器已有的 flag 不应被模板重复追加：{args:?}");
     }
 
     #[test]

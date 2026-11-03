@@ -325,11 +325,53 @@ impl Orchestrator {
                 download_bytes: bytes,
                 ..cloud_plan.clone()
             };
+            // 字节进度要**同时**写进阶段输出。
+            //
+            // `progress` 只更新 pull job 的进度数字，不进 `deploy_trail`；
+            // 而前端「阶段处理输出」面板读的是 trail。结果是一个 16 GB 的
+            // 辅助模型下载几十分钟期间，面板永远停在上一条「校验远端文件」
+            // 上不动——用户看到的就是「卡在等待阶段输出」。
+            //
+            // 这里按 5% 粒度节流上报：既能让用户看到「在下、下了多少」，
+            // 又不会因为每秒几十次回调把 trail 撑爆（trail 是全量保留的）。
+            let seen_pct = std::sync::atomic::AtomicU64::new(0);
+            let staged = |done: u64, total: Option<u64>| {
+                progress(done, total);
+                let Some(total) = total.filter(|t| *t > 0) else {
+                    return;
+                };
+                let pct = done.saturating_mul(100) / total;
+                let bucket = pct / 5 * 5;
+                let prev = seen_pct.load(std::sync::atomic::Ordering::Relaxed);
+                if bucket > prev && bucket <= 100 {
+                    if seen_pct
+                        .compare_exchange(
+                            prev,
+                            bucket,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        sink(
+                            DeployStage::Downloading,
+                            StageOutcome::Running,
+                            format!(
+                                "[{}/{total}] {kind} {name}：{}%（{} / {}）",
+                                i + 1,
+                                bucket,
+                                mangosteen_platform::fs::human_bytes(done),
+                                mangosteen_platform::fs::human_bytes(total)
+                            ),
+                        );
+                    }
+                }
+            };
             mangosteen_provider::orchestrator::download_model_node(
                 &ssh,
                 &file_plan,
                 hf_token.as_deref(),
-                Some(progress),
+                Some(&staged),
                 None,
             )?;
             let size = mangosteen_device::remote::remote_file_size(ssh, &path)?;
