@@ -213,6 +213,7 @@ impl TunnelSpec {
     /// * `-T` 不分配伪终端
     /// * `-o ExitOnForwardFailure=yes` 端口占用时立即失败，避免「假连通」
     /// * `-o ServerAliveInterval` 保活，防止云侧 NAT 静默断开
+    /// * `-o ConnectionAttempts` 连接级自动重试，见下方注释
     pub fn to_ssh_args(&self) -> Vec<String> {
         let mut a = vec!["-N".to_string(), "-T".to_string()];
         // 目标端口还没监听时不能要求转发立即成功，否则 ssh 会直接退出
@@ -225,6 +226,22 @@ impl TunnelSpec {
             "ServerAliveInterval=15".to_string(),
             "-o".to_string(),
             "ServerAliveCountMax=3".to_string(),
+            // ## 为什么需要 ConnectionAttempts
+            //
+            // 云厂商的 SSH 入口（如优云 compshare 的 23 端口 TcpForwards）
+            // 是**共享转发网关**，背后按实例随机路由。实例重启、迁移或网关
+            // 自身滚动更新时，会出现一段「TCP 能连上但立刻被远端关闭」的
+            // 窗口期（日志里的 `Connection closed by remote host`），紧接着
+            // 就是端口转发重建中的 `Connection refused`。
+            //
+            // 这属于**秒级瞬时故障**，但 ssh 默认只连一次：一次失败就退出
+            // 255，整个部署随之报废。ConnectionAttempts=5 + ConnectTimeout=10
+            // 让 ssh 在内部重试约 50 秒，天然跨过这个窗口——比在应用层
+            // 重试整个 establish 更轻，且不会泄漏端口与进程。
+            "-o".to_string(),
+            "ConnectionAttempts=5".to_string(),
+            "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
             "-o".to_string(),
             "StrictHostKeyChecking=accept-new".to_string(),
             "-p".to_string(),
@@ -234,12 +251,23 @@ impl TunnelSpec {
             a.push("-i".to_string());
             a.push(id.display().to_string());
         }
-        if self.control_master {
-            a.push("-o".to_string());
-            a.push("ControlMaster=auto".to_string());
-            a.push("-o".to_string());
-            a.push("ControlPersist=60".to_string());
-        }
+        // ## 为什么不再使用 ControlMaster / ControlPersist
+        //
+        // 旧实现在这里加了 `ControlMaster=auto` + `ControlPersist=60`，**却没有
+        // 也不该指定 ControlPath**。后果是复用 ssh 的默认控制套接字
+        // （按 `%r@%h:%p` 命名）——而云厂商的 SSH 入口是共享网关：
+        // 同一个 host:port 在本地代表**不同实例**，控制套接字于是被多个
+        // 互不相干的会话争用。复用一条已被对端拆掉的主连接，表现正是
+        // `Connection closed by remote host` 连续刷屏，最后退化成
+        // `connect ... Connection refused`。
+        //
+        // 隧道本身是**长连接**（-N 常驻），ControlMaster 带来的「重连延迟
+        // 降低」对它毫无意义：它只在建连那一刻复用已有连接，而隧道的痛点
+        // 是建连瞬断，正需要一条干净的独立连接。
+        //
+        // 因此 `control_master` 字段保留（配置兼容 / 语义收窄），但不再向
+        // ssh 传 ControlMaster 系列参数。
+        let _ = self.control_master;
         for f in &self.forwards {
             a.push(f.direction.ssh_flag().to_string());
             a.push(f.to_ssh_arg());
@@ -495,6 +523,40 @@ mod tests {
         assert!(args.contains(&"-N".to_string()), "仍是纯转发模式");
         // 目标必须是最后一项
         assert_eq!(args.last().unwrap(), "root@1.2.3.4");
+    }
+
+    /// 云厂商 SSH 入口是共享网关，建连瞬间被远端拆掉是常态。
+    /// 必须带上 ssh 自带的连接级重试，把秒级窗口跨过去。
+    #[test]
+    fn tunnel_spec_retries_transient_gateway_failures() {
+        let t = TunnelSpec {
+            ssh_host: "1.2.3.4".into(),
+            ssh_port: 23,
+            ssh_user: "root".into(),
+            identity_file: None,
+            forwards: vec![PortForward::loopback(0, 8080)],
+            control_master: true,
+            allow_unready_remote: false,
+            password: None,
+        };
+        let args = t.to_ssh_args();
+        assert!(
+            args.contains(&"ConnectionAttempts=5".to_string()),
+            "缺少连接级重试：{args:?}"
+        );
+        assert!(
+            args.contains(&"ConnectTimeout=10".to_string()),
+            "缺少连接超时：{args:?}"
+        );
+
+        // ControlMaster 系列参数必须消失：厂商网关按 host:port 区分实例，
+        // 而同一 host:port 在本地可代表不同实例，控制套接字会被互相争用。
+        for banned in ["ControlMaster=auto", "ControlPersist=60"] {
+            assert!(
+                !args.contains(&banned.to_string()),
+                "不得再传 {banned}：{args:?}"
+            );
+        }
     }
 
     #[test]

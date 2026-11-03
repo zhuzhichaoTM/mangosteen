@@ -143,6 +143,11 @@ pub struct TunnelManager {
     ssh_bin: String,
     /// 活跃隧道：key 为 `host:port:remote_port`
     tunnels: Vec<(String, Tunnel)>,
+    /// 每个远端端口对应的隧道规格，供 [`Self::heal`] 原地重建。
+    ///
+    /// 必须记录规格而不能从 `Tunnel` 反推：重建需要 `identity_file`、
+    /// `allow_unready_remote` 等建立参数，`Tunnel` 只保存了连接结果。
+    specs: std::collections::HashMap<u16, TunnelSpec>,
     /// 日志目录
     log_dir: Option<PathBuf>,
 }
@@ -159,6 +164,7 @@ impl TunnelManager {
             allocator: PortAllocator::new(port_start, port_end)?,
             ssh_bin: ssh_bin.into(),
             tunnels: Vec::new(),
+            specs: std::collections::HashMap::new(),
             log_dir,
         })
     }
@@ -200,7 +206,84 @@ impl TunnelManager {
         lines[start..].join("\n")
     }
 
-    /// 建立隧道。
+    /// 建立隧道（带瞬时故障重试）。
+    ///
+    /// ## 为什么要重试整个建立过程
+    ///
+    /// 云厂商的 SSH 入口是共享转发网关。实例重启/迁移、网关滚动更新期间，
+    /// 会出现一个**秒级窗口**：TCP 能连上但立刻被远端关闭
+    /// （`Connection closed by remote host`），随后转发规则重建中
+    /// （`connect to host ... port 23: Connection refused`）。
+    ///
+    /// ssh 自身的 `ConnectionAttempts` 只覆盖「TCP 连接建立失败」，对
+    /// 「连上后立刻被关闭」无效——后者已经是一次成功的 TCP 连接了。
+    /// 因此必须在应用层再包一层重试，跨过这段窗口。
+    ///
+    /// 重试是安全的：每次尝试都会独立分配端口、清理进程与临时文件，
+    /// 失败分支不留下任何残留（这是 `establish_once` 的既有约定）。
+    pub fn establish(&mut self, spec: &TunnelSpec, connect_timeout: Duration) -> MnResult<&Tunnel> {
+        const ATTEMPTS: u32 = 4;
+        let mut last_reason = String::new();
+        for attempt in 1..=ATTEMPTS {
+            match self.establish_once(spec, connect_timeout) {
+                Ok(_) => break,
+                Err(e) => {
+                    let transient = Self::is_transient_connect_failure(&e);
+                    last_reason = e.to_string();
+                    if !transient || attempt == ATTEMPTS {
+                        return Err(e);
+                    }
+                    // 退避：2s / 4s / 6s。网关重建转发通常几秒内完成，
+                    // 指数退避反而会让用户白等，线性递增更贴合实际。
+                    let wait = Duration::from_secs(2 * attempt as u64);
+                    eprintln!(
+                        "[tunnel] 第 {attempt}/{ATTEMPTS} 次建立失败（瞬时网关故障），\
+                         {}s 后重试：{last_reason}",
+                        wait.as_secs()
+                    );
+                    std::thread::sleep(wait);
+                }
+            }
+        }
+        // 成功路径：按 key 取回刚建好的隧道
+        let remote_port = spec
+            .forwards
+            .iter()
+            .find(|f| f.direction == mangosteen_core::net::TunnelDirection::LocalToRemote)
+            .map(|f| f.remote_port)
+            .unwrap_or(0);
+        let key = Self::key(spec, remote_port);
+        self.tunnels
+            .iter()
+            .position(|(k, _)| *k == key)
+            .map(|pos| &self.tunnels[pos].1)
+            .ok_or_else(|| MnError::Network {
+                stage: "建立 ssh 隧道".to_string(),
+                reason: format!("隧道建立流程未返回可用连接：{last_reason}"),
+            })
+    }
+
+    /// 判断这次失败是否是「网关侧瞬时故障」——只有这类才值得重试。
+    ///
+    /// 认证失败（`Permission denied`）、密钥缺失、主机不可达的重试都毫无
+    /// 意义，只会把真实错误拖成超时。因此按 stderr 文本白名单判定：
+    /// 命中 `Connection closed by remote host` / `Connection reset` /
+    /// `Connection refused` / `Connection timed out` 才重试。
+    fn is_transient_connect_failure(e: &MnError) -> bool {
+        let text = e.to_string();
+        const TRANSIENT: [&str; 5] = [
+            "Connection closed by remote host",
+            "Connection reset by peer",
+            "Connection refused",
+            "Connection timed out",
+            // 进程在观察窗内提前退出且没给出任何说明：多半是网关刚把
+            // 连接拆掉，ssh 还没写出原因就退出了。
+            "stderr：（空）",
+        ];
+        TRANSIENT.iter().any(|p| text.contains(p))
+    }
+
+    /// 建立隧道（单次）。
     ///
     /// 步骤：
     /// 1. 分配本地空闲端口；
@@ -208,7 +291,11 @@ impl TunnelManager {
     /// 3. 拉起 `ssh -N -L ...`；
     /// 4. 等待本地端口连通（最多 `connect_timeout`）；
     /// 5. 失败则清理进程与端口分配。
-    pub fn establish(&mut self, spec: &TunnelSpec, connect_timeout: Duration) -> MnResult<&Tunnel> {
+    fn establish_once(
+        &mut self,
+        spec: &TunnelSpec,
+        connect_timeout: Duration,
+    ) -> MnResult<()> {
         // 注意：调用方给的 local_port 可能只是占位（如 0），
         // 真实端口由本管理器分配。因此这里只校验「除本地端口外」的部分。
         spec.validate_for_establish()?;
@@ -228,7 +315,7 @@ impl TunnelManager {
         {
             let status = self.tunnels[pos].1.check();
             if status.is_up() {
-                return Ok(&self.tunnels[pos].1);
+                return Ok(());
             }
             // 已断：清理后重建
             let (_, mut dead) = self.tunnels.remove(pos);
@@ -457,7 +544,11 @@ impl TunnelManager {
                 askpass,
             },
         ));
-        Ok(&self.tunnels.last().unwrap().1)
+        // 记录「如何重建它」：重建需要 identity_file / allow_unready_remote
+        // 等原始参数，只靠 Tunnel 反推不出来。spec 的 local_port 是占位值，
+        // 重建时由 establish 重新分配，因此存原始 spec 即可。
+        self.specs.insert(remote_port, spec.clone());
+        Ok(())
     }
 
     /// 健康检查并**自动重建**已断隧道。
@@ -510,6 +601,8 @@ impl TunnelManager {
             let port = t.local_port;
             t.close()?;
             self.allocator.release(port);
+            // 记录一并清掉，否则 heal 会对着一条已主动关闭的隧道重建
+            self.specs.remove(&remote_port);
             return Ok(true);
         }
         Ok(false)
@@ -535,6 +628,7 @@ impl TunnelManager {
         // 端口预留不释放会让反复卸载逐渐吃光端口区间。
         let closed = t.close();
         self.allocator.release(port);
+        self.specs.remove(&remote_port);
         closed.map(|_| true)
     }
 
@@ -549,6 +643,7 @@ impl TunnelManager {
             self.allocator.release(t.local_port);
             n += 1;
         }
+        self.specs.clear();
         Ok(n)
     }
 
@@ -583,6 +678,61 @@ impl TunnelManager {
             .iter()
             .find(|(_, t)| t.remote_port == remote_port)
             .map(|(_, t)| t.local_port)
+    }
+
+    /// 确保托管中的隧道仍可用；断了就按同一规格**原地重建**。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// `ssh -N -L` 是长连接，云端 NAT 超时、网关滚动重启、实例迁移都会
+    /// 把它断掉。断掉之后本地端口不再监听，对上层表现为「推理服务突然
+    /// 502 / 连接被拒」——而远端 llama-server 其实活得好好的。
+    ///
+    /// 这里按 `remote_port` 找回当初的隧道规格（由 `remember` 记录），
+    /// 健康则不动，不健康则关闭残留 + 重新 establish。重连失败会如实
+    /// 返回错误，由调用方决定是重试还是报给用户。
+    ///
+    /// ## 为什么按远端端口而不是 SSH 目标
+    ///
+    /// 同节点多模型部署时，同一 `host:port` 上有好几条隧道（各自转发
+    /// 不同 engine_port）。按远端端口定位才能精确重建属于这个模型的那条，
+    /// 不会误伤其它模型的业务转发。
+    pub fn heal(&mut self, remote_port: u16, timeout: Duration) -> MnResult<TunnelStatus> {
+        let spec = match self.specs.get(&remote_port).cloned() {
+            Some(s) => s,
+            None => {
+                return Err(MnError::config(
+                    "tunnel.spec",
+                    &format!("远端端口 {remote_port} 没有对应的隧道规格记录，无法重建"),
+                ))
+            }
+        };
+        // 还活着就什么都不做
+        if let Some(pos) = self
+            .tunnels
+            .iter()
+            .position(|(_, t)| t.remote_port == remote_port)
+        {
+            let status = self.tunnels[pos].1.check();
+            if status.is_up() {
+                return Ok(status);
+            }
+            // 断了：先彻底清理，避免残留 ssh 进程抢占本地端口
+            let (_, mut dead) = self.tunnels.remove(pos);
+            let port = dead.local_port;
+            let _ = dead.close();
+            self.allocator.release(port);
+            eprintln!("[tunnel] 远端端口 {remote_port} 的隧道已断开，正在重建");
+        }
+        self.establish(&spec, timeout)?;
+        match self
+            .tunnels
+            .iter_mut()
+            .find(|(_, t)| t.remote_port == remote_port)
+        {
+            Some((_, t)) => Ok(t.check()),
+            None => Ok(TunnelStatus::Down),
+        }
     }
 }
 
@@ -713,6 +863,76 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn establish_retries_transient_gateway_failure() {
+        // 云厂商 SSH 网关在实例重启期间会把连接「连上后立刻关闭」。
+        // 第一次照做，第二次正常转发——必须能自愈，而不是直接判死部署。
+        let d = tmpdir("ssh-transient");
+        let marker = d.join("first-done");
+        let script = format!(
+            r#"
+port=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-L" ]; then port=$(echo "$a" | cut -d: -f2); fi
+  prev="$a"
+done
+if [ ! -f '{marker}' ]; then
+  : > '{marker}'
+  echo 'Connection closed by remote host.' >&2
+  exit 255
+fi
+exec python3 -c "import socket,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(('127.0.0.1',$port)); s.listen(5); time.sleep(30)"
+"#,
+            marker = marker.display()
+        );
+        let bin = fake_ssh(&d, &script);
+        let mut m = TunnelManager::new(
+            port_base(60).0,
+            port_base(60).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
+        let t = m
+            .establish(&spec(8080), Duration::from_secs(8))
+            .expect("瞬时网关故障应被重试跨过");
+        assert!(t.local_port >= port_base(60).0);
+        assert_eq!(m.len(), 1);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn establish_does_not_retry_auth_failures() {
+        // 认证失败重试毫无意义，只会把真实错误拖成超时。
+        let d = tmpdir("ssh-auth-fail");
+        let bin = fake_ssh(&d, "echo 'Permission denied (publickey).' >&2; exit 255");
+        let mut m = TunnelManager::new(
+            port_base(70).0,
+            port_base(70).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let e = m
+            .establish(&spec(8080), Duration::from_secs(3))
+            .unwrap_err();
+        assert!(e.to_string().contains("Permission denied"), "got {e}");
+        // 不重试 → 耗时远小于一次重试退避（2 秒）
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "认证失败不应重试，实际耗时 {:?}",
+            started.elapsed()
+        );
+        assert!(m.occupied_ports().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn establish_times_out_when_port_never_comes_up() {
         let d = tmpdir("ssh-stall");
         // 假 ssh 活着但不转发任何端口
@@ -834,6 +1054,66 @@ s.bind(('127.0.0.1',$port)); s.listen(5); time.sleep(30)"
             "重建后的端口应仍在分配区间内，实际 {port2}"
         );
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 隧道被远端断开后，heal 必须能按记录下来的规格原地重建。
+    ///
+    /// 这是「部署成功但过一段时间对话报错」的根因路径：`ssh -N -L` 是长连接，
+    /// 云端 NAT 超时/网关重启会把它断掉，而本地端口随之不再监听。
+    #[cfg(unix)]
+    #[test]
+    fn heal_rebuilds_broken_tunnel_from_recorded_spec() {
+        let d = tmpdir("heal");
+        let script = r#"
+port=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-L" ]; then port=$(echo "$a" | cut -d: -f2); fi
+  prev="$a"
+done
+exec python3 -c "import socket,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(('127.0.0.1',$port)); s.listen(5); time.sleep(30)"
+"#;
+        let bin = fake_ssh(&d, script);
+        let mut m = TunnelManager::new(
+            port_base(80).0,
+            port_base(80).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
+        let first = m
+            .establish(&spec(8080), Duration::from_secs(8))
+            .unwrap()
+            .local_port;
+
+        // 健康时 heal 是空操作：端口不变
+        let st = m.heal(8080, Duration::from_secs(8)).unwrap();
+        assert!(st.is_up(), "{st:?}");
+        assert_eq!(st.local_port(), Some(first), "健康隧道不应被重建");
+
+        // 制造「在册但已死」的状态：把底层 ssh 进程杀掉，记录仍保留
+        {
+            let pos = m
+                .tunnels
+                .iter()
+                .position(|(_, t)| t.remote_port == 8080)
+                .expect("应有隧道记录");
+            let _ = m.tunnels[pos].1.close();
+        }
+        let st = m.heal(8080, Duration::from_secs(8)).unwrap();
+        assert!(st.is_up(), "断开后 heal 应重建成功，实际 {st:?}");
+        assert_eq!(m.len(), 1, "重建后不应残留多余隧道");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 没有记录过的远端端口不能瞎猜规格，必须明确报错。
+    #[test]
+    fn heal_without_spec_errors_clearly() {
+        let mut m = TunnelManager::new(port_base(90).0, port_base(90).1, "ssh", None).unwrap();
+        let e = m.heal(9999, Duration::from_millis(200)).unwrap_err();
+        assert!(e.to_string().contains("没有对应的隧道规格"), "got {e}");
     }
 
     #[test]

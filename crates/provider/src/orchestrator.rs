@@ -705,8 +705,25 @@ impl CloudOrchestrator {
         let driver = self.registry.get(provider)?;
         let instance = driver.describe(instance_id)?;
         let spec = self.tunnel_spec_for(&instance, plan)?;
-        let t = self.tunnels.establish(&spec, self.config.tunnel_timeout)?;
-        let local_port = t.local_port;
+        // 优先用 heal：隧道已存在且健康时直接复用，断了则原地重建。
+        // 直接 establish 也能复用，但会绕过「按远端端口定位」的清理逻辑，
+        // 残留的 ssh 进程会占着本地端口不放。
+        let mut local_port = match self.tunnels.heal(plan.engine_port, self.config.tunnel_timeout) {
+            Ok(status) if status.is_up() => status.local_port(),
+            _ => None,
+        };
+        if local_port.is_none() {
+            // 没有记录（首次启动服务）或重建失败：走完整建立流程
+            local_port = Some(
+                self.tunnels
+                    .establish(&spec, self.config.tunnel_timeout)?
+                    .local_port,
+            );
+        }
+        let local_port = local_port.ok_or_else(|| MnError::Network {
+            stage: "建立 ssh 隧道".to_string(),
+            reason: "隧道建立后仍未获得本地端口".to_string(),
+        })?;
         Ok(format!("http://127.0.0.1:{local_port}/v1"))
     }
 
