@@ -193,6 +193,7 @@
 - **停止必须按端口定位进程**，不能只认 pid 文件：台账 engine_port 会与远端实际 `--port` 漂移，pid 文件会缺失/陈旧。判据是「无该端口 llama-server 进程」，且**确认停止后才删 pid 文件**（旧顺序导致「没杀成还删线索」）
 - 停止脚本唯一实现 `build_stop_script(workdir, port)`；有 3 条测试锁住「按 --port 匹配 / 必须校验 / 先确认后删」
 - CLI 无「关机保留」子命令：需要停实例时用 `cargo run -p mangosteen-provider --example instance_power -- stop <uhost-id>`（需 COMPSHARE_PUBLIC_KEY/PRIVATE_KEY）
+- **模板唯一真源**：只有 `crates/core/src/template.rs` 的 `BUILTIN_TEMPLATES`。测试禁止硬编码模板副本（曾因此掩盖换仓库改动，改用 `uncensored()` 取真实正文）；webui 的 `defaultTemplates` 只保留最小占位，不得内置完整正文
 - **内置模板改进需手动送达**：seed_builtin_templates 只在槽位缺失时插入（保护用户自定义），改了内置模板后用 `mangosteen config reset-templates --yes` + `ui restart`，否则用户仍跑旧模板
 - **模板字段必须翻译成 CLI 参数**：ubatch 曾是死字段（解析了但没生成 --ubatch-size）。新增模板字段时务必同时改 Qwen38Schema 的 extra_args 映射并补 builtin_templates_translate_to_expected_cli 断言
 - **uncensored 模板禁用外置草稿**：FastMTP-32K 侧车需 HauhauCS 私有 llama.cpp 补丁，官方预编译报 output.weight 形状错误；走内嵌 MTP（只传 --spec-type draft-mtp）
