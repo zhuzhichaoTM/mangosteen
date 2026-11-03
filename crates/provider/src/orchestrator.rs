@@ -1436,6 +1436,58 @@ fn finish_provision(
     })
 }
 
+/// 确认远端 SSH 通道当下真的能执行命令（轻量、带短重试）。
+///
+/// ## 为什么值得单独做一次
+///
+/// 「隧道建成」与「远端能执行命令」是两件不同的事：
+///
+/// * 隧道是 `ssh -L` 的**本地端口转发**，它只证明 ssh 进程活着；
+///   `allow_unready_remote` 模式下甚至不要求远端有任何服务在监听。
+/// * 节点配置、模型下载走的 `ssh_exec` 每次都是**新建连接**执行命令，
+///   与那条隧道没有依赖关系。
+///
+/// 于是存在一个时间窗：实例刚报 `Running`（厂商状态机意义上的），
+/// sshd 却还没接受登录，或厂商的端口转发尚未就绪。此时隧道能建、
+/// 但第一个真正的叠加操作必然失败。这个窗口通常只有几秒，所以
+/// 用短重试跨过去，而不是一撞就判死。
+///
+/// 重试用尽后仍然失败，就把「连不上」这个事实**明确**报出来——
+/// 不要让调用方把它误读成下载失败或解压失败。
+fn confirm_remote_reachable(target: &mangosteen_device::remote::SshTarget) -> MnResult<()> {
+    const ATTEMPTS: u32 = 6;
+    const RETRY_WAIT: Duration = Duration::from_secs(2);
+    let mut last_reason = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match mangosteen_device::remote::ssh_exec(target, "true", 15) {
+            Ok(_) => {
+                if attempt > 1 {
+                    eprintln!("[node-config] SSH 通道在重试 {attempt} 次后可用了");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                last_reason = e.to_string();
+                if attempt < ATTEMPTS {
+                    std::thread::sleep(RETRY_WAIT);
+                }
+            }
+        }
+    }
+    Err(MnError::Network {
+        stage: "节点配置环境 / 确认远端连接".to_string(),
+        reason: format!(
+            "远端 {user}@{host}:{port} 暂时无法执行命令（已重试 {ATTEMPTS} 次，每次间隔 {}s）：\
+             {last_reason}。常见原因：实例刚开机 sshd 尚未就绪、厂商端口转发未生效、\
+             安全组拦截、实例已被关机或销毁",
+            RETRY_WAIT.as_secs(),
+            user = target.user,
+            host = target.host,
+            port = target.port,
+        ),
+    })
+}
+
 /// 远端资源准备：确保权重就位、llama-server 二进制存在（**不启动**）。
 ///
 /// ## 权重来源（**没有本地上传这条路**）
@@ -1451,6 +1503,15 @@ pub fn configure_node(
     workdir: &str,
     llama_server_url: &str,
 ) -> MnResult<()> {
+    // 动真格之前先确认这条 SSH 通道真的还能执行命令。
+    //
+    // 节点配置的每一步都是重活：装依赖最长 600s、llama 包约 600MB、
+    // 模型动辄十几 GB。如果连接在建隧道之后、到这里之前已经失效
+    // （实例刚开机 sshd 还没起、厂商端口转发抖动、宿主机重启），
+    // 直接扎进长任务只会得到一个与真实原因无关的报错。
+    // 一次 `true` 只花几百毫秒，却能把故障定位到「连不上」，
+    // 而不是等到十分钟后误报成下载或解压失败。
+    confirm_remote_reachable(target)?;
     // SSH 免密登录确认成功后，先完成依赖安装并逐项验证；依赖不完整时
     // 立即失败，不允许继续下载 llama.cpp。
     let deps = mangosteen_device::remote::ensure_node_download_dependencies(target)?;

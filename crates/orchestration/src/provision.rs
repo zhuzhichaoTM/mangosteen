@@ -543,11 +543,17 @@ impl Orchestrator {
                 node_ip, node_ssh_port
             ),
         );
-        let ssh = self
-            .cloud
-            .as_mut()
-            .expect("cloud orchestrator exists")
-            .configure_ssh_access(&instance)?;
+        // 直接复用 `provision_resources` 已经建立并验证过的 SSH 通道。
+        //
+        // 这里曾调用 `configure_ssh_access(&instance)` 重新走一遍
+        // 「重置密码 → 装公钥 → 确认密钥登录」。那是纯粹的重复劳动，而且
+        // 有害：配置里若带 `ssh_password`，这一遍会**再次重置 root 密码**，
+        // 前面刚确认可用的密钥信任关系随之作废，紧随其后的依赖安装、模型
+        // 下载全部连接失败——报错还会被包装成「隧道建立前退出」。
+        //
+        // `ProvisionedResources.ssh` 正是 `ensure_key_target` 的产物
+        // （已验证 `identity_file` 可登录），这里用它就是「一次验证、处处复用」。
+        let ssh = p.ssh.clone();
         // 节点配置内部严格执行：依赖安装与验证 → llama-server 下载与可执行性验证。
         // 只有整个函数成功返回，才允许推进到模型下载。
         mangosteen_provider::orchestrator::configure_node(

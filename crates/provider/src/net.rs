@@ -168,6 +168,38 @@ impl TunnelManager {
         format!("{}:{}:{}", spec.ssh_host, spec.ssh_port, remote_port)
     }
 
+    /// 取 ssh 的真实报错文本（管道优先，其次回读日志文件）。
+    ///
+    /// ssh 的重定向方式决定了线索在哪：
+    /// * `capture_output`（未配置日志目录）→ stderr 在管道里，进程退出后可读；
+    /// * `log_file`（生产路径，配了 `log_dir`）→ stderr **只**写在文件里，
+    ///   管道是空的。
+    ///
+    /// 旧实现无条件读管道，于是第二种情况永远得到空串，错误信息成为
+    /// 「stderr：（空）」。这里先取管道，空则回读日志文件尾部；仍为空
+    /// 才如实说「空」。日志文件里只保留最后若干行，避免把整段进度刷屏。
+    fn diagnose(child: &mut ManagedChild, log_path: Option<&PathBuf>) -> String {
+        let from_pipe = child.stderr_tail(8);
+        if !from_pipe.trim().is_empty() {
+            return from_pipe;
+        }
+        let Some(path) = log_path else {
+            return String::new();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return String::new();
+        };
+        // ssh 的进度噪音对排障无益，只留真正说明问题的行。
+        let noise = ["Warning: Permanently added", "debug1:", "Transferred: "];
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !noise.iter().any(|n| l.starts_with(n)))
+            .collect();
+        let start = lines.len().saturating_sub(6);
+        lines[start..].join("\n")
+    }
+
     /// 建立隧道。
     ///
     /// 步骤：
@@ -278,6 +310,15 @@ impl TunnelManager {
             let log = dir.join(format!("tunnel-{local_port}.log"));
             opts = opts.with_log_file(&log)?;
         }
+        // 记住本次隧道的日志文件路径。ssh 的 stderr 一旦重定向到文件，
+        // `stderr_tail` 就永远读不到内容——这正是「stderr：（空）」的由来：
+        // 真正的报错（Permission denied、Connection closed by remote host…）
+        // 全在文件里躺着，而用户看到的是一句「（空）」，完全无从下手。
+        // 失败分支据此回读文件，把真实原因带进错误信息。
+        let log_path = self
+            .log_dir
+            .as_ref()
+            .map(|d| d.join(format!("tunnel-{local_port}.log")));
 
         let mut child = opts.spawn().map_err(|e| {
             // 启动失败要归还端口，并清掉含密码的临时文件
@@ -314,7 +355,7 @@ impl TunnelManager {
             let deadline = Instant::now() + connect_timeout.min(settle);
             loop {
                 if let Some(code) = child.exit_code() {
-                    let tail = child.stderr_tail(8);
+                    let tail = Self::diagnose(&mut child, log_path.as_ref());
                     self.allocator.release(local_port);
                     if let Some(ap) = &askpass {
                         ap.cleanup();
@@ -343,7 +384,7 @@ impl TunnelManager {
         let deadline = Instant::now() + connect_timeout;
         loop {
             if let Some(code) = child.exit_code() {
-                let tail = child.stderr_tail(8);
+                let tail = Self::diagnose(&mut child, log_path.as_ref());
                 self.allocator.release(local_port);
                 if let Some(ap) = &askpass {
                     ap.cleanup();
@@ -375,7 +416,7 @@ impl TunnelManager {
                 break;
             }
             if Instant::now() >= deadline {
-                let tail = child.stderr_tail(8);
+                let tail = Self::diagnose(&mut child, log_path.as_ref());
                 let _ = child.terminate(Duration::from_millis(800));
                 self.allocator.release(local_port);
                 if let Some(ap) = &askpass {
