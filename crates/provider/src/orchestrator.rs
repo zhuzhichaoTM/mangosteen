@@ -1482,10 +1482,17 @@ pub fn download_model_node(
     should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> MnResult<String> {
     let remote_model = &plan.model_path;
-    // 期望大小：计划里登记了就用登记值；没有（辅助文件常见）就去源站取
-    // `Content-Length`。绝不能因为「没有期望值」就退化成只看文件非空——
-    // aria2c 直接写最终文件名，中断后会留下一个几十 MB 的残缺文件，
-    // 只看非空会把它当成已下载完成。
+    // 期望大小只是**参考值**，不是完成判据（与本地下载路径同一结论，
+    // 见 device/remote.rs download_model_remote 的注释）。原因：
+    // 计划里的字节数来自白名单默认文件的元数据（pull.rs 受理时从源站
+    // 索引取），而实际下载哪个文件由**配置模板**决定——两者不是同一个
+    // 文件时大小必然对不上（如 default 的 Q4_K_M ≈ 15.3 GiB 与
+    // Uncensored 的 Q4_K_P ≈ 16.7 GiB）。把它当强校验的后果实测踩到：
+    // 文件已下载完好，却因「大小不符」被判未完成 → 重新下载整个文件 →
+    // 再次判失败，部署报「远端文件大小校验失败」。
+    //
+    // 完整性改由三道真实证据保证：下载器 0 退出写的 `.download.ok` 标记、
+    // 文件非空、GGUF 魔数正确。期望大小只在无标记时作快速通道。
     let planned = plan.download_bytes.filter(|v| *v > 0);
     let want = match planned {
         Some(v) => Some(v),
@@ -1496,20 +1503,12 @@ pub fn download_model_node(
     };
     let remote_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
     // `.download.ok` 由下载器在所有分片成功退出后写入，是「传输真的跑完」的
-    // 证据；但它单独不足以说明文件可用（文件可能事后被删/截断），所以只
-    // 在**缺少期望大小**时作为辅助判据，且始终与真实文件大小一起看。
+    // 权威证据；大小相等只是无标记时的快速通道（如手工放置的文件）。
     let marked_complete =
         mangosteen_device::remote::remote_download_completed(target, remote_model)?;
-    let ready = match (remote_size, want) {
-        // 有期望大小：必须严格相等，多一个字节少一个字节都不算完成。
-        (size, Some(expected)) => size == expected,
-        // 无期望大小：非空 + 下载器曾成功退出 + GGUF 魔数正确。
-        (size, None) => {
-            size > 0
-                && marked_complete
-                && mangosteen_device::remote::remote_file_is_gguf(target, remote_model)?
-        }
-    };
+    let ready = remote_size > 0
+        && (marked_complete || Some(remote_size) == want)
+        && mangosteen_device::remote::remote_file_is_gguf(target, remote_model)?;
     if !ready {
         let url = plan
             .download_url
@@ -1536,17 +1535,10 @@ pub fn download_model_node(
             reason: format!("下载结束但远端文件为空：{remote_model}"),
         });
     }
-    if let Some(exp) = want {
-        if final_size != exp {
-            return Err(MnError::Network {
-                stage: "云端下载模型".to_string(),
-                reason: format!(
-                    "远端文件大小校验失败：{}，实际 {} 字节，期望 {} 字节",
-                    remote_model, final_size, exp
-                ),
-            });
-        }
-    }
+    // 不再做「实际大小 == 期望大小」的强校验：期望字节可能来自另一个
+    // 模板文件的元数据（见上注释），严格比对会把完好的下载误判为失败。
+    // 完整性由下载器退出码（`.download.ok` 只在 0 退出时写入）与下面的
+    // GGUF 魔数检查共同保证。
     // 大小对了也不代表内容对：错误页/错误仓库的文件同样可能有大小。
     // GGUF 魔数是最后一道廉价检查，只在前 4 字节上花一次 SSH。
     if !mangosteen_device::remote::remote_file_is_gguf(target, remote_model)? {

@@ -217,10 +217,11 @@ pub struct CloudPlan {
     /// 所以云端拿到的就是用户选的那个文件，不是另找的替代品。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_url: Option<String>,
-    /// 远端下载后期望的文件字节数（用于校验完整性）。
+    /// 远端下载的期望文件字节数（**参考值**，不用于强校验）。
     ///
-    /// 无法获知大小（如未预取到元数据）时为 `None`，此时只做「文件非空」
-    /// 检查——**不假装校验过**。
+    /// 来源是白名单默认文件的源站元数据，可能与模板实际指定的文件不是
+    /// 同一个，大小必然对不上；完整性由「下载器 0 退出的 `.download.ok`
+    /// 标记 + 文件非空 + GGUF 魔数」保证。无法获知时为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_bytes: Option<u64>,
     /// 远端引擎里的模型名（如 Ollama 的 `qwen2.5:0.5b-instruct`）。
