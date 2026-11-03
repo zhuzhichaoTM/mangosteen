@@ -40,6 +40,23 @@ impl GatewayServer {
             ("GET", "/api/sysinfo") => self.sysinfo(),
             ("GET", "/api/settings") => self.get_settings(),
             ("PUT", "/api/settings") => self.put_settings(req),
+            // 模型配置模板：设置页是唯一维护入口，部署页据此填充下拉框
+            ("GET", "/api/model-templates") => self.list_model_templates(),
+            ("PUT", "/api/model-templates") => self.put_model_template(req),
+            ("DELETE", p) if p.starts_with("/api/model-templates/") => {
+                // /api/model-templates/{model}/{slot}
+                let rest = &p["/api/model-templates/".len()..];
+                match rest.split_once('/') {
+                    Some((m, s)) => self.delete_model_template(m, s),
+                    None => Response::json(
+                        400,
+                        &ErrorResponse::bad_request(
+                            "缺少模板名，格式：/api/model-templates/{模型名}/{模板名}",
+                            None,
+                        ),
+                    ),
+                }
+            }
             ("GET", "/api/devices") => self.get_devices(),
             ("POST", "/api/devices") => self.add_device(req),
             ("POST", p) if p.starts_with("/api/devices/") && p.ends_with("/test") => {

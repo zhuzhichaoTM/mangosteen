@@ -418,6 +418,18 @@ impl Orchestrator {
                 if let Err(e) = o.tunnels_mut().close_all() {
                     warnings.push(format!("关闭隧道：{e}"));
                 }
+                // 4) 清理台账里的节点连接信息：实例已经关机，公网 IP/SSH 端口
+                //    可能随下次开机漂移。留着旧值会让 UI 与后续复用误以为
+                //    节点仍可连，产生「停止后仍显示旧 IP」的历史残留。
+                //    下次启动由 service_target 实时查询，不依赖这里。
+                if let Some(rec) = self.state.get(id)? {
+                    let mut plan = rec.plan.clone();
+                    if let Some(c) = plan.cloud.as_mut() {
+                        c.node_ip = None;
+                        c.node_ssh_port = None;
+                    }
+                    self.state.update_plan(id, plan)?;
+                }
                 let note = if warnings.is_empty() {
                     None
                 } else {
@@ -624,8 +636,8 @@ impl Orchestrator {
                     .ok_or_else(|| {
                         MnError::bad_request(format!("隧道返回了无法解析的地址：{base}"))
                     })?;
-                let host = cloud_plan.node_ip.clone().unwrap_or_default();
-                let ssh_port = cloud_plan.node_ssh_port.unwrap_or(22);
+                let host = verified_ssh.host.clone();
+                let ssh_port = verified_ssh.port;
                 if let Err(e) = self.finish_start(id, local_port, &host, ssh_port, sink) {
                     mark_failed(&self.state, &e);
                     return Err(e);

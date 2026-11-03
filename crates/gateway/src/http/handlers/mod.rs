@@ -15,9 +15,11 @@
 //! | [`inference`] | `/v1/chat/completions`、`/v1/completions`、`/v1/embeddings` |
 //! | [`attachments`] | `/api/extract`、`/api/fetch-url` |
 //! | [`settings`] | `/api/settings` |
+//! | [`model_templates`] | `/api/model-templates*` |
 
 pub mod attachments;
 pub mod deployment;
+pub mod model_templates;
 pub mod inference;
 pub mod models;
 pub mod pull;

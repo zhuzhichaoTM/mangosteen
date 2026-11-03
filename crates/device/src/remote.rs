@@ -361,6 +361,23 @@ mod tests {
         assert_eq!(normalize_tag("  llama3  "), "llama3:latest");
     }
 
+    /// 幂等追加命令必须：先建目录/权限、用精确匹配判断、再按需追加。
+    #[test]
+    fn authorized_keys_cmd_is_idempotent() {
+        let cmd = authorized_keys_append_cmd("ssh-ed25519 AAAA test@host");
+        // 目录与权限按 sshd 要求收紧
+        assert!(cmd.contains("mkdir -p ~/.ssh"), "{cmd}");
+        assert!(cmd.contains("chmod 700 ~/.ssh"), "{cmd}");
+        assert!(cmd.contains("chmod 600 ~/.ssh/authorized_keys"), "{cmd}");
+        // 用整行精确匹配做去重判断（-qxF：quiet + 整行 + 固定字符串）
+        assert!(cmd.contains("grep -qxF 'ssh-ed25519 AAAA test@host'"), "{cmd}");
+        // 只有没命中才追加
+        assert!(
+            cmd.contains("|| printf '%s\\n' 'ssh-ed25519 AAAA test@host' >> ~/.ssh/authorized_keys"),
+            "{cmd}"
+        );
+    }
+
     #[test]
     fn first_line_prefers_json_error_field() {
         assert_eq!(
@@ -528,7 +545,44 @@ impl SshTarget {
     }
 }
 
+/// 生成「把公钥幂等追加到远端 authorized_keys」的远端命令。
+///
+/// ## 为什么是幂等的
+///
+/// 同一台机器重复部署、或用户手动装过公钥时，直接 `>>` 会把同一行
+/// 反复追加，authorized_keys 越来越长。用 `grep -qxF` 做整行精确匹配，
+/// 命中就跳过，保证「装过一次就不会有第二行」。
+///
+/// ## 为什么不用 ssh-copy-id
+///
+/// 它是 shell 脚本，内部会再 fork `cat`/`ssh-add` 取身份列表；macOS 对
+/// 子进程有策略拦截（`Brokered program policy check unavailable`），
+/// 一旦 `GET_ID` 求值为空就报 `ERROR: No identities found` 退出 1——
+/// 与调用方参数无关，无法通过调参规避。改成只用 ssh 一条链路。
+fn authorized_keys_append_cmd(pub_text: &str) -> String {
+    format!(
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && \
+         touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && \
+         grep -qxF '{pub_text}' ~/.ssh/authorized_keys || \
+         printf '%s\\n' '{pub_text}' >> ~/.ssh/authorized_keys"
+    )
+}
+
 /// 在节点配置环境中安装 SSH 公钥；调用方负责按节点生命周期重试。
+///
+/// ## 顺序（每一步都不能省）
+///
+/// 1. **先探测免密登录**：公钥可能早就装过（同节点重复部署、或用户手动
+///    `ssh-copy-id` 过）。此时直接返回密钥，绝不能再装一次——
+///    重复安装不仅多余，还会踩 `ssh-copy-id` 的「All keys were skipped」
+///    分支（退出码 0 但没有 added 标记），旧实现会把它误判成失败。
+/// 2. 没有免密才安装。**不用 `ssh-copy-id`**：它是 shell 脚本，内部会
+///    再 fork `cat`/`ssh-add` 取身份列表；macOS 对子进程有策略拦截
+///    （`Brokered program policy check unavailable`），一旦 `GET_ID`
+///    求值为空就直接 `ERROR: No identities found` 退出 1——
+///    与我们自己的参数无关，无法通过调参规避。
+///    改成「本地读公钥 → ssh 追加到远端 authorized_keys」这条只用
+///    ssh 一条链路的方式，行为完全可控。
 pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -557,74 +611,68 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
             });
         }
     }
-    // 只清理当前目标节点，避免旧指纹导致 ssh-copy-id 拒绝连接。
-    target.remove_known_host_entry()?;
-    let askpass = target.write_askpass()?;
-    let mut args = target.base_opts();
-    // ssh-copy-id 的 `-i` 是待安装的公钥；同时显式确保内部 ssh
-    // 使用密码认证完成首次登录，而不是被本机 ssh-agent/默认密钥干扰。
-    args.extend([
-        "-i".to_string(),
-        pub_key.display().to_string(),
-        "-o".to_string(),
-        "PreferredAuthentications=keyboard-interactive,password".to_string(),
-        "-o".to_string(),
-        "PasswordAuthentication=yes".to_string(),
-        "-o".to_string(),
-        "KbdInteractiveAuthentication=yes".to_string(),
-        "-o".to_string(),
-        "PubkeyAuthentication=no".to_string(),
-        "-o".to_string(),
-        "NumberOfPasswordPrompts=3".to_string(),
-    ]);
-    args.push(format!("{}@{}", target.user, target.host));
-    let mut command = Command::new("ssh-copy-id");
-    // stdin 关闭，所有密码交互通过 SSH_ASKPASS 完成；适配 macOS/Linux
-    // 的 OpenSSH。Windows 使用系统 OpenSSH 时同样走环境变量路径。
-    command.args(&args).stdin(Stdio::null());
-    if let Some(path) = &askpass {
-        command
-            .env("SSH_ASKPASS", path.display().to_string())
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("DISPLAY", ":0");
+
+    // ---- 步骤 1：公钥可能已装好，先探测，避免重复导入 ----
+    //
+    // 探测用「仅公钥认证」的独立 target：优先 password 那个会把
+    // PubkeyAuthentication 关掉，永远探不出免密是否可用。
+    //
+    // 探测前先清掉该主机的旧指纹：云厂商的 IP 会被重新分配给别的机器，
+    // 残留的 known_hosts 条目会让 ssh 因 host key 变更直接拒连，
+    // 看起来像「公钥没装好」。
+    let _ = target.remove_known_host_entry();
+    let probe = SshTarget {
+        host: target.host.clone(),
+        port: target.port,
+        user: target.user.clone(),
+        password: None,
+        identity_file: Some(key.clone()),
+    };
+    if ssh_exec(&probe, "true", 10).is_ok() {
+        return Ok(key);
     }
-    // ssh-copy-id 内部可能在首次握手后才触发 askpass，保留脚本直到
-    // 子进程退出；output() 本身会等待完整退出，避免过早删除。
-    let output = command.output();
-    if let Some(path) = askpass {
-        let _ = std::fs::remove_file(path);
-    }
-    let output = output.map_err(|e| MnError::Network {
-        stage: "安装 SSH 公钥".to_string(),
-        reason: format!("无法启动 ssh-copy-id：{e}"),
-    })?;
-    // ssh-copy-id 返回成功码但没有实际安装输出时，不能继续使用密钥登录；
-    // 必须确认其输出包含标准字段，避免把“命令执行完”误判为“公钥已安装”。
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}\n{stderr}");
-    let added_marker = combined.contains("Number of key(s) added");
-    if !output.status.success() || !added_marker {
+
+    // ---- 步骤 2：安装公钥（ssh + cat，不依赖 ssh-copy-id 脚本） ----
+    let pub_text = std::fs::read_to_string(&pub_key)
+        .map_err(|e| MnError::io(format!("读取公钥 {}", pub_key.display()), &e))?;
+    let pub_text = pub_text.trim();
+    if pub_text.is_empty() {
         return Err(MnError::Network {
             stage: "安装 SSH 公钥".to_string(),
-            reason: if !output.status.success() {
-                format!(
-                    "ssh-copy-id 执行失败（退出码 {:?}）：{}",
-                    output.status.code(),
-                    stderr.trim()
-                )
-            } else {
-                format!(
-                    "ssh-copy-id 未返回 `Number of key(s) added`，实际输出：{}",
-                    combined.trim()
-                )
-            },
+            reason: format!("公钥文件为空：{}", pub_key.display()),
         });
     }
-    // 已确认 ssh-copy-id 完成后，再等待 sshd/authorized_keys 生效，避免立即
-    // 用密钥探测得到假失败。
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    Ok(key)
+    // 幂等追加：远端已有同一行就跳过，避免 authorized_keys 堆积重复项。
+    // 用 grep -qxF 精确整行匹配；父目录与权限按 sshd 要求收紧。
+    let remote_cmd = authorized_keys_append_cmd(pub_text);
+    ssh_exec(target, &remote_cmd, 30)?;
+
+    // ---- 步骤 3：确认免密真的可用 ----
+    //
+    // 刚写入时 sshd 可能需要瞬间才生效，给一个小重试窗口；
+    // 仍不通就明确失败，绝不把「命令执行完」当成「公钥可用」。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        match ssh_exec(&probe, "true", 8) {
+            Ok(_) => return Ok(key),
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(MnError::Network {
+                        stage: "安装 SSH 公钥".to_string(),
+                        reason: format!(
+                            "公钥已写入远端 {user}@{host}:{port} 的 authorized_keys，\
+                             但仍无法免密登录：{e}。请检查远端 sshd 是否允许 \
+                             PubkeyAuthentication、authorized_keys 权限是否为 600",
+                            user = target.user,
+                            host = target.host,
+                            port = target.port
+                        ),
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    }
 }
 
 /// 在远端执行一条命令，返回 stdout。

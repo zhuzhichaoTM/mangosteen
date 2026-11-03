@@ -115,6 +115,33 @@ pub fn parse_ssh_user(command: &str) -> Option<String> {
     None
 }
 
+/// 从 SSH 登录命令里解析主机地址。
+///
+/// ## 为什么必须解析它，而不是直接用 `IPSet`
+///
+/// 优云共享算力实例关机再开机后**公网 IP 会重新分配**，`IPSet` 可能仍是
+/// 旧值或含多张网卡；而厂商在 `ssh_login_command` 里给的 `root@<IP>`
+/// 永远是**当前有效**的登录地址。只信 `IPSet` 会让复用旧实例时把隧道
+/// 指向一个已经失效的 IP（表现为 `Connection timed out` 或 askpass 报错）。
+///
+/// 支持 `ssh root@1.2.3.4 -p 60022`、`ssh -p 60022 root@host`、
+/// `ssh root@host -p60022` 三种写法。
+pub fn parse_ssh_host(command: &str) -> Option<String> {
+    for tok in command.split_whitespace() {
+        // 跳过选项与其取值（-p 60022 / -o Xxx=Yyy）
+        if tok.starts_with('-') {
+            continue;
+        }
+        if let Some((_user, host)) = tok.split_once('@') {
+            let host = host.trim();
+            if !host.is_empty() {
+                return Some(host.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// 生成 GPU 归一化型号名。
 ///
 /// 厂商只给代号（`4090`、`A100`、`4090_48G`），而节点选择器的偏好表按
@@ -290,8 +317,13 @@ pub fn network_endpoint(uhost: &UHost) -> NetworkEndpoint {
     // 厂商原生登录指令原样保留：端口可能随实例重启变化（22/23/高位映射），
     // 厂商给的 `ssh_login_command` 永远比本地拼装准确。
     let login_cmd = uhost.ssh_login_command.trim();
+    // 主机地址优先从登录指令解析：共享算力实例重启后 IP 会漂移，
+    // `IPSet` 可能滞后，而 `ssh_login_command` 里的 `root@<IP>` 都是当前值。
+    // 只有登录指令缺 host 时才回退到 IPSet。
+    let ssh_host = parse_ssh_host(login_cmd)
+        .or_else(|| uhost.primary_ip().map(|s| s.to_string()));
     NetworkEndpoint {
-        ssh_host: uhost.primary_ip().map(|s| s.to_string()),
+        ssh_host,
         ssh_port: parse_ssh_port(&uhost.ssh_login_command).or(Some(22)),
         inference_host: None,
         inference_port: None,
@@ -875,6 +907,25 @@ mod tests {
         );
         assert_eq!(parse_ssh_user("ssh ubuntu@host").as_deref(), Some("ubuntu"));
         assert_eq!(parse_ssh_user("ssh host"), None);
+    }
+
+    #[test]
+    fn ssh_host_parsing_variants() {
+        // 三种常见写法的 host 都要能取到
+        assert_eq!(
+            parse_ssh_host("ssh root@1.2.3.4 -p 60022").as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            parse_ssh_host("ssh -p 2222 root@host.example.com").as_deref(),
+            Some("host.example.com")
+        );
+        assert_eq!(parse_ssh_host("ssh root@host -p2222").as_deref(), Some("host"));
+        // 选项取值不能被误认成 host
+        assert_eq!(parse_ssh_host("ssh -p 60022 root@10.0.0.1").as_deref(), Some("10.0.0.1"));
+        // 无 @ 时取不到
+        assert_eq!(parse_ssh_host("ssh host"), None);
+        assert_eq!(parse_ssh_host(""), None);
     }
 
     #[test]

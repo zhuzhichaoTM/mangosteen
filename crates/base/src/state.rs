@@ -337,11 +337,38 @@ impl StateStore {
         Ok(true)
     }
 
-    /// 清理全部已销毁记录。
+    /// 清理已销毁记录。
     pub fn prune_destroyed(&self) -> MnResult<usize> {
         let mut state = self.load()?;
         let before = state.deployments.len();
         state.deployments.retain(|r| !r.status.is_terminal());
+        let removed = before - state.deployments.len();
+        if removed > 0 {
+            self.save(&state)?;
+        }
+        Ok(removed)
+    }
+
+    /// 清理**终态垃圾**记录：`destroyed` 与 `failed`。
+    ///
+    /// ## 为什么 `failed` 也算垃圾
+    ///
+    /// 失败的部署不占用任何资源（实例已销毁或已停放），留在台账里唯一的
+    /// 作用是「历史记录」。但失败记录会污染两处逻辑：
+    ///   * UI 按模型匹配台账时，旧失败记录的 `instance_id` 为空却可能被
+    ///     优先命中，导致实例 ID / 登陆方式显示错误；
+    ///   * 累积几十条后，每次 `list()` 都在解析无用数据。
+    ///
+    /// 因此网关启动时统一清掉这两类终态记录，只保留 `stopped`（复用依据）
+    /// 与 `ready`/`provisioning`（活跃）。
+    ///
+    /// 返回清理掉的记录数。
+    pub fn prune_terminal(&self) -> MnResult<usize> {
+        let mut state = self.load()?;
+        let before = state.deployments.len();
+        state
+            .deployments
+            .retain(|r| !matches!(r.status, DeploymentStatus::Destroyed | DeploymentStatus::Failed));
         let removed = before - state.deployments.len();
         if removed > 0 {
             self.save(&state)?;
@@ -651,6 +678,38 @@ mod tests {
         assert!(s.remove("b").unwrap());
         assert!(!s.remove("b").unwrap());
         assert!(s.list().unwrap().is_empty());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn prune_terminal_removes_destroyed_and_failed_keeps_stopped() {
+        let d = tmpdir("prune_terminal");
+        let s = StateStore::new(d.join("state.json"));
+        for id in ["ok", "dead", "fail", "stopped"] {
+            s.upsert(DeploymentRecord::from_plan(sample_plan(id)))
+                .unwrap();
+        }
+        s.set_status("dead", DeploymentStatus::Destroyed, None)
+            .unwrap();
+        s.set_status("fail", DeploymentStatus::Failed, Some("boom".into()))
+            .unwrap();
+        // stopped 是复用依据，必须保留
+        s.set_status("stopped", DeploymentStatus::Stopped, None)
+            .unwrap();
+
+        assert_eq!(s.prune_terminal().unwrap(), 2);
+        let left: Vec<String> = s
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.plan.id)
+            .collect();
+        assert!(left.contains(&"ok".to_string()));
+        assert!(left.contains(&"stopped".to_string()));
+        assert!(!left.contains(&"dead".to_string()));
+        assert!(!left.contains(&"fail".to_string()));
+        // 幂等：再次清理无记录可删
+        assert_eq!(s.prune_terminal().unwrap(), 0);
         std::fs::remove_dir_all(&d).ok();
     }
 

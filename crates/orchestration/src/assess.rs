@@ -126,8 +126,18 @@ pub struct DeploymentRequest {
     /// 配置模板原文/名称之外的辅助模型下载清单。
     /// 模板解析后由网关传入，不能只停留在 UI 展示层。
     pub auxiliary_models: Vec<AuxiliaryModelSpec>,
-    /// UI/调用方最终选定的配置模板名称。
+    /// UI/调用方最终选定的配置模板名称（键名 b）。
     pub config_template: Option<String>,
+    /// 配置模板**正文**（YAML 全文）。
+    ///
+    /// ## 为什么必须把正文传进来
+    ///
+    /// 模板是部署的唯一真源：下哪个仓库的哪个文件、用什么参数启动，
+    /// 全部由正文决定。只传名称的话后端只能靠模型名硬编码特判，
+    /// 用户选 Uncensored 却下载 default 权重的错配正是这么来的。
+    ///
+    /// 由 UI 提交（设置页是模板的唯一维护入口），后端解析后驱动下载与启动。
+    pub config_template_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -165,6 +175,7 @@ impl Default for DeploymentRequest {
             reuse_provider: None,
             device_id: None,
             config_template: None,
+            config_template_text: None,
             auxiliary_models: Vec::new(),
         }
     }
@@ -545,6 +556,7 @@ mod tests {
             reuse_provider: None,
             device_id: None,
             config_template: None,
+            config_template_text: None,
             auxiliary_models: Vec::new(),
         };
         let ar = r.to_assess_request();

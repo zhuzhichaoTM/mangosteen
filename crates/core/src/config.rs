@@ -844,6 +844,19 @@ pub struct WhitelistedModel {
     pub source_spec: String,
     #[serde(default)]
     pub template: String,
+    /// 该模型的全部配置模板：槽位名 → YAML 正文。
+    ///
+    /// ## 为什么模板存在配置里，而不是硬编码在代码或 UI
+    ///
+    /// 模板是部署的唯一真源（下哪个仓库的哪个文件、用什么参数启动）。
+    /// 它必须能被用户随时修改并持久化，因此落在用户配置里：
+    /// * 设置页是**唯一维护入口**，新增/编辑后立即写盘；
+    /// * 部署页两个下拉框（模型名、配置模板名）由这里的数据驱动；
+    /// * 部署请求把 `(模型名, 模板名)` 对应的正文发给后端解析。
+    ///
+    /// `default` 只是其中一种方案，不再是隐式兜底。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub templates: BTreeMap<String, String>,
 }
 
 /// 根配置。

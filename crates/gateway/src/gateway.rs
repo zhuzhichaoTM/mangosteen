@@ -99,7 +99,7 @@ impl GatewayBuilder {
     }
 
     /// 构建。
-    pub fn build(self) -> MnResult<Gateway> {
+    pub fn build(mut self) -> MnResult<Gateway> {
         let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
 
         let log_dir = self
@@ -177,6 +177,34 @@ impl GatewayBuilder {
         let models = ModelStore::new(model_index_path, guard, self.config.storage.verify_hash);
         let state = StateStore::new(state_path);
 
+        // 启动时清理终态垃圾记录（destroyed/failed）。这些记录不占资源、
+        // 不参与复用，留着只会：① 让 UI 按模型匹配台账时误命中旧失败记录
+        // （instance_id 为空却优先），导致实例 ID / 登陆方式显示错误；
+        // ② 让台账随使用无限膨胀。stopped 记录必须保留——它是「下次部署
+        // 复用同一台机器」的唯一依据。清理失败不影响启动。
+        match state.prune_terminal() {
+            Ok(n) if n > 0 => eprintln!("[state] ✓ 已清理 {n} 条终态历史记录（destroyed/failed）"),
+            Err(e) => eprintln!("[state] 清理终态记录失败（忽略，不影响启动）：{e}"),
+            _ => {}
+        }
+
+        // 首次启动把内置配置模板灌入用户配置（幂等：已存在的不覆盖）。
+        //
+        // 模板是部署的唯一真源，必须落在用户配置里才能被设置页编辑、
+        // 被部署页下拉框索引。这里只补「缺失」的槽位，绝不覆盖用户已改过
+        // 的内容——否则升级会把用户的自定义配置冲掉。
+        {
+            let mut config = self.config.clone();
+            if seed_builtin_templates(&mut config) {
+                let store = mangosteen_base::config::ConfigStore::platform_default(None);
+                match store.save(&config) {
+                    Ok(_) => eprintln!("[config] ✓ 已写入内置模型配置模板（仅补充缺失项）"),
+                    Err(e) => eprintln!("[config] 写入内置模板失败（忽略，使用内存配置）：{e}"),
+                }
+                self.config = config;
+            }
+        }
+
         mangosteen_orchestration::Orchestrator::new(
             self.config,
             assessor,
@@ -198,4 +226,38 @@ pub fn scheduler_config_with_overrides(
         c.max_price_per_hour = Some(p);
     }
     c
+}
+
+/// 把内置模型配置模板补进配置（幂等）。
+///
+/// ## 为什么只补不覆盖
+///
+/// 模板是用户可编辑的部署真源。升级时若直接覆盖，用户辛苦调好的
+/// 上下文/仓库会被冲掉。因此只在「该模型或该槽位还不存在」时写入，
+/// 已存在的一律保持用户版本。
+///
+/// 返回是否发生了改动（true 表示需要落盘）。
+fn seed_builtin_templates(cfg: &mut mangosteen_core::config::Config) -> bool {
+    let mut changed = false;
+    for (model, slot, display, text) in mangosteen_core::template::BUILTIN_TEMPLATES {
+        let entry = cfg
+            .model_whitelist
+            .entry((*model).to_string())
+            .or_insert_with(|| mangosteen_core::config::WhitelistedModel {
+                display_name: (*display).to_string(),
+                source_spec: String::new(),
+                template: (*slot).to_string(),
+                templates: Default::default(),
+            });
+        if entry.display_name.trim().is_empty() {
+            entry.display_name = (*display).to_string();
+            changed = true;
+        }
+        // 只在缺失时插入：用户已定制的版本必须保留
+        if !entry.templates.contains_key(*slot) {
+            entry.templates.insert((*slot).to_string(), (*text).to_string());
+            changed = true;
+        }
+    }
+    changed
 }

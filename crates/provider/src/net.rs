@@ -87,6 +87,10 @@ pub struct Tunnel {
     pub established_at: i64,
     /// SSH 目标（供日志）
     pub target: String,
+    /// 密码认证用的 askpass 脚本。只在隧道真正关闭时才删除：
+    /// ssh 是「延迟」调用 askpass 取密码的，脚本存活期必须覆盖
+    /// 整个认证窗口，否则 ssh 拿不到密码退出 255 且 stderr 为空。
+    askpass: Option<std::path::PathBuf>,
 }
 
 impl Tunnel {
@@ -115,7 +119,12 @@ impl Tunnel {
 
     /// 关闭隧道。
     pub fn close(&mut self) -> MnResult<()> {
-        self.child.terminate(Duration::from_secs(3))
+        let r = self.child.terminate(Duration::from_secs(3));
+        // 认证此刻必然已经结束（无论成败），可安全删除密码脚本。
+        if let Some(p) = self.askpass.take() {
+            let _ = std::fs::remove_file(p);
+        }
+        r
     }
 
     /// PID。
@@ -288,7 +297,11 @@ impl TunnelManager {
         // 就已经在监听，连通性检测无法区分「隧道好」与「目标没人听」。
         // 因此只确认 ssh 进程在观察窗内活着；真正可用性由启动阶段探 /health 判定。
         if effective.allow_unready_remote {
-            let settle = Duration::from_millis(800);
+            // 观察窗必须覆盖 ssh 的完整认证过程：TCP 握手 + 密钥交换 +
+            // askpass 取密码，跨公网常需 1~3 秒。窗口太短会在认证完成前
+            // 就判定「隧道就绪」，掩盖真实失败；这里的目的是尽早发现
+            // 「密码错 / 实例未就绪」这类立刻退出的失败。
+            let settle = Duration::from_secs(3);
             let deadline = Instant::now() + connect_timeout.min(settle);
             loop {
                 if let Some(code) = child.exit_code() {
@@ -376,11 +389,13 @@ impl TunnelManager {
             std::thread::sleep(Duration::from_millis(120));
         }
 
-        // 隧道已通，认证必然已完成，现在才安全删除密码脚本
-        if let Some(p) = &askpass {
-            let _ = std::fs::remove_file(p);
-        }
-
+        // 隧道已就绪。**不在这里删 askpass**：观察窗（settle）可能短于 ssh 的
+        // 「TCP 握手 + 密钥交换 + askpass 取密码」完整认证耗时。此时若提前删
+        // 脚本，ssh 会在认证中途读不到密码而退出 255、stderr 为空
+        // （正是隧道日志里成片 No such file 的来源）。
+        //
+        // 把脚本交给 Tunnel 持有，由 close()/进程退出时再删——脚本存活期
+        // 覆盖整个认证窗口，ssh 必然能读到密码。
         self.tunnels.push((
             Self::key(spec, remote_port),
             Tunnel {
@@ -389,6 +404,7 @@ impl TunnelManager {
                 remote_port,
                 established_at: mangosteen_core::time::now_unix(),
                 target: format!("{}@{}:{}", spec.ssh_user, spec.ssh_host, spec.ssh_port),
+                askpass,
             },
         ));
         Ok(&self.tunnels.last().unwrap().1)

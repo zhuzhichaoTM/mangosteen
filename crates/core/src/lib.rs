@@ -46,6 +46,7 @@ pub mod openai;
 pub mod plan;
 pub mod policy;
 pub mod source;
+pub mod template;
 pub mod time;
 pub mod transport;
 

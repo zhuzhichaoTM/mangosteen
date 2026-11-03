@@ -43,6 +43,32 @@ impl GatewayServer {
                 dreq.cloud_spec = Some(spec.to_string());
             }
         }
+        // 配置模板：名称 + 正文。预览必须与正式部署用同一份模板，
+        // 否则「预览说能跑、部署下的却是另一份权重」。
+        if let Some(t) = parsed
+            .get("config_template")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            dreq.config_template = Some(t.to_string());
+        }
+        if let Some(text) = parsed
+            .get("config_template_text")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+        {
+            dreq.config_template_text = Some(text.to_string());
+        }
+        // 模型 ID（UI 下拉框的值）：模板 schema 按它选择解析器
+        if let Some(mid) = parsed
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            dreq.model_id = Some(mid.to_string());
+        }
         // 设备选择：local / cloud / auto（缺省 auto = 本地优先）
         if let Some(t) = parsed.get("target").and_then(|v| v.as_str()) {
             match mangosteen_orchestration::assess::ComputeTarget::parse(t) {

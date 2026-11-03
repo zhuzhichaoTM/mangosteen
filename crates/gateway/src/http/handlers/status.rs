@@ -54,6 +54,25 @@ impl GatewayServer {
                 entries.push((remote.model_id, "cloud".to_string()));
             }
         }
+        // 活跃部署的模型也必须出现：只部署在云端（或引擎直跑）的模型
+        // 在本地 ModelStore 没有记录，OpenAI 客户端拉模型列表会看不到
+        // 可对话模型。只读台账（list_active 不触发厂商网络）。
+        if let Ok(recs) = gw.state().list_active() {
+            for r in recs {
+                let id = mangosteen_core::model::ModelEntry::derive_id(
+                    &r.plan.model.name,
+                    r.plan.model.quant,
+                );
+                if !entries.iter().any(|(eid, _)| eid == &id) {
+                    let owner = if r.plan.cloud.is_some() {
+                        "cloud"
+                    } else {
+                        "local"
+                    };
+                    entries.push((id, owner.to_string()));
+                }
+            }
+        }
         let l = protocol::build_model_list(&entries, mangosteen_core::time::now_unix());
         Response::json(200, &l)
     }

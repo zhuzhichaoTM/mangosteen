@@ -32,6 +32,7 @@ pub mod deployment;
 pub mod orchestrator;
 pub mod progress;
 pub mod scheduler;
+mod template_plan;
 
 pub use assess::{Assessor, ComputeTarget, DeploymentRequest, Evaluated, ModelDownloadSpec};
 pub use backend::BackendTarget;
