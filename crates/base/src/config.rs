@@ -133,7 +133,7 @@ impl ConfigStore {
         let user = self.paths.user_config_dir.join("config.toml");
         if user.is_file() {
             return Ok(LoadedConfig {
-                config: Config::load(&user)?,
+                config: load_or_quarantine(&user)?,
                 source: ConfigSource::User(user),
             });
         }
@@ -142,7 +142,7 @@ impl ConfigStore {
             let sys = sys_dir.join("config.toml");
             if sys.is_file() {
                 return Ok(LoadedConfig {
-                    config: Config::load(&sys)?,
+                    config: load_or_quarantine(&sys)?,
                     source: ConfigSource::System(sys),
                 });
             }
@@ -158,8 +158,7 @@ impl ConfigStore {
     }
 
     /// 写配置到默认位置（权限收紧到 0600，因为可能含密钥）。
-    pub fn save(&self, cfg: &Config) -> MnResult<PathBuf> {
-        let path = self.default_write_path();
+    pub fn save(&self, cfg: &Config) -> MnResult<PathBuf> {        let path = self.default_write_path();
         let text = cfg.to_toml()?;
         mangosteen_platform::fs::ensure_dir(&self.paths.user_config_dir)?;
         mangosteen_platform::fs::atomic_write_private(&path, text.as_bytes())?;
@@ -170,6 +169,75 @@ impl ConfigStore {
     pub fn save_to(&self, cfg: &Config, path: &Path) -> MnResult<()> {
         let text = cfg.to_toml()?;
         mangosteen_platform::fs::atomic_write_private(path, text.as_bytes())
+    }
+}
+
+/// 加载配置文件；若文件**语法损坏**，隔离它并回落到内置默认。
+///
+/// ## 为什么不让损坏配置直接报错
+///
+/// 配置文件是**可重建**的资产（真正不可恢复的是模型与台账）。一旦它损坏，
+/// 若直接 `Err` 返回，网关起不来、CLI 全线失败，用户被困住——而程序本身
+/// 明明有能力继续跑。这里的取舍是：**启动优先**，但绝不静默——
+/// 把损坏文件重命名保留（`.corrupt-<时间戳>`）并打印醒目警告，
+/// 然后按「配置文件不存在」的路径继续（回落内置样例）。
+///
+/// 隔离而非删除：损坏文件可能含用户手写的自定义模板，直接删等于替用户
+/// 做了不可撤销的决定。
+///
+/// ## 为什么只隔离「语法损坏」，不隔离「语义错误」
+///
+/// 两者必须分开处理：
+/// * **语法损坏**（非法 UTF-8、半截文件、TOML 解析失败）是程序自身的
+///   写入缺陷或磁盘问题造成的，用户无从修复，只能重建 → 隔离 + 回退；
+/// * **语义错误**（如 `storage.models_dir` 为空串、端口越界）是用户
+///   手改配置写错了，属于「明确的输入错误」，必须原样报出来让他去改。
+///   静默回退会让用户以为配置生效了，实则跑在默认值上。
+fn load_or_quarantine(path: &Path) -> MnResult<Config> {
+    match Config::load(path) {
+        Ok(cfg) => Ok(cfg),
+        Err(e) => {
+            if !is_syntax_corruption(&e) {
+                // 语义错误：原样上报，不隔离、不回退
+                return Err(e);
+            }
+            let stamp = mangosteen_core::time::now_unix();
+            let broken = path.with_extension(format!("toml.corrupt-{stamp}"));
+            let moved = std::fs::rename(path, &broken).is_ok();
+            eprintln!(
+                "[config] ⚠ 配置文件损坏，已{}：{}。原因：{e}",
+                if moved {
+                    format!("隔离为 {}", broken.display())
+                } else {
+                    "读取失败（无法重命名，文件保留原处）".to_string()
+                },
+                path.display()
+            );
+            eprintln!("[config] 本次启动将使用内置默认配置；请在设置页重新保存以生成新配置");
+            Ok(Config::sample(
+                mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env),
+                mangosteen_platform::paths::cache_dir(&mangosteen_platform::paths::real_env),
+            ))
+        }
+    }
+}
+
+/// 判断错误是否属于「文件本身损坏」（而非用户写错字段）。
+///
+/// `Config::load` 会把字段语义错误包装成 `ConfigIo { reason: "<字段>: <原因>" }`，
+/// 而 TOML 解析失败来自 `from_toml` 的 `Config { field: "toml" }`。据此区分：
+/// 只有 `toml` 字段的失败才是语法损坏。
+fn is_syntax_corruption(e: &MnError) -> bool {
+    match e {
+        MnError::Config { field, .. } => field == "toml",
+        MnError::ConfigIo { reason, .. } => {
+            // from_toml 的解析错误会被包装成 `toml: ...`
+            reason.starts_with("toml:")
+                // 非法 UTF-8 在 read_to_string 阶段就失败，没有被包装
+                || reason.contains("stream did not contain valid UTF-8")
+                || reason.contains("invalid utf-8")
+        }
+        _ => false,
     }
 }
 
@@ -334,6 +402,43 @@ mod tests {
         let s = store_in(&d);
         assert_eq!(s.default_write_path(), d.join("config.toml"));
         assert_eq!(s.candidates().len(), 1); // 无 explicit、无 system
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 损坏的配置文件必须被隔离，且**不阻止启动**。
+    ///
+    /// 实测踩到：`config.toml` 末尾因并发写残留半截 UTF-8，整个文件解析
+    /// 失败，于是网关起不来、CLI 全线报错——用户分不清是自己配错了还是
+    /// 程序坏了。配置文件是「可重建」的：隔离后的新文件用内置样例重建，
+    /// 用户至少还能进 UI 改回来。
+    #[test]
+    fn corrupted_config_is_quarantined_and_boot_continues() {
+        let d = tmpdir("corrupt");
+        let p = d.join("config.toml");
+        // 精确复现现场：末尾是截断在多字节字符中间的内容
+        let mut bytes = b"[gateway]\nport = 11516\nhost = \"127.0.0.1\"\n".to_vec();
+        bytes.extend_from_slice(b"# \xe5\x88\x86\xe9\x85\x8d"); // 合法
+        bytes.extend_from_slice(b"\x86\xe9\x85\x8d"); // 非法：半个字符
+        std::fs::write(&p, &bytes).unwrap();
+
+        let s = store_in(&d);
+        let loaded = s.load().expect("损坏配置不应阻止启动");
+        // 回落到内置样例：models_dir 等取平台默认值，而不是损坏文件里的内容
+        assert!(
+            loaded.config.model_whitelist.is_empty(),
+            "损坏内容不应被部分采纳"
+        );
+        assert_eq!(loaded.config.gateway.port, 11516, "应使用内置默认端口");
+
+        // 损坏文件必须被保留下来供排查，而不是被静默删掉
+        let quarantined: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("corrupt"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "损坏文件应被重命名保留：{quarantined:?}");
+        assert!(!p.exists(), "原路径上的损坏文件应已移走");
         std::fs::remove_dir_all(&d).ok();
     }
 }

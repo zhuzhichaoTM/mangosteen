@@ -16,8 +16,19 @@ use mangosteen_core::{MnError, MnResult};
 
 /// 原子写文件。
 ///
-/// 步骤：同目录写 `.<name>.tmp` → `fsync` → `rename` 覆盖。
+/// 步骤：同目录写隐藏临时文件 → `fsync` → `rename` 覆盖 → 回读校验。
 /// 同目录保证 `rename` 是同一文件系统内的原子操作。
+///
+/// ## 临时文件名必须每次唯一
+///
+/// 早期实现用固定的 `.<name>.tmp`，同一目录下的并发写入（网关启动补全
+/// 内置模板 + 用户保存配置可能同时发生）会落到**同一个**临时文件上：
+/// 一个写入者 `create` 会截断另一个已写的内容，两者各按自己的偏移继续写，
+/// 最终 rename 出去的就是两份内容的混合体——实测在 `config.toml` 末尾
+/// 留下过半截 UTF-8 字符（`...分配"""` 后面跟一个孤立的 `\x86\xe9\x85\x8d"""`），
+/// 整个配置因此无法解析，升级/重启后表现为「设置莫名丢失」。
+///
+/// 现在临时名带 pid + 进程内自增序号 + 纳秒时间戳，任何并发写入都互不干扰。
 pub fn atomic_write(path: &Path, contents: &[u8]) -> MnResult<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)
@@ -26,7 +37,21 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> MnResult<()> {
     let file_name = path
         .file_name()
         .ok_or_else(|| MnError::bad_request(format!("非法路径：{}", path.display())))?;
-    let tmp = parent.join(format!(".{}.tmp", file_name.to_string_lossy()));
+
+    // 唯一临时名：同目录并发写不会互相踩，残留的 .tmp 也不会被误用。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = parent.join(format!(
+        ".{}.{}.{}.{}.tmp",
+        file_name.to_string_lossy(),
+        std::process::id(),
+        seq,
+        nanos
+    ));
 
     {
         let mut f = fs::File::create(&tmp)
@@ -44,7 +69,30 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> MnResult<()> {
             format!("原子替换 {} → {}", tmp.display(), path.display()),
             &e,
         )
-    })
+    })?;
+
+    // 回读校验：磁盘内容必须与预期完全一致。
+    //
+    // 只做「写入 + rename」不足以证明落盘正确——并发写入、磁盘满、
+    // 文件系统异常都可能让内容悄悄变形（例如截断在多字节字符中间）。
+    // 配置文件与台账一旦损坏，症状会延后到下次启动才暴露，排查成本极高。
+    // 这里多读一次（KB 级开销）换取确定性。
+    let actual = fs::read(path)
+        .map_err(|e| MnError::io(format!("回读 {} 校验", path.display()), &e))?;
+    if actual != contents {
+        return Err(MnError::io(
+            format!("写入校验失败 {}", path.display()),
+            &std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "期望 {} 字节，实际 {} 字节（写入被截断或并发覆盖）",
+                    contents.len(),
+                    actual.len()
+                ),
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// 原子写文本。

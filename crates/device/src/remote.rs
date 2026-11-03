@@ -536,6 +536,12 @@ impl SshTarget {
             "LogLevel=ERROR".to_string(),
             "-o".to_string(),
             "ConnectTimeout=15".to_string(),
+            // 连接级重试：厂商 SSH 入口是共享转发网关，转发重建期间会
+            // 出现「连上即被关闭」和「端口拒绝」的秒级窗口。这组参数让
+            // ssh 在建立 TCP 连接阶段自己重试，与应用层重试形成双保险
+            // （应用层还负责被远端关闭之后的重新建连）。
+            "-o".to_string(),
+            "ConnectionAttempts=5".to_string(),
             // 应用层保活：长命令（apt-get、解压、启动等待循环）可能几十秒
             // 没有任何输出，中间 NAT/网关会把静默连接掐掉。SSP 每 15 秒发
             // 一次心跳，连续 4 次无响应才判定断连——既保活又能及时发现真断。
@@ -736,19 +742,22 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
 ///
 /// ## 为什么内置重试
 ///
-/// 每条命令都是**全新的 SSH 连接**。厂商 SSH 网关对连接频率与时长有阈值
-/// （下载轮询期间每 2 秒一条连接，持续几十分钟），会随机掐断部分连接：
-/// 客户端表现为退出码 255、stderr 为空。这类「连接层中断」与密码错误、
-/// 命令失败不同，重发一次通常就成功——不重试会把瞬时抖动放大成部署失败。
+/// 每条命令都是**全新的 SSH 连接**。云厂商的 SSH 入口是共享转发网关：
+/// 实例重启/迁移、网关滚动更新期间会出现一段「连上即被远端关闭」的窗口
+/// （`Connection closed by remote host`），紧跟着是转发重建中的
+/// `Connection refused`。这属于秒级瞬时故障，重发一次通常就成功。
 ///
-/// 只重试「255 且无真实 stderr」的中断；认证失败（stderr 有
-/// Permission denied）与远端命令非零退出（业务失败）都立即报错，
-/// 绝不掩盖真实问题。
+/// 判定规则：退出码 255 且 stderr 未命中认证/配置类关键词 → 可重试。
+/// 认证失败（`Permission denied`）、host key 冲突、无法解析主机名是确定性
+/// 失败，重试只会白等，立即报错。
+///
+/// 重试 5 次、退避 1s/2s/3s/4s：厂商网关重建转发通常需要数秒，
+/// 只重试 3 次窗口太窄，实测仍会被穿透。
 pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<String> {
     // 超时参数当前由 `ConnectTimeout` 与各调用方的轮询/预算逻辑共同约束，
     // 保留在签名里是为了让调用方表达意图；此处显式消费避免未用告警。
     let _ = timeout_secs;
-    const MAX_ATTEMPTS: u32 = 3;
+    const MAX_ATTEMPTS: u32 = 5;
     let mut last: Option<SshFailure> = None;
     for attempt in 1..=MAX_ATTEMPTS {
         match ssh_exec_once(target, cmd) {
@@ -759,11 +768,12 @@ pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<St
                 if !transient || attempt == MAX_ATTEMPTS {
                     break;
                 }
-                // 500ms / 1500ms 退避：给网关喘息，也避免密集重试加剧限流
-                let wait = std::time::Duration::from_millis(500 * attempt as u64 * 3);
+                // 1s / 2s / 3s / 4s 退避：厂商网关重建转发通常要数秒，
+                // 退避太短会在同一个故障窗口里连续撞墙。
+                let wait = std::time::Duration::from_secs(attempt as u64);
                 eprintln!(
-                    "[ssh] 连接层中断（第 {attempt}/{MAX_ATTEMPTS} 次），{}ms 后重试：{}",
-                    wait.as_millis(),
+                    "[ssh] 连接层中断（第 {attempt}/{MAX_ATTEMPTS} 次），{}s 后重试：{}",
+                    wait.as_secs(),
                     match &last {
                         Some(SshFailure::Transient(r)) => r.as_str(),
                         _ => "",
@@ -859,14 +869,47 @@ fn ssh_exec_once(target: &SshTarget, cmd: &str) -> Result<String, SshFailure> {
                 real.iter().take(3).cloned().collect::<Vec<_>>().join(" / ")
             )
         };
-        // 只有「255 且无真实 stderr」才是连接层中断；有真实 stderr
-        // （如 Permission denied）说明 SSH 层给出了明确原因，重试无意义。
-        return Err(match (out.status.code(), real.is_empty()) {
-            (Some(255), true) => SshFailure::Transient(reason),
-            _ => SshFailure::Fatal(reason),
+        // 判定「值不值得重试」不能只看 stderr 是否为空。
+        //
+        // ## 曾经的错误判定
+        //
+        // 旧逻辑是「255 且 stderr 为空 → 可重试」，理由是「有 stderr 说明
+        // SSH 给出了明确原因」。但这个前提不成立：`Connection closed by
+        // remote host` / `Connection reset by peer` / `Connection timed out`
+        // 都是**瞬时网络中断**，SSH 恰恰会为它们写出 stderr。于是最该重试
+        // 的一类失败被归成了致命错误——用户看到「相同问题重复出现」。
+        //
+        // ## 现在的判定
+        //
+        // 退出码 255 且 stderr 未命中「认证/配置类」关键词 → 视为连接层
+        // 中断，可重试。判定逻辑见 [`classify_ssh_failure`]。
+        let transient = out.status.code() == Some(255)
+            && !real.iter().any(|l| is_deterministic_ssh_error(l));
+        return Err(if transient {
+            SshFailure::Transient(reason)
+        } else {
+            SshFailure::Fatal(reason)
         });
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// 判断某行 stderr 是否表示**确定性失败**（重试无意义）。
+///
+/// 只列举认证与配置类错误：这些重试一百次也是同样结果，立即报错才能
+/// 让用户看到真正的原因。其余 255 一律按连接层中断处理——包括
+/// `Connection closed by remote host` 这种「看起来像错误、其实是瞬时
+/// 网络中断」的提示，它恰恰是最该重试的一类。
+fn is_deterministic_ssh_error(line: &str) -> bool {
+    const FATAL_HINTS: [&str; 6] = [
+        "Permission denied",
+        "Too many authentication failures",
+        "Host key verification failed",
+        "REMOTE HOST IDENTIFICATION HAS CHANGED",
+        "Could not resolve hostname",
+        "No such file or directory",
+    ];
+    FATAL_HINTS.iter().any(|h| line.contains(h))
 }
 
 /// 把本地文件传到远端（用 `scp`）。
@@ -1878,5 +1921,49 @@ mod ssh_e2e_tests {
             .expect("公钥免密 SSH 验证失败");
         assert!(out.contains("KEY_AUTH_OK"));
         assert!(out.lines().any(|line| line.trim() == "0"));
+    }
+}
+
+#[cfg(test)]
+mod ssh_failure_tests {
+    use super::is_deterministic_ssh_error;
+
+    /// 瞬时网络中断必须被判为「可重试」。
+    ///
+    /// 这组文案是厂商共享网关在实例重启/迁移期间的典型输出。旧实现
+    /// 把「有 stderr」一律当成致命错误，导致这些最该重试的失败反而
+    /// 直接终结部署——线上「相同问题重复出现」正是这么来的。
+    #[test]
+    fn transient_network_errors_are_retryable() {
+        for line in [
+            "Connection to 117.50.190.191 closed by remote host.",
+            "Connection closed by remote host",
+            "ssh: connect to host 117.50.190.191 port 23: Connection refused",
+            "Connection reset by peer",
+            "Connection timed out during banner exchange",
+            "client_loop: send disconnect: Broken pipe",
+        ] {
+            assert!(
+                !is_deterministic_ssh_error(line),
+                "应判为可重试（瞬时中断），却被当成致命错误：{line}"
+            );
+        }
+    }
+
+    /// 认证与配置类错误必须判死：重试只是白等，还掩盖真实原因。
+    #[test]
+    fn auth_and_config_errors_are_fatal() {
+        for line in [
+            "root@1.2.3.4: Permission denied (publickey).",
+            "Received disconnect from 1.2.3.4 port 23:2: Too many authentication failures",
+            "Host key verification failed.",
+            "@@@@@ REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@@",
+            "ssh: Could not resolve hostname bad-host: Name or service not known",
+        ] {
+            assert!(
+                is_deterministic_ssh_error(line),
+                "应判为致命错误（重试无意义），却当成可重试：{line}"
+            );
+        }
     }
 }
