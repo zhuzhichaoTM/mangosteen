@@ -60,6 +60,11 @@ pub struct GatewayBuilder {
     log_dir: Option<PathBuf>,
     state_path: Option<PathBuf>,
     model_index_path: Option<PathBuf>,
+    /// 配置持久化目标。`None` = 平台默认（真实用户配置路径）。
+    ///
+    /// 必须可覆盖：内置模板补齐与设置页保存都会写配置，若测试注入的
+    /// 配置走平台默认路径，就会覆盖开发者本机的真实 `config.toml`。
+    config_store_override: Option<mangosteen_base::config::ConfigStore>,
 }
 
 impl GatewayBuilder {
@@ -71,7 +76,16 @@ impl GatewayBuilder {
             log_dir: None,
             state_path: None,
             model_index_path: None,
+            config_store_override: None,
         }
+    }
+
+    /// 覆盖配置持久化目标。
+    ///
+    /// **测试必须调用**：否则内置模板补齐会把测试配置写进真实用户配置。
+    pub fn config_store(mut self, store: mangosteen_base::config::ConfigStore) -> Self {
+        self.config_store_override = Some(store);
+        self
     }
 
     /// 覆盖引擎路径。
@@ -193,10 +207,25 @@ impl GatewayBuilder {
         // 模板是部署的唯一真源，必须落在用户配置里才能被设置页编辑、
         // 被部署页下拉框索引。这里只补「缺失」的槽位，绝不覆盖用户已改过
         // 的内容——否则升级会把用户的自定义配置冲掉。
+        //
+        // ## 落盘路径必须跟随本实例的配置来源
+        //
+        // 早期实现无条件用 `ConfigStore::platform_default(None)`——那是
+        // **真实用户配置路径**，与调用方给的 cfg 无关。e2e 测试注入的
+        // 配置（临时 models_dir、已清空的 providers）因此被写进了开发者
+        // 本机的 `~/Library/Application Support/mangosteen/config.toml`：
+        // 跑一次测试，真实配置就被改成「模型库指向 /var/folders 临时目录、
+        // 云服务商全部消失」。表现为「设置莫名丢失」「部署时找不到云端节点」。
+        //
+        // 现在改为优先沿用调用方传入的 store；仅在未指定时（生产默认路径）
+        // 才回落到平台默认。测试侧只要传入自己的 store，就绝不会触碰真实文件。
         {
             let mut config = self.config.clone();
             if seed_builtin_templates(&mut config) {
-                let store = mangosteen_base::config::ConfigStore::platform_default(None);
+                let store = self
+                    .config_store_override
+                    .clone()
+                    .unwrap_or_else(|| mangosteen_base::config::ConfigStore::platform_default(None));
                 match store.save(&config) {
                     Ok(_) => eprintln!("[config] ✓ 已写入内置模型配置模板（仅补充缺失项）"),
                     Err(e) => eprintln!("[config] 写入内置模板失败（忽略，使用内存配置）：{e}"),
@@ -205,14 +234,21 @@ impl GatewayBuilder {
             }
         }
 
-        mangosteen_orchestration::Orchestrator::new(
+        let orch = mangosteen_orchestration::Orchestrator::new(
             self.config,
             assessor,
             local_engine,
             cloud,
             state,
             models,
-        )
+        )?;
+        // 把同一个 store 交给编排器：设置页/模板接口的保存走它，
+        // 与上面的种子写入保持同一目标文件，避免「一处写真实路径、
+        // 一处写测试路径」这种割裂。
+        Ok(match self.config_store_override {
+            Some(store) => orch.with_config_store(store),
+            None => orch,
+        })
     }
 }
 

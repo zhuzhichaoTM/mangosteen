@@ -183,6 +183,16 @@ HTTPServer((host, port), H).serve_forever()
             .log_dir(Some(self.root.join("logs")))
             .state_path(self.state_path())
             .model_index_path(self.index_path())
+            // **必须**注入隔离的配置存储。网关启动会把内置模板"补缺"落盘，
+            // 若不指定，它会写到真实用户配置路径——跑一次测试就把开发者
+            // 本机的 config.toml 改成测试用的临时目录与空服务商列表。
+            .config_store(mangosteen_base::config::ConfigStore::new(
+                mangosteen_core::config::ConfigPaths {
+                    explicit: None,
+                    user_config_dir: self.root.join("cfg"),
+                    system_config_dir: None,
+                },
+            ))
             .build()
             .map(|gw| {
                 // 让 GatewayBuilder 的默认 store 与测试路径一致（已通过 builder 传入）
