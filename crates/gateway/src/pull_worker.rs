@@ -172,7 +172,7 @@ pub fn spawn(
                 match (hooks.resume)(&dep_id) {
                     Ok(id) => {
                         jobs.set_deployment(&job_id, Some(&id), None);
-                        jobs.mark_done_external(&job_id);
+                        jobs.mark_done_external(&job_id, "已复用已有实例并启动推理服务");
                     }
                     Err(e) => {
                         let why = format!("复用实例启动失败：{e}");
@@ -237,6 +237,11 @@ pub fn spawn(
                         match (hooks.commit_cloud)(*p) {
                             Ok(dep_id) => {
                                 jobs.set_deployment(&job_id, Some(&dep_id), None);
+                                // 成功也必须终结任务状态：只写 deployment 会让
+                                // job.state 永远停在 Running（非终态），后续同
+                                // 模型的部署请求会被 find_active_by_spec 复用到
+                                // 这个僵尸任务上，部署看似受理、实际永不启动。
+                                jobs.mark_done_external(&job_id, "云端模型已启动推理服务");
                                 (hooks.refresh_routes)();
                             }
                             Err(e) => {

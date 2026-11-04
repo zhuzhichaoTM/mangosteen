@@ -270,16 +270,19 @@ impl PullJobs {
         self.mark_done_with(id, Some(model_id), done, already_present, None);
     }
 
-    /// 标记任务终结，但不涉及本地下载（复用实例启动路径）。
+    /// 标记任务终结，但不涉及本地下载（云端启动路径）。
     ///
-    /// 复用实例时没有字节数可报——权重是上次就下载好的。这里把任务
-    /// 直接收为 `Done`，否则 UI 会一直轮询一个永远不会再变化的任务。
-    pub fn mark_done_external(&self, id: &str) {
+    /// 云端部署没有本地字节数可报——权重要么上次就下载好了（复用实例），
+    /// 要么直接落在云端机器上（云端直连下载）。这里把任务收为 `Done`，
+    /// 否则任务状态永远停在 Running（非终态），`find_active_by_spec`
+    /// 会把后续所有同模型部署请求复用到一个早已结束的僵尸任务上——
+    /// 部署看似受理成功，实际永远不会再启动。
+    pub fn mark_done_external(&self, id: &str, note: impl Into<String>) {
         if let Ok(mut g) = self.inner.lock() {
             if let Some(j) = g.get_mut(id) {
                 j.state = JobState::Done;
                 j.finished_ms = Some(mangosteen_core::time::now_unix_millis() as u64);
-                j.note = Some("已复用已有实例并启动推理服务".to_string());
+                j.note = Some(note.into());
             }
         }
     }
