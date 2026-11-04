@@ -222,7 +222,10 @@ impl TunnelManager {
     /// 重试是安全的：每次尝试都会独立分配端口、清理进程与临时文件，
     /// 失败分支不留下任何残留（这是 `establish_once` 的既有约定）。
     pub fn establish(&mut self, spec: &TunnelSpec, connect_timeout: Duration) -> MnResult<&Tunnel> {
-        const ATTEMPTS: u32 = 4;
+        // 6 次、退避 3/6/9/12/15s：新购实例刚开机时，厂商 SSH 网关的端口
+        // 转发映射可能需要 30s 以上才就绪（实测压测第 2 轮在 4 次重试
+        // 约 12s 的旧窗口内全部撞墙）。总窗口约 45s+ 才够跨过冷启动期。
+        const ATTEMPTS: u32 = 6;
         let mut last_reason = String::new();
         for attempt in 1..=ATTEMPTS {
             match self.establish_once(spec, connect_timeout) {
@@ -233,9 +236,9 @@ impl TunnelManager {
                     if !transient || attempt == ATTEMPTS {
                         return Err(e);
                     }
-                    // 退避：2s / 4s / 6s。网关重建转发通常几秒内完成，
-                    // 指数退避反而会让用户白等，线性递增更贴合实际。
-                    let wait = Duration::from_secs(2 * attempt as u64);
+                    // 退避：3/6/9/12/15s。网关重建转发通常几秒内完成，
+                    // 但新实例冷启动会更久；线性递增兼顾两者。
+                    let wait = Duration::from_secs(3 * attempt as u64);
                     eprintln!(
                         "[tunnel] 第 {attempt}/{ATTEMPTS} 次建立失败（瞬时网关故障），\
                          {}s 后重试：{last_reason}",

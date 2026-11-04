@@ -1526,8 +1526,12 @@ fn finish_provision(
 /// 重试用尽后仍然失败，就把「连不上」这个事实**明确**报出来——
 /// 不要让调用方把它误读成下载失败或解压失败。
 fn confirm_remote_reachable(target: &mangosteen_device::remote::SshTarget) -> MnResult<()> {
-    const ATTEMPTS: u32 = 6;
-    const RETRY_WAIT: Duration = Duration::from_secs(2);
+    // 12 次 × 3s ≈ 36s 窗口：实测压测中 P40 刚开机时 sshd 会以
+    // `Permission denied, please try again` 拒绝一切认证，直到实例
+    // 完全初始化（约 20s+）。6 次 × 2s 的旧窗口跨不过去，把「还没
+    // 就绪」误判成部署失败。
+    const ATTEMPTS: u32 = 12;
+    const RETRY_WAIT: Duration = Duration::from_secs(3);
     let mut last_reason = String::new();
     for attempt in 1..=ATTEMPTS {
         match mangosteen_device::remote::ssh_exec(target, "true", 15) {
