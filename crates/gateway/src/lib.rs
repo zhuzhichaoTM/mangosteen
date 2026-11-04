@@ -35,6 +35,7 @@
 pub mod cloudmon;
 pub mod gateway;
 pub mod http;
+pub mod sshmon;
 
 pub mod protocol;
 mod pull_worker;

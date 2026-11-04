@@ -360,11 +360,48 @@ fn ssh_info_from_instance(
 }
 
 impl Orchestrator {
-    /// 实时查询部署实例的 SSH 登录信息（直连厂商 API，非台账快照）。
+    /// 只从缓存读 SSH 登录信息，**绝不打厂商 API**。
     ///
-    /// 结果缓存 60 秒：UI 轮询会反复调用，逐次打厂商接口既慢又可能限流；
-    /// 端口变化最迟 60 秒内反映，与「登陆方式」的实时性需求匹配。
-    pub fn instance_ssh_info(&self, deployment_id: &str) -> MnResult<Option<InstanceSshInfo>> {
+    /// ## 为什么需要这个「纯缓存」入口
+    ///
+    /// 网关是 `Arc<Mutex<Gateway>>` 单锁模型：任何在持锁期间做网络 I/O
+    /// 的处理器都会把**所有**请求串起来。UI 的「登陆方式」是轮询项，
+    /// 缓存每 60 秒过期一次，那一刻 `driver.describe()` 的延迟（厂商
+    /// 接口慢、或网络抖动重试数十秒）会被放大成整站卡顿——下载/启动
+    /// 过程中表现为「消息中断、连接失败」。
+    ///
+    /// 因此把「读」与「刷新」拆开：HTTP 处理器持锁期间只用这个方法，
+    /// 未命中就返回 `None` 让调用方去**锁外**刷新。
+    pub fn cached_ssh_info(&self, deployment_id: &str) -> Option<InstanceSshInfo> {
+        let key = self.ssh_info_cache_key(deployment_id)?;
+        let cache = self.ssh_info_cache.lock().ok()?;
+        let (at, info) = cache.get(&key)?;
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            Some(info.clone())
+        } else {
+            None
+        }
+    }
+
+    /// 缓存键：`deployment_id:provider:instance_id`。
+    ///
+    /// 必须含 deployment_id：同节点多模型共享同一实例 ID，只用
+    /// provider:instance 会让第二个部署拿到第一个的缓存。
+    fn ssh_info_cache_key(&self, deployment_id: &str) -> Option<String> {
+        let rec = self.state.get(deployment_id).ok()??;
+        let cloud = rec.plan.cloud.as_ref()?;
+        let ComputeOrigin::Cloud { instance_id, .. } = &rec.plan.origin;
+        if instance_id.trim().is_empty() {
+            return None;
+        }
+        Some(format!("{}:{}:{}", deployment_id, cloud.provider, instance_id))
+    }
+
+    /// 刷新 SSH 登录信息（**会调厂商 API**）。
+    ///
+    /// 调用方必须保证自己**没有持有网关全局锁**——这正是卡顿的根源。
+    /// HTTP 层在锁外调用本方法，再把结果交给 [`Self::cached_ssh_info`] 复用。
+    pub fn refresh_ssh_info(&self, deployment_id: &str) -> MnResult<Option<InstanceSshInfo>> {
         let Some(rec) = self.state.get(deployment_id)? else {
             return Ok(None);
         };
@@ -377,18 +414,9 @@ impl Orchestrator {
         if instance_id.trim().is_empty() {
             return Ok(None);
         }
-
-        // 命中未过期缓存直接返回，不打厂商 API。
-        // 键必须含 deployment_id：同节点多模型共享同一实例 ID，
-        // 只用 provider:instance 会让第二个部署拿到第一个的缓存。
-        let key = format!("{}:{}:{}", deployment_id, cloud.provider, instance_id);
-        if let Ok(cache) = self.ssh_info_cache.lock() {
-            if let Some((at, info)) = cache.get(&key) {
-                if at.elapsed() < std::time::Duration::from_secs(60) {
-                    return Ok(Some(info.clone()));
-                }
-            }
-        }
+        let Some(key) = self.ssh_info_cache_key(deployment_id) else {
+            return Ok(None);
+        };
 
         let o = self
             .cloud
@@ -408,6 +436,43 @@ impl Orchestrator {
             cache.insert(key, (std::time::Instant::now(), info.clone()));
         }
         Ok(Some(info))
+    }
+
+    /// 列出「需要刷新 SSH 登录信息」的部署 ID。
+    ///
+    /// 供后台刷新线程使用：持有网关锁期间只做这一次廉价读取，
+    /// 随后在锁外逐个 [`Self::refresh_ssh_info`]。
+    ///
+    /// 只挑云端、实例 ID 非空、且缓存已过期的记录——缓存仍新鲜的不必重复
+    /// 打厂商接口。读台账失败时返回空表（宁可这一轮不刷新，也不阻塞调用方）。
+    pub fn deployments_needing_ssh_info(&self) -> Vec<String> {
+        let Ok(records) = self.state.list() else {
+            return Vec::new();
+        };
+        records
+            .into_iter()
+            .filter(|r| r.plan.cloud.is_some())
+            .filter(|r| {
+                matches!(
+                    &r.plan.origin,
+                    ComputeOrigin::Cloud { instance_id, .. } if !instance_id.trim().is_empty()
+                )
+            })
+            .map(|r| r.plan.id.clone())
+            .filter(|id| self.cached_ssh_info(id).is_none())
+            .collect()
+    }
+
+    /// 实时查询部署实例的 SSH 登录信息（缓存未命中时直连厂商 API）。
+    ///
+    /// **不要在持有网关全局锁时调用**——它会阻塞整个 HTTP 层。
+    /// HTTP 层请用 [`Self::cached_ssh_info`] + 锁外 [`Self::refresh_ssh_info`]。
+    /// 保留本方法是为了 CLI 等无锁场景与向后兼容。
+    pub fn instance_ssh_info(&self, deployment_id: &str) -> MnResult<Option<InstanceSshInfo>> {
+        if let Some(info) = self.cached_ssh_info(deployment_id) {
+            return Ok(Some(info));
+        }
+        self.refresh_ssh_info(deployment_id)
     }
 }
 

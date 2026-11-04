@@ -150,6 +150,9 @@ impl GatewayServer {
     pub fn with_cloud_monitor(self) -> Self {
         let monitor = self.cloud_monitor.clone();
         crate::cloudmon::spawn_cloud_monitor(Arc::clone(&self.gateway), monitor);
+        // SSH 登录信息同样走后台刷新：它曾经在 HTTP 请求里持锁调厂商接口，
+        // 缓存过期那一刻会把整个网关拖住（下载进度停滞、页面「连接失败」）。
+        crate::sshmon::spawn_ssh_info_refresher(Arc::clone(&self.gateway));
         self
     }
 

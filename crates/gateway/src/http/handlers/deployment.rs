@@ -289,42 +289,49 @@ impl GatewayServer {
             Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
         }
     }
-    /// 登陆方式：实时向云厂商 API 查询实例的 SSH 登录指令。
+    /// 登陆方式：向云厂商 API 查询实例的 SSH 登录指令。
     ///
     /// 台账里的 `node_ssh_port` 是部署时刻快照，实例停机再开机后端口可能
     /// 被厂商重新映射（22/23/高位端口都可能）；「登陆方式」必须以厂商
-    /// 当前返回为准。编排层自带 60 秒缓存，UI 轮询不会打爆厂商接口。
+    /// 当前返回为准。
+    ///
+    /// ## 锁的边界（与 `cloudmon` 同一原则）
+    ///
+    /// 网关是 `Arc<Mutex<Gateway>>` 单锁，**任何网络调用都不得在锁内执行**。
+    /// 这个接口被部署页轮询，缓存每 60 秒过期一次；过期那一刻若在锁内
+    /// 调 `driver.describe()`（厂商接口慢、网络抖动时重试数十秒），整个
+    /// HTTP 层都会排队——实测表现为下载/启动过程中「消息中断、连接失败」。
+    ///
+    /// ```text
+    /// ① 持锁（微秒级）：只读缓存快照
+    /// ② 未命中 → 返回 available=false，由后台线程刷新（不进请求路径）
+    /// ```
+    ///
+    /// 宁可让「登陆方式」晚几十秒才有值，也不能让整个网关跟着厂商接口一起卡。
     pub(crate) fn ssh_info(&self, id: &str) -> Response {
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
+        let cached = {
+            let gw = match self.gateway.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::text(500, "网关状态锁中毒"),
+            };
+            // 纯内存读，无 I/O
+            gw.cached_ssh_info(id)
         };
-        match gw.instance_ssh_info(id) {
-            Ok(Some(info)) => {
-                let available = info.state == "running";
-                Response::json(
-                    200,
-                    &serde_json::json!({
-                        "ok": true,
-                        "available": available,
-                        "deployment_id": info.deployment_id,
-                        "instance_id": info.instance_id,
-                        "provider": info.provider,
-                        "state": info.state,
-                        "ssh_command": info.ssh_command,
-                        "host": info.host,
-                        "port": info.port,
-                        "user": info.user,
-                        "source": info.source,
-                    }),
-                )
-            }
-            Ok(None) => Response::json(200, &serde_json::json!({"ok": true, "available": false})),
-            Err(e) => Response::json(
+
+        let Some(info) = cached else {
+            // 未命中：**不在请求路径里刷新**。前端会继续轮询，
+            // 后台任务填好缓存后自然就拿到了。
+            return Response::json(
                 200,
-                &serde_json::json!({"ok": false, "available": false, "error": e.to_string()}),
-            ),
-        }
+                &serde_json::json!({
+                    "ok": true,
+                    "available": false,
+                    "pending": true,
+                    "message": "正在向云厂商获取登录信息，稍后自动刷新",
+                }),
+            );
+        };
+        ssh_info_response(info)
     }
     pub(crate) fn stop(&self, id: &str) -> Response {
         let mut gw = match self.gateway.lock() {
@@ -531,4 +538,25 @@ impl GatewayServer {
             Err(e) => Response::error(&e),
         }
     }
+}
+
+/// 把 SSH 登录信息渲染成响应体。
+fn ssh_info_response(info: mangosteen_orchestration::orchestrator::InstanceSshInfo) -> Response {
+    let available = info.state == "running";
+    Response::json(
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "available": available,
+            "deployment_id": info.deployment_id,
+            "instance_id": info.instance_id,
+            "provider": info.provider,
+            "state": info.state,
+            "ssh_command": info.ssh_command,
+            "host": info.host,
+            "port": info.port,
+            "user": info.user,
+            "source": info.source,
+        }),
+    )
 }

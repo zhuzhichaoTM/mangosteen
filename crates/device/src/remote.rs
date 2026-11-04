@@ -1657,9 +1657,26 @@ pub fn download_model_remote_with_progress(
     // 这比旧逻辑「进程退出就最多 2 次续传」要更有韧性：网络短暂抖动、
     // SSH 网关切断等只会触发单轮重试，并不直接终结部署；
     // 只有多轮均被击垮时才判定为真正的下载失败。
+    //
+    // ## 停滞必须单独设上限（实测踩到的「永久卡在 15.66 GiB」）
+    //
+    // 三层重试原本只看「尝试次数」，不看**是否真的下动了**。现场：
+    // 日志连续刷 `已下载 16810714528 字节，大小已停滞`，3 轮 × 5 次全用完，
+    // 字节数一个都没涨——每一轮都只是把同一个死局重放一遍，白白耗掉
+    // 十几分钟，用户只能看到进度条不动、不知道在等什么。
+    //
+    // 因此新增 `MAX_STALLED_ATTEMPTS`：**连续这么多次续传后文件大小
+    // 仍无任何增长**就立即判失败并如实说明，不再把轮次预算烧光。
+    // 网络抖动通常几次续传内就会恢复增长，不会误伤。
     const ATTEMPTS_PER_ROUND: u32 = 5;
     const MAX_ROUNDS: u32 = 3;
     const RETRY_WAIT_SECS: u64 = 2;
+    /// 连续多少次「续传后仍无字节增长」就判定下载无法恢复。
+    ///
+    /// 取 **3**：用户明确要求不再把轮次预算烧光。现场那次卡死是字节数
+    /// 一个都没涨（`16810714528` 反复出现），3 次续传已足以区分
+    /// 「真卡死」与「偶发抖动」——抖动通常下一次就恢复增长。
+    const MAX_STALLED_ATTEMPTS: u32 = 3;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
     let mut last_size: u64 = 0;
@@ -1673,6 +1690,11 @@ pub fn download_model_remote_with_progress(
     // 容忍（下一跳大概率恢复），连续多次失败才判死——否则一条 stat 被
     // 网关掐断就终结整个下载，等于把瞬时抖动放大成部署失败。
     let mut failed_polls: u32 = 0;
+    // 连续「续传后仍无字节增长」的次数（见 MAX_STALLED_ATTEMPTS）。
+    let mut stalled_attempts: u32 = 0;
+    // 上一次续传时的文件大小：用来判断「这次续传有没有真的下动」。
+    // 与 `last_size` 不同——后者是相邻采样点比较，这里是跨续传比较。
+    let mut size_at_last_attempt: u64 = 0;
 
     // 每个采样点只开**一条** SSH 连接，同时取回三样东西：
     // 文件大小、成功标记内容、下载器进程状态。
@@ -1761,6 +1783,35 @@ pub fn download_model_remote_with_progress(
         // 需要续传：进程已退出，或活着但已停滞
         if is_dead || stalled >= 6 {
             attempts_in_round += 1;
+
+            // ---- 停滞上限：连续 N 次续传后字节数纹丝不动 → 立即失败 ----
+            //
+            // 判据是「跨续传比较」而不是「相邻采样比较」：`last_size` 只
+            // 反映两次轮询之间，而这里要看「这次续传到底有没有让文件变长」。
+            // 有增长就清零，说明连接仍有效，只是慢。
+            if size > size_at_last_attempt {
+                stalled_attempts = 0;
+            } else {
+                stalled_attempts += 1;
+            }
+            size_at_last_attempt = size;
+
+            if stalled_attempts >= MAX_STALLED_ATTEMPTS {
+                let tail = ssh_exec(target, &format!("tail -5 '{log}' 2>/dev/null"), 60)
+                    .unwrap_or_default();
+                return Err(MnError::Network {
+                    stage: "云端下载模型".to_string(),
+                    reason: format!(
+                        "下载已停滞：连续 {} 次断点续传后文件大小仍是 {} 字节（无任何增长），\
+                         判定无法自动恢复，已提前终止（不再耗尽全部重试轮次）。\
+                         常见原因：源站限流/连接被中间网关掐断/远端磁盘满。\
+                         断点文件已保留，网络恢复后重新部署可从断点继续。远端日志尾部：{}",
+                        stalled_attempts,
+                        size,
+                        tail.lines().take(3).collect::<Vec<_>>().join(" / ")
+                    ),
+                });
+            }
 
             // 单轮次数用尽 → 判断是否还有轮次预算
             if attempts_in_round > ATTEMPTS_PER_ROUND {
@@ -2088,6 +2139,49 @@ mod stop_script_tests {
         assert!(
             !script.contains("--port"),
             "无端口模式不应出现端口匹配：{script}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod download_retry_tests {
+    use super::*;
+
+    /// 停滞次数上限必须是 3，且必须真的被判定逻辑引用。
+    ///
+    /// 现场：日志刷了 3 轮 × 5 次 `已下载 16810714528 字节，大小已停滞`，
+    /// 字节数一个都没涨，白白烧掉十几分钟。旧逻辑只看「尝试次数」，
+    /// 不看「有没有真的下动」。
+    #[test]
+    fn stall_limit_is_three() {
+        let src = include_str!("remote.rs");
+        assert!(
+            src.contains("const MAX_STALLED_ATTEMPTS: u32 = 3;"),
+            "停滞上限应为 3"
+        );
+        // 必须真的用在判定里，不能只是声明
+        assert!(
+            src.contains("stalled_attempts >= MAX_STALLED_ATTEMPTS"),
+            "停滞上限必须参与判定"
+        );
+        // 跨续传比较：有增长就要清零，否则连接还活着也会被误判为卡死
+        assert!(
+            src.contains("if size > size_at_last_attempt {"),
+            "必须以『本次续传是否带来增长』为判据"
+        );
+    }
+
+    /// 「连续」语义：有增长必须清零计数。
+    #[test]
+    fn stall_counter_resets_on_growth() {
+        let src = include_str!("remote.rs");
+        let idx = src
+            .find("if size > size_at_last_attempt {")
+            .expect("缺少增长判定");
+        let window = &src[idx..idx + 160];
+        assert!(
+            window.contains("stalled_attempts = 0;"),
+            "有增长时必须把停滞计数清零，否则慢速下载会被误杀"
         );
     }
 }
