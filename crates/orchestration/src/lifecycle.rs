@@ -132,12 +132,18 @@ impl Orchestrator {
                             reason: format!("模型远端端口 {port} 的 llama-server 停止失败：{e}"),
                         });
                     }
-                    if mangosteen_device::remote::llama_server_running_on_port(
+                    // 二次校验同样只作辅助证据：它的 SSH 错误不能推翻
+                    // 主操作的成功结论（详见 stop_service_on_self_hosted）。
+                    match mangosteen_device::remote::llama_server_running_on_port(
                         &target, &workdir, port,
-                    )? {
-                        return Err(MnError::bad_request(format!(
-                            "模型远端端口 {port} 的 llama-server 仍在运行，已阻止后续关机"
-                        )));
+                    ) {
+                        Ok(true) => {
+                            return Err(MnError::bad_request(format!(
+                                "模型远端端口 {port} 的 llama-server 仍在运行，已阻止后续关机"
+                            )));
+                        }
+                        // 已停止 / 校验没跑完（网络抖动）：都继续后续流程
+                        Ok(false) | Err(_) => {}
                     }
                 }
                 None => {
@@ -400,20 +406,49 @@ impl Orchestrator {
 
         match &record.plan.origin {
             ComputeOrigin::Cloud {
-                provider,
+                provider: origin_provider,
                 instance_id,
             } => {
+                // ## provider 必须能回退到 cloud.provider
+                //
+                // `origin.provider` 由编排阶段回填，自建设备（`device_id`）
+                // 路径下可能留空——实测台账里就是 `origin.provider=""` 而
+                // `cloud.provider="ssh"`。直接拿空串去查驱动会报
+                // 「云端驱动 `` 未注册或未启用」，用户看到的是**停止失败、
+                // 但机器仍在计费**。
+                //
+                // 判据顺序：origin.provider（厂商托管）→ cloud.provider
+                //（自建设备/SSH 直连）→ 空则说明这条记录根本没有可操作的
+                // 远端，交给下面的「只停进程」分支处理，不要抛配置错误。
+                let provider = if !origin_provider.trim().is_empty() {
+                    origin_provider.clone()
+                } else {
+                    record
+                        .plan
+                        .cloud
+                        .as_ref()
+                        .map(|c| c.provider.clone())
+                        .unwrap_or_default()
+                };
+
+                // 自建设备（或 provider 为空）没有厂商 API 可调：
+                // 只能用 SSH 停掉该端口的推理进程，机器绝不关机。
+                // 这是「自定义节点是用户自己的机器」这条边界的落点。
+                if provider.trim().is_empty() || provider == "ssh" {
+                    return self.stop_service_on_self_hosted(id, &record);
+                }
+
                 let o = self.cloud.as_mut().ok_or_else(|| {
                     MnError::bad_request("未配置云端能力，无法操作云端部署".to_string())
                 })?;
                 // 1) 先停推理进程。失败不致命——它可能本来就没跑（上次已停），
                 //    但**要记下来**，因为「进程停不掉」意味着关机时可能丢数据。
                 let mut warnings = Vec::new();
-                if let Err(e) = o.stop_service(provider, instance_id) {
+                if let Err(e) = o.stop_service(&provider, instance_id) {
                     warnings.push(format!("停止推理进程：{e}"));
                 }
                 // 2) 再关机。这一步失败必须报错——机器还在跑就意味着继续计费。
-                o.power_off(provider, instance_id)?;
+                o.power_off(&provider, instance_id)?;
                 // 3) 关掉隧道：机器都关了，隧道只会反复重连
                 if let Err(e) = o.tunnels_mut().close_all() {
                     warnings.push(format!("关闭隧道：{e}"));
@@ -439,6 +474,105 @@ impl Orchestrator {
                 return Ok(());
             }
         }
+    }
+
+    /// 自建设备的「停止服务」：只停远端推理进程，**绝不关机**。
+    ///
+    /// ## 边界
+    ///
+    /// 自定义节点是用户自己的机器（可能就是用户的工作站），关机是破坏性
+    /// 操作，不属于本工具的权限。所以这里只按端口停掉 `llama-server`，
+    /// 释放显存、让出端口，机器保持运行。
+    ///
+    /// ## 为什么必须有这条路径
+    ///
+    /// `stop_service` 曾经无条件下调厂商 `power_off`，而自建设备的
+    /// `origin.provider` 是空串（或 `ssh`）——于是报
+    /// 「云端驱动 `` 未注册或未启用」，用户看到停止失败、进程却仍在跑、
+    /// 显存仍被占用。这条分支把「自建设备」这一合法形态接住。
+    fn stop_service_on_self_hosted(
+        &mut self,
+        id: &str,
+        record: &mangosteen_base::state::DeploymentRecord,
+    ) -> MnResult<()> {
+        let mut warnings = Vec::new();
+        if let Some(cloud) = record.plan.cloud.as_ref() {
+            let port = cloud.engine_port;
+            match self.device_target_for(cloud) {
+                // 走自建设备（设置页登记的 SSH 目标）
+                Some(target) => {
+                    let workdir = self.config.cloud.remote_workdir.clone();
+                    mangosteen_device::remote::stop_llama_server_on_port(
+                        &target,
+                        &workdir,
+                        Some(port),
+                    )
+                    .map_err(|e| MnError::Network {
+                        stage: "停止推理进程".to_string(),
+                        reason: format!("远端端口 {port} 的 llama-server 停止失败：{e}"),
+                    })?;
+                    // 二次确认：按端口判据必须真的没了，不能只信脚本退出码。
+                    //
+                    // ## 校验失败 ≠ 停止失败
+                    //
+                    // 实测：停止脚本已经把进程杀干净（远端 GPU 归零、进程数 0），
+                    // 紧接着的这次校验却因为 SSH 传输层抖动返回 255，旧实现用
+                    // `?` 直接往外抛——于是「明明停成功了却报失败」，用户重试
+                    // 也无法消除。校验是**辅助证据**，它的网络错误不能推翻
+                    // 主操作的成功结论，只能降级成一条警告。
+                    match mangosteen_device::remote::llama_server_running_on_port(
+                        &target, &workdir, port,
+                    ) {
+                        Ok(true) => {
+                            return Err(MnError::Network {
+                                stage: "停止推理进程".to_string(),
+                                reason: format!(
+                                    "远端端口 {port} 的 llama-server 仍在运行，已阻止标记为「已停止」"
+                                ),
+                            });
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            warnings.push(format!("停止后校验未完成（{e}），进程可能已停止"));
+                        }
+                    }
+                }
+                // 既没有 device 也没有可用的节点信息：进程可能根本没起过，
+                // 或者台账已与远端脱节。不谎报成功，如实说明。
+                None => {
+                    warnings.push("台账缺少可连接的节点信息，未执行远端停止".to_string());
+                }
+            }
+        }
+
+        // 关隧道（保留实例）：自建设备机器不动，但本地转发必须收掉，
+        // 否则每停一次就泄漏一条 ssh 与一个本地端口。
+        if let Some(port) = record.plan.cloud.as_ref().map(|c| c.engine_port) {
+            let _ = self.device_tunnels.close_by_remote_port(port);
+            if let Some(o) = self.cloud.as_mut() {
+                let _ = o.tunnels_mut().close_by_remote_port(port);
+            }
+        }
+        if let Some(port) = record.plan.local_access_port() {
+            self.scheduler.release_port(port);
+        }
+        // 清掉节点连接信息（IP/端口可能漂移，下次启动实时查询）
+        if let Some(rec) = self.state.get(id)? {
+            let mut plan = rec.plan.clone();
+            if let Some(c) = plan.cloud.as_mut() {
+                c.node_ip = None;
+                c.node_ssh_port = None;
+            }
+            self.state.update_plan(id, plan)?;
+        }
+
+        let note = if warnings.is_empty() {
+            Some("已停止推理服务；自定义节点的机器保留".to_string())
+        } else {
+            Some(format!("已停止推理服务，但：{}", warnings.join("；")))
+        };
+        self.state.set_status(id, DeploymentStatus::Stopped, note)?;
+        Ok(())
     }
     /// **启动服务**（开机 + 起推理进程 + 重建隧道 + 探活）。
     ///

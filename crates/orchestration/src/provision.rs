@@ -65,6 +65,23 @@ impl Orchestrator {
         if req.cloud_spec.is_some() {
             return None;
         }
+        // ## 复用指定实例时绝不能落到「第一个已保存设备」
+        //
+        // 兜底逻辑本意是「用户只配了一台机器，那就用它」，但它会把
+        // **云厂商实例的复用**（`reuse_instance_id`）劫持成「自建设备」：
+        // 台账因此写出 `cloud.provider="ssh"`、`origin.provider=""`，
+        // 后续 `stop_service` 找不到厂商驱动（报「云端驱动 `` 未注册」），
+        // 而实例实际在厂商那边，关机/开机全都做不了。
+        //
+        // 复用语义已经指明「挂到哪台厂商实例」，与设备列表无关。
+        if req
+            .reuse_instance_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+        {
+            return None;
+        }
         self.config
             .remote_devices
             .first()
@@ -208,11 +225,15 @@ impl Orchestrator {
         let Some(cloud) = rec.plan.cloud.clone() else {
             return;
         };
-        let vendor_managed = cloud.device_id.is_none();
         let ComputeOrigin::Cloud {
             provider,
             instance_id,
         } = &rec.plan.origin;
+        // 「是不是厂商实例」只看 provider + instance_id 是否都有值：
+        // `device_id` 只表示用户给这台机器起过名字，与托管归属无关。
+        // 详见 `rollback_failed_cloud` 里的同一判据说明。
+        let vendor_managed =
+            !provider.trim().is_empty() && !instance_id.trim().is_empty();
         // 共享节点保护：用户复用的实例、或同机多模型的自建设备上，
         // 其它模型的推理可能正在运行。此时绝不能 stop_service（会停掉
         // 整机全部 llama-server 并关机），只能保留实例运行状态。
@@ -924,11 +945,21 @@ impl Orchestrator {
             provider,
             instance_id,
         } = origin;
-        // 只有云厂商创建的实例才关机；用户自己的机器不能动
-        let vendor_managed = own
-            .as_ref()
-            .map(|c| c.device_id.is_none())
-            .unwrap_or(false);
+        // 只有「云厂商实例」才允许关机；用户自己的机器不能动。
+        //
+        // ## 判据为什么不能用 `device_id.is_none()`
+        //
+        // 曾经这么写，实测踩到：用户把厂商实例的 IP 也登记成了自定义设备
+        // （用于「登陆方式」展示），于是 `device_id` 有值 → 被判成「用户
+        // 自己的机器」→ **永不关机**。表现是停止服务后 GPU 仍占用 19 GB、
+        // 节点持续计费，而界面显示已停。
+        //
+        // 「是不是厂商实例」只取决于**它是否由厂商 API 托管**，而这正是
+        // `provider` 与 `instance_id` 的组合语义：两者都非空 = 台账里记着
+        // 厂商与实例号，可以调 API 关机。`device_id` 只是「用户给这台机器
+        // 起了个名字」，与托管归属无关。
+        let vendor_managed =
+            !provider.trim().is_empty() && !instance_id.trim().is_empty();
         let shared_node = self
             .state
             .get(id)
