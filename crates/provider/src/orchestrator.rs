@@ -591,7 +591,20 @@ impl CloudOrchestrator {
 
     /// 构造某个实例的 SSH 目标（供「启动/停止服务」用）。
     ///
-    /// 密码优先级与供给流程一致：厂商下发的密码 > 配置里的统一密码。
+    /// ## 必须与供给流程用同一套认证策略
+    ///
+    /// 供给阶段走 [`ensure_key_target`]：密码只用于**第一次**把本机公钥装进
+    /// 远端 `authorized_keys`，之后所有连接一律密钥 + `BatchMode=yes`。
+    ///
+    /// 这个函数曾经自己拼一个「只有密码」的目标（`identity_file: None`），
+    /// 于是与供给阶段脱节：实例一旦被回收重建——厂商换机、用户手动重装、
+    /// 或被别的实例覆盖了 `authorized_keys`——密码认证就会失效，报
+    /// `Permission denied (publickey,password)`。此时启动/停止服务全部失败，
+    /// 而远端推理进程可能仍在跑、仍在计费。
+    ///
+    /// 现在统一复用 [`ensure_key_target`]：它会先尝试安装公钥（幂等，装过
+    /// 就直接命中），失败才降级回密码。这样「新建实例」与「复用实例」走的是
+    /// 同一条认证路径，不会出现只有一条路径能用的情况。
     pub fn service_target(
         &self,
         provider: &str,
@@ -599,25 +612,7 @@ impl CloudOrchestrator {
     ) -> MnResult<mangosteen_device::remote::SshTarget> {
         let driver = self.registry.get(provider)?;
         let inst = driver.describe(instance_id)?;
-        let host = inst
-            .network
-            .ssh_host
-            .clone()
-            .ok_or_else(|| MnError::Network {
-                stage: "读取 SSH 信息".to_string(),
-                reason: format!("实例 {instance_id} 未返回 SSH 地址"),
-            })?;
-        Ok(mangosteen_device::remote::SshTarget {
-            host,
-            port: inst.network.ssh_port.unwrap_or(22),
-            user: "root".to_string(),
-            password: inst
-                .network
-                .ssh_password
-                .clone()
-                .or_else(|| self.config.ssh_password.clone()),
-            identity_file: None,
-        })
+        ensure_key_target(&inst, &self.config)
     }
 
     /// **停止服务**：停掉远端 `llama-server`，保留实例。
