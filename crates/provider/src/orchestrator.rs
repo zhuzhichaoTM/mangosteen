@@ -148,7 +148,12 @@ impl Default for OrchestratorConfig {
 pub struct CloudOrchestrator {
     registry: DriverRegistry,
     selector: NodeSelector,
-    tunnels: TunnelManager,
+    /// 云端隧道表。
+    ///
+    /// 内部锁：部署长操作（创建实例、等开机、下载权重）绝不能在整段时间
+    /// 里独占上层网关锁，否则 `/api/status` 等管理接口全部排队阻塞、UI
+    /// 一直显示「连接中」。把它下沉为细粒度锁后，编排器方法一律 `&self`。
+    tunnels: std::sync::Mutex<TunnelManager>,
     config: OrchestratorConfig,
 }
 
@@ -163,7 +168,7 @@ impl CloudOrchestrator {
         Self {
             registry,
             selector,
-            tunnels,
+            tunnels: std::sync::Mutex::new(tunnels),
             config,
         }
     }
@@ -181,9 +186,11 @@ impl CloudOrchestrator {
         self.registry = registry;
     }
 
-    /// 隧道管理器引用。
-    pub fn tunnels(&self) -> &TunnelManager {
-        &self.tunnels
+    /// 取隧道表锁（细粒度内部锁，见字段注释）。
+    pub fn tunnels(&self) -> std::sync::MutexGuard<'_, TunnelManager> {
+        // 隧道表只是一张「远端端口 → 本地转发」映射，锁中毒后继续用
+        // 比让整条部署链路崩掉代价小。
+        self.tunnels.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 收集全部候选规格（跨服务商），并探测延迟。
@@ -336,7 +343,7 @@ impl CloudOrchestrator {
     /// 换下一个**；鉴权、参数、余额类错误立刻中止——继续试只会把同一个
     /// 错误重复 N 遍，白白拉长等待。
     pub fn provision(
-        &mut self,
+        &self,
         constraints: &SelectionConstraints,
         plan: &CloudPlan,
         launch: &EngineLaunchConfig,
@@ -349,7 +356,7 @@ impl CloudOrchestrator {
     /// 回调参数：`(已下载字节, 期望总字节)`。轮询线程里调用，所以要求
     /// `Send + Sync`；只做内存写入，不做 IO。
     pub fn provision_with_progress(
-        &mut self,
+        &self,
         constraints: &SelectionConstraints,
         plan: &CloudPlan,
         launch: &EngineLaunchConfig,
@@ -378,7 +385,7 @@ impl CloudOrchestrator {
                     instance,
                     plan,
                     launch,
-                    &mut self.tunnels,
+                    &mut self.tunnels(),
                     &self.config,
                     on_progress,
                 );
@@ -410,7 +417,7 @@ impl CloudOrchestrator {
             instance,
             plan,
             launch,
-            &mut self.tunnels,
+            &mut self.tunnels(),
             &self.config,
             on_progress,
         )
@@ -571,11 +578,11 @@ impl CloudOrchestrator {
     /// 引擎和运行环境是重新部署时最贵的部分（几 GB 下载 + 依赖安装）。
     /// 删除等于把下次部署的成本全部重付一遍。关机已停止 GPU 计费，
     /// 实例与磁盘保留供后续复用。
-    pub fn teardown(&mut self, provider: &str, instance_id: &str) -> Vec<String> {
+    pub fn teardown(&self, provider: &str, instance_id: &str) -> Vec<String> {
         let mut errors = Vec::new();
 
         // 1. 关隧道（失败只记录）
-        if let Err(e) = self.tunnels.close_all() {
+        if let Err(e) = self.tunnels().close_all() {
             errors.push(format!("关闭隧道失败：{e}"));
         }
 
@@ -608,11 +615,11 @@ impl CloudOrchestrator {
     ///
     /// 销毁前的关机由驱动内部保证（Terminate 仅对 Stopped 有效）；厂商
     /// 处于异步任务中（8903）时按 [`stop_with_retry`] 的节奏重试。
-    pub fn destroy_instance(&mut self, provider: &str, instance_id: &str) -> Vec<String> {
+    pub fn destroy_instance(&self, provider: &str, instance_id: &str) -> Vec<String> {
         let mut errors = Vec::new();
 
         // 隧道关了实例就不可达，先清理本地侧资源（失败只记录）
-        if let Err(e) = self.tunnels.close_all() {
+        if let Err(e) = self.tunnels().close_all() {
             errors.push(format!("关闭隧道失败：{e}"));
         }
 
@@ -741,9 +748,9 @@ impl CloudOrchestrator {
         mangosteen_device::remote::start_llama_server(&target, &bin, &launch.args, &workdir)
     }
 
-    /// 隧道管理器（可变借用，用于关闭全部隧道）。
-    pub fn tunnels_mut(&mut self) -> &mut TunnelManager {
-        &mut self.tunnels
+    /// 隧道管理器（可变访问，用于关闭全部隧道）。
+    pub fn tunnels_mut(&self) -> std::sync::MutexGuard<'_, TunnelManager> {
+        self.tunnels()
     }
 
     /// 实例启动超时。
@@ -762,7 +769,7 @@ impl CloudOrchestrator {
     /// 所以「启动服务」必须能把它重新建起来。这里复用与供给流程完全相同的
     /// 隧道参数构造，避免两处逻辑漂移。
     pub fn establish_tunnel(
-        &mut self,
+        &self,
         provider: &str,
         instance_id: &str,
         plan: &CloudPlan,
@@ -773,14 +780,14 @@ impl CloudOrchestrator {
         // 优先用 heal：隧道已存在且健康时直接复用，断了则原地重建。
         // 直接 establish 也能复用，但会绕过「按远端端口定位」的清理逻辑，
         // 残留的 ssh 进程会占着本地端口不放。
-        let mut local_port = match self.tunnels.heal(plan.engine_port, self.config.tunnel_timeout) {
+        let mut local_port = match self.tunnels().heal(plan.engine_port, self.config.tunnel_timeout) {
             Ok(status) if status.is_up() => status.local_port(),
             _ => None,
         };
         if local_port.is_none() {
             // 没有记录（首次启动服务）或重建失败：走完整建立流程
             local_port = Some(
-                self.tunnels
+                self.tunnels()
                     .establish(&spec, self.config.tunnel_timeout)?
                     .local_port,
             );
@@ -1263,7 +1270,7 @@ impl CloudOrchestrator {
     ///
     /// 失败时关闭厂商实例但不删除，保留实例和磁盘供后续复用。
     pub fn provision_resources(
-        &mut self,
+        &self,
         constraints: &SelectionConstraints,
         plan: &CloudPlan,
         _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
@@ -1296,7 +1303,7 @@ impl CloudOrchestrator {
             let ssh = ensure_key_target(&instance, &self.config)?;
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
             let local_port = self
-                .tunnels
+                .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
                 .local_port;
             return Ok(ProvisionedResources {
@@ -1324,7 +1331,7 @@ impl CloudOrchestrator {
                 let ssh = ensure_key_target(&instance, &self.config)?;
                 let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
                 let local_port = self
-                    .tunnels
+                    .tunnels()
                     .establish(&spec, self.config.tunnel_timeout)?
                     .local_port;
                 return Ok(ProvisionedResources {
@@ -1364,7 +1371,7 @@ impl CloudOrchestrator {
             // 节点创建完成后只建立基础隧道；模型与引擎准备由编排层按阶段执行。
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
             let local_port = self
-                .tunnels
+                .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
                 .local_port;
             Ok(ProvisionedResources {
@@ -1407,13 +1414,13 @@ impl CloudOrchestrator {
 
     /// 为自建节点建隧道（不经过厂商实例）。
     pub fn establish_tunnel_to(
-        &mut self,
+        &self,
         ssh: &mangosteen_device::remote::SshTarget,
         remote_port: u16,
     ) -> MnResult<u16> {
         let spec = tunnel_spec_for(ssh, remote_port, true);
         Ok(self
-            .tunnels
+            .tunnels()
             .establish(&spec, self.config.tunnel_timeout)?
             .local_port)
     }
@@ -1425,7 +1432,7 @@ impl CloudOrchestrator {
     /// 建立/复用隧道，确保远端端口确实已经转发，而不是继续使用旧的
     /// `local_port` 假设。
     pub fn ensure_tunnel_to(
-        &mut self,
+        &self,
         ssh: &mangosteen_device::remote::SshTarget,
         remote_port: u16,
     ) -> MnResult<u16> {
@@ -1433,9 +1440,9 @@ impl CloudOrchestrator {
         // 严格模式前主动关闭同一目标的旧隧道。旧隧道可能是配置阶段
         // 用 allow_unready_remote 建立的惰性转发：SSH 进程还活着，但
         // 远端端口并未真正转发，继续复用会表现为本地 connection refused。
-        let _ = self.tunnels.close(&spec);
+        let _ = self.tunnels().close(&spec);
         Ok(self
-            .tunnels
+            .tunnels()
             .establish(&spec, self.config.tunnel_timeout)?
             .local_port)
     }
