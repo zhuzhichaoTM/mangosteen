@@ -695,7 +695,7 @@ fn destroy(args: Args) -> MnResult<i32> {
         return Ok(2);
     }
 
-    let mut gw = crate::commands::build_gateway(&args)?;
+    let gw = crate::commands::build_gateway(&args)?;
     gw.stop(id)?;
     output::print_success(&format!("云端实例已销毁（部署 {id}）"));
     Ok(0)
@@ -740,7 +740,7 @@ fn destroy_bare_instance(args: &Args, target: &str) -> MnResult<i32> {
         return Ok(2);
     }
 
-    let mut gw = crate::commands::build_gateway(args)?;
+    let gw = crate::commands::build_gateway(args)?;
     let errors = gw.destroy_cloud_instance(provider, instance_id)?;
     if errors.is_empty() {
         output::print_success(&format!(

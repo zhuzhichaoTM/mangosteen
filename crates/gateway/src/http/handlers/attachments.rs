@@ -20,10 +20,7 @@ impl GatewayServer {
         };
 
         let max_chars = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             // 字符上限按模型上下文折算：一半留给对话历史与输出
             ((gw.config().local.default_context as usize) * 2)
                 .min(mangosteen_base::extract::MAX_TEXT_CHARS)
@@ -78,10 +75,7 @@ impl GatewayServer {
         };
 
         let guard = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             mangosteen_base::AccessGuard::from_config(&gw.config().storage)
         };
 

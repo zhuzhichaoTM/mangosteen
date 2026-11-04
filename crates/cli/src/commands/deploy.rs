@@ -76,7 +76,7 @@ fn execute(args: Args, foreground: bool) -> MnResult<i32> {
         req.allow_partial_offload = false;
     }
 
-    let mut gw = build_gateway(&args)?;
+    let gw = build_gateway(&args)?;
 
     let spinner = output::Spinner::new(format!("正在部署 {model}"));
     let mut spinner = spinner;

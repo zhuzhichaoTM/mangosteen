@@ -48,11 +48,11 @@ impl Orchestrator {
     /// 4. 否则走云厂商。
     pub(crate) fn resolve_device(&self, req: &DeploymentRequest) -> Option<DeviceTarget> {
         let find = |id: &str| -> Option<DeviceTarget> {
-            self.config
-                .remote_devices
+            let cfg = self.config();
+            cfg.remote_devices
                 .iter()
                 .find(|d| d.id == id)
-                .map(|d| DeviceTarget::from_config(d, &self.config.cloud.remote_workdir))
+                .map(|d| DeviceTarget::from_config(d, &cfg.cloud.remote_workdir))
         };
         if let Some(id) = req
             .device_id
@@ -94,17 +94,17 @@ impl Orchestrator {
         if req.target == crate::ComputeTarget::Cloud {
             return None;
         }
-        self.config
-            .remote_devices
+        let cfg = self.config();
+        cfg.remote_devices
             .first()
-            .map(|d| DeviceTarget::from_config(d, &self.config.cloud.remote_workdir))
+            .map(|d| DeviceTarget::from_config(d, &cfg.cloud.remote_workdir))
     }
 
     /// 执行云端/远端部署的**设备配置阶段**。
     ///
     /// `why_cloud` 说明「为什么走云端」，用于无可用服务商时给出准确原因。
     pub(crate) fn prepare_cloud(
-        &mut self,
+        &self,
         evaluated: &Evaluated,
         cloud_plan: mangosteen_core::plan::CloudPlan,
         trail: Vec<String>,
@@ -133,7 +133,7 @@ impl Orchestrator {
         );
 
         let id = self.new_deployment_id(evaluated);
-        let mut plan = self.scheduler.assemble_plan(
+        let mut plan = self.scheduler().assemble_plan(
             id.clone(),
             evaluated,
             &Decision::Cloud {
@@ -230,7 +230,7 @@ impl Orchestrator {
     /// 3. 真正销毁交给系统按策略回收，或在删除自定义节点时处理。
     ///
     /// 自定义节点是用户自己的机器，**只停进程，不关机**。
-    fn park_failed_instance(&mut self, id: &str, err: &MnError) {
+    fn park_failed_instance(&self, id: &str, err: &MnError) {
         let Some(rec) = self.state.get(id).ok().flatten() else {
             return;
         };
@@ -257,7 +257,7 @@ impl Orchestrator {
             && !provider.trim().is_empty()
             && !instance_id.trim().is_empty()
         {
-            if let Some(o) = self.cloud.as_mut() {
+            if let Some(o) = self.cloud().as_mut() {
                 // 先停进程（可能已起来），再关机
                 let _ = o.stop_service(provider, instance_id);
                 if let Err(e) = o.power_off(provider, instance_id) {
@@ -285,8 +285,8 @@ impl Orchestrator {
                 false,
             );
             if cloud.device_id.is_some() {
-                let _ = self.device_tunnels.close(&spec);
-            } else if let Some(o) = self.cloud.as_mut() {
+                let _ = self.tunnels().close(&spec);
+            } else if let Some(o) = self.cloud().as_mut() {
                 let _ = o.tunnels_mut().close(&spec);
             }
         }
@@ -319,7 +319,7 @@ impl Orchestrator {
         use crate::progress::{DeployStage, StageOutcome};
 
         let hf_token = self
-            .config
+            .config()
             .cloud
             .hf_token
             .as_ref()
@@ -485,7 +485,7 @@ impl Orchestrator {
 
     /// 自建设备：连 SSH → 准备远端资源 → 建隧道。**不创建任何云资源**。
     fn prepare_device_node(
-        &mut self,
+        &self,
         id: &str,
         mut plan: DeploymentPlan,
         device: DeviceTarget,
@@ -515,7 +515,7 @@ impl Orchestrator {
         mangosteen_provider::orchestrator::configure_node(
             &ssh,
             &device.workdir,
-            &self.config.cloud.llama_server_url,
+            &self.config().cloud.llama_server_url,
         )?;
         // 节点配置完成后才开始模型下载。
         sink(
@@ -533,7 +533,7 @@ impl Orchestrator {
         let spec =
             mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true);
         let local_port = self
-            .device_tunnels
+            .tunnels()
             .establish(&spec, Duration::from_secs(30))?
             .local_port;
 
@@ -552,14 +552,14 @@ impl Orchestrator {
 
     /// 云厂商：按候选创建实例 → 准备远端资源 → 建隧道。
     fn prepare_vendor_node(
-        &mut self,
+        &self,
         id: &str,
         mut plan: DeploymentPlan,
         progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
         why_cloud: &str,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedCloud> {
-        if self.cloud.is_none() {
+        if self.cloud().is_none() {
             return Err(MnError::NoViableCandidate {
                 reason: format!(
                     "{why_cloud}；但既没有已保存的设备，也没有可用的云服务商。\
@@ -579,7 +579,7 @@ impl Orchestrator {
             max_price_per_hour: cloud_plan.max_price_per_hour,
             allowed_providers: Vec::new(),
             allowed_regions: Vec::new(),
-            require_stock: self.config.scheduler.require_stock,
+            require_stock: self.config().scheduler.require_stock,
         };
 
         // provision_resources 内部会等待实例 Running，并确认正式 SSH 地址、
@@ -591,7 +591,8 @@ impl Orchestrator {
             crate::progress::StageOutcome::Running,
             "GPU 节点创建中：等待实例 Running、SSH 地址和登录方式确认".to_string(),
         );
-        let orchestrator = self.cloud.as_mut().expect("checked above");
+        let mut cloud = self.cloud();
+        let orchestrator = cloud.as_mut().expect("checked above");
         let p = orchestrator.provision_resources(&constraints, &cloud_plan, Some(progress))?;
         let instance = p
             .instance
@@ -671,7 +672,7 @@ impl Orchestrator {
         mangosteen_provider::orchestrator::configure_node(
             &ssh,
             &p.workdir,
-            &self.config.cloud.llama_server_url,
+            &self.config().cloud.llama_server_url,
         )?;
         sink(
             crate::progress::DeployStage::Configuring,
@@ -703,7 +704,7 @@ impl Orchestrator {
 
     /// **启动模型阶段**：拉起引擎并等待 `/health`。
     pub fn commit_cloud(
-        &mut self,
+        &self,
         prepared: PreparedCloud,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
@@ -719,7 +720,7 @@ impl Orchestrator {
     }
 
     fn commit_cloud_inner(
-        &mut self,
+        &self,
         prepared: PreparedCloud,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
@@ -815,12 +816,13 @@ impl Orchestrator {
                 cloud_plan.engine_port,
                 false,
             );
-            let _ = self.device_tunnels.close(&spec);
-            self.device_tunnels
+            let _ = self.tunnels().close(&spec);
+            self.tunnels()
                 .establish(&spec, Duration::from_secs(30))?
                 .local_port
         } else {
-            let o = self.cloud.as_mut().ok_or_else(|| {
+            let mut cloud = self.cloud();
+            let o = cloud.as_mut().ok_or_else(|| {
                 MnError::bad_request("未配置云端能力，无法重建模型隧道".to_string())
             })?;
             o.ensure_tunnel_to(&ssh, cloud_plan.engine_port)?
@@ -842,7 +844,7 @@ impl Orchestrator {
             self.state.upsert(updated)?;
         }
         let health = format!("http://127.0.0.1:{local_port}/health");
-        let timeout = Duration::from_secs(self.config.scheduler.launch_timeout_secs);
+        let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
         if let Err(e) =
             mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2))
         {
@@ -912,7 +914,7 @@ impl Orchestrator {
     /// 机器上的引擎与权重都还有用。关机停止 GPU 计费即可，销毁等于把
     /// 下次重试的成本全部重置。自定义节点只停进程，机器不动。
     fn rollback_failed_cloud(
-        &mut self,
+        &self,
         id: &str,
         ssh: &SshTarget,
         workdir: &str,
@@ -947,8 +949,8 @@ impl Orchestrator {
             let spec =
                 mangosteen_provider::orchestrator::tunnel_spec_for(ssh, c.engine_port, false);
             if c.device_id.is_some() {
-                let _ = self.device_tunnels.close(&spec);
-            } else if let Some(o) = self.cloud.as_mut() {
+                let _ = self.tunnels().close(&spec);
+            } else if let Some(o) = self.cloud().as_mut() {
                 let _ = o.tunnels_mut().close(&spec);
             }
         }
@@ -981,7 +983,7 @@ impl Orchestrator {
             .unwrap_or(true);
         let mut note = err.to_string();
         if vendor_managed && !shared_node {
-            if let Some(o) = self.cloud.as_mut() {
+            if let Some(o) = self.cloud().as_mut() {
                 if let Err(e) = o.power_off(provider, instance_id) {
                     note = format!("{err}；且实例 {instance_id} 关机失败，可能仍在计费：{e}");
                 } else {

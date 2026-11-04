@@ -13,7 +13,7 @@ impl Orchestrator {
     /// `TunnelManager` 是进程内状态，重启后必须重新建立映射，否则台账虽是
     /// `ready`，对话仍找不到本地端口。该方法只恢复隧道，不重新创建节点、
     /// 不重新下载模型、不改变模型部署状态。
-    pub fn restore_deployment_tunnels(&mut self) -> Vec<String> {
+    pub fn restore_deployment_tunnels(&self) -> Vec<String> {
         let records = match self.state.list() {
             Ok(records) => records,
             Err(e) => return vec![format!("读取部署台账失败：{e}")],
@@ -40,7 +40,7 @@ impl Orchestrator {
                     cloud_plan.engine_port,
                     false,
                 );
-                self.device_tunnels
+                self.tunnels()
                     .establish(&spec, Duration::from_secs(30))
                     .map(|t| t.local_port)
             } else {
@@ -50,7 +50,8 @@ impl Orchestrator {
                         instance_id,
                     } => (provider.as_str(), instance_id.as_str()),
                 };
-                let Some(orchestrator) = self.cloud.as_mut() else {
+                let mut cloud = self.cloud();
+                let Some(orchestrator) = cloud.as_mut() else {
                     errors.push(format!("{id}：未配置云端能力，无法恢复隧道"));
                     continue;
                 };
@@ -67,7 +68,7 @@ impl Orchestrator {
             };
             match result {
                 Ok(local_port) => {
-                    self.scheduler.reserve_port(local_port);
+                    self.scheduler().reserve_port(local_port);
                     match self.state.get(&id) {
                         Ok(Some(mut current)) => {
                             if let Some(c) = current.plan.cloud.as_mut() {
@@ -107,7 +108,7 @@ impl Orchestrator {
     /// | 自定义节点（设置页登记） | 停进程 → 关隧道 → 机器不动 |
     ///
     /// 台账保留为 `stopped`：再次点「部署」会复用同一实例开机重启。
-    pub fn unload(&mut self, id: &str) -> MnResult<UnloadOutcome> {
+    pub fn unload(&self, id: &str) -> MnResult<UnloadOutcome> {
         let record = self
             .state
             .get(id)?
@@ -120,7 +121,7 @@ impl Orchestrator {
         if let Some(c) = cloud.as_ref() {
             match self.device_target_for(c) {
                 Some(target) => {
-                    let workdir = self.config.cloud.remote_workdir.clone();
+                    let workdir = self.config().cloud.remote_workdir.clone();
                     let port = c.engine_port;
                     if let Err(e) = mangosteen_device::remote::stop_llama_server_on_port(
                         &target,
@@ -152,7 +153,7 @@ impl Orchestrator {
                         provider,
                         instance_id,
                     } = &record.plan.origin;
-                    if let Some(o) = self.cloud.as_mut() {
+                    if let Some(o) = self.cloud().as_mut() {
                         if !provider.trim().is_empty() && !instance_id.trim().is_empty() {
                             if let Err(e) = o.stop_service_on_port(
                                 provider,
@@ -184,19 +185,19 @@ impl Orchestrator {
         let engine_port = cloud.as_ref().map(|c| c.engine_port);
         if shared_node {
             if let Some(p) = engine_port {
-                let _ = self.device_tunnels.close_by_remote_port(p);
-                if let Some(o) = self.cloud.as_mut() {
+                let _ = self.tunnels().close_by_remote_port(p);
+                if let Some(o) = self.cloud().as_mut() {
                     let _ = o.tunnels_mut().close_by_remote_port(p);
                 }
             }
         } else {
-            let _ = self.device_tunnels.close_all();
-            if let Some(o) = self.cloud.as_mut() {
+            let _ = self.tunnels().close_all();
+            if let Some(o) = self.cloud().as_mut() {
                 let _ = o.tunnels_mut().close_all();
             }
         }
         if let Some(port) = record.plan.local_access_port() {
-            self.scheduler.release_port(port);
+            self.scheduler().release_port(port);
         }
 
         // 3) 云厂商实例：只有该节点没有其它运行模型时才关机。
@@ -214,7 +215,7 @@ impl Orchestrator {
             } = &record.plan.origin;
             let vendor_managed = !provider.trim().is_empty() && !instance_id.trim().is_empty();
             if vendor_managed {
-                if let Some(o) = self.cloud.as_mut() {
+                if let Some(o) = self.cloud().as_mut() {
                     // 关机失败意味着仍在计费，必须让用户知道。实例已注册，
                     // 台账保留，用户可重试卸载。
                     if let Err(e) = o.power_off(provider, instance_id) {
@@ -296,11 +297,11 @@ impl Orchestrator {
         cloud: &mangosteen_core::plan::CloudPlan,
     ) -> Option<mangosteen_device::remote::SshTarget> {
         let device_id = cloud.device_id.as_deref()?;
-        self.config
-            .remote_devices
+        let cfg = self.config();
+        cfg.remote_devices
             .iter()
             .find(|d| d.id == device_id)
-            .map(|d| DeviceTarget::from_config(d, &self.config.cloud.remote_workdir).ssh)
+            .map(|d| DeviceTarget::from_config(d, &cfg.cloud.remote_workdir).ssh)
     }
 
     /// 删除自定义节点前，销毁该节点上由本工具创建的云实例。
@@ -310,7 +311,7 @@ impl Orchestrator {
     /// 本工具开机器、再把它的 IP 登记成自定义节点），删除节点时就必须
     /// 调云端接口把实例释放掉，否则会一直计费。
     pub fn destroy_instances_bound_to_device(
-        &mut self,
+        &self,
         device_id: &str,
         host: &str,
     ) -> MnResult<Vec<String>> {
@@ -330,7 +331,8 @@ impl Orchestrator {
                 instance_id,
             } = &rec.plan.origin;
             if !provider.trim().is_empty() && !instance_id.trim().is_empty() {
-                let Some(o) = self.cloud.as_mut() else {
+                let mut cloud = self.cloud();
+                let Some(o) = cloud.as_mut() else {
                     continue;
                 };
                 let engine_port = rec
@@ -347,9 +349,9 @@ impl Orchestrator {
                 }
                 stopped.push(instance_id.clone());
             }
-            let _ = self.device_tunnels.close_all();
+            let _ = self.tunnels().close_all();
             if let Some(port) = rec.plan.local_access_port() {
-                self.scheduler.release_port(port);
+                self.scheduler().release_port(port);
             }
             self.state.remove(&rec.plan.id)?;
         }
@@ -360,7 +362,7 @@ impl Orchestrator {
     ///
     /// 这是「实例删除由系统自行处理」的最终落点：删除节点、重复收敛与
     /// 网关关闭等系统侧清理走这里；面向用户的「卸载/取消」只停不删。
-    pub fn stop(&mut self, id: &str) -> MnResult<()> {
+    pub fn stop(&self, id: &str) -> MnResult<()> {
         let record = self
             .state
             .get(id)?
@@ -371,7 +373,7 @@ impl Orchestrator {
                 provider,
                 instance_id,
             } => {
-                if let Some(o) = self.cloud.as_mut() {
+                if let Some(o) = self.cloud().as_mut() {
                     let errors = o.teardown(provider, instance_id);
                     if !errors.is_empty() {
                         return Err(MnError::Network {
@@ -398,7 +400,7 @@ impl Orchestrator {
     ///
     /// 这才是「停止」应有的语义：用户想暂停一下，不是想删机器。
     /// 真正释放资源（停止一切计费）请用 `DELETE /api/deployments/{id}`。
-    pub fn stop_service(&mut self, id: &str) -> MnResult<()> {
+    pub fn stop_service(&self, id: &str) -> MnResult<()> {
         let record = self
             .state
             .get(id)?
@@ -438,7 +440,8 @@ impl Orchestrator {
                     return self.stop_service_on_self_hosted(id, &record);
                 }
 
-                let o = self.cloud.as_mut().ok_or_else(|| {
+                let mut cloud = self.cloud();
+                let o = cloud.as_mut().ok_or_else(|| {
                     MnError::bad_request("未配置云端能力，无法操作云端部署".to_string())
                 })?;
                 // 1) 先停推理进程。失败不致命——它可能本来就没跑（上次已停），
@@ -491,7 +494,7 @@ impl Orchestrator {
     /// 「云端驱动 `` 未注册或未启用」，用户看到停止失败、进程却仍在跑、
     /// 显存仍被占用。这条分支把「自建设备」这一合法形态接住。
     fn stop_service_on_self_hosted(
-        &mut self,
+        &self,
         id: &str,
         record: &mangosteen_base::state::DeploymentRecord,
     ) -> MnResult<()> {
@@ -501,7 +504,7 @@ impl Orchestrator {
             match self.device_target_for(cloud) {
                 // 走自建设备（设置页登记的 SSH 目标）
                 Some(target) => {
-                    let workdir = self.config.cloud.remote_workdir.clone();
+                    let workdir = self.config().cloud.remote_workdir.clone();
                     mangosteen_device::remote::stop_llama_server_on_port(
                         &target,
                         &workdir,
@@ -548,13 +551,13 @@ impl Orchestrator {
         // 关隧道（保留实例）：自建设备机器不动，但本地转发必须收掉，
         // 否则每停一次就泄漏一条 ssh 与一个本地端口。
         if let Some(port) = record.plan.cloud.as_ref().map(|c| c.engine_port) {
-            let _ = self.device_tunnels.close_by_remote_port(port);
-            if let Some(o) = self.cloud.as_mut() {
+            let _ = self.tunnels().close_by_remote_port(port);
+            if let Some(o) = self.cloud().as_mut() {
                 let _ = o.tunnels_mut().close_by_remote_port(port);
             }
         }
         if let Some(port) = record.plan.local_access_port() {
-            self.scheduler.release_port(port);
+            self.scheduler().release_port(port);
         }
         // 清掉节点连接信息（IP/端口可能漂移，下次启动实时查询）
         if let Some(rec) = self.state.get(id)? {
@@ -585,13 +588,13 @@ impl Orchestrator {
     /// |---|---|
     /// | 云厂商实例 | 开机 → 起 `llama-server` → 重建隧道 → 等 `/health` |
     /// | 自定义节点 | 起 `llama-server` → 重建隧道 → 等 `/health`（机器本就开着） |
-    pub fn start_service(&mut self, id: &str) -> MnResult<()> {
+    pub fn start_service(&self, id: &str) -> MnResult<()> {
         self.start_service_with_progress(id, &crate::progress::noop_sink)
     }
 
     /// 带进度上报的启动服务（部署页点「部署」复用实例时走这里）。
     pub fn start_service_with_progress(
-        &mut self,
+        &self,
         id: &str,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<()> {
@@ -677,7 +680,7 @@ impl Orchestrator {
                         StageOutcome::Running,
                         format!("正在启动推理引擎：{}:{}", target.host, target.port),
                     );
-                    let workdir = self.config.cloud.remote_workdir.clone();
+                    let workdir = self.config().cloud.remote_workdir.clone();
                     if let Err(e) = mangosteen_provider::orchestrator::start_node_engine(
                         &target,
                         &workdir,
@@ -691,9 +694,9 @@ impl Orchestrator {
                         cloud_plan.engine_port,
                         false,
                     );
-                    let _ = self.device_tunnels.close(&spec);
+                    let _ = self.tunnels().close(&spec);
                     let local_port = match self
-                        .device_tunnels
+                        .tunnels()
                         .establish(&spec, Duration::from_secs(30))
                     {
                         Ok(t) => t.local_port,
@@ -712,7 +715,8 @@ impl Orchestrator {
                 }
 
                 // ---- 云厂商实例：开机 → 起进程 → 建隧道 ----
-                let o = self.cloud.as_mut().ok_or_else(|| {
+                let mut cloud = self.cloud();
+                let o = cloud.as_mut().ok_or_else(|| {
                     MnError::bad_request("未配置云端能力，无法操作云端部署".to_string())
                 })?;
                 sink(
@@ -783,7 +787,7 @@ impl Orchestrator {
 
     /// 启动成功后的公共收尾：等 `/health`、写台账、上报阶段。
     fn finish_start(
-        &mut self,
+        &self,
         id: &str,
         local_port: u16,
         node_host: &str,
@@ -793,7 +797,7 @@ impl Orchestrator {
         use crate::progress::{DeployStage, StageOutcome};
 
         let health = format!("http://127.0.0.1:{local_port}/health");
-        let timeout = Duration::from_secs(self.config.scheduler.launch_timeout_secs);
+        let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
         mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2))?;
         sink(
             DeployStage::Launching,
@@ -863,7 +867,7 @@ impl Orchestrator {
     /// （用户点的是「启动」而非「下载并启动」），删掉它等于卸载用户
     /// 已有的资产——那不是「停止部署」，是「删除模型」。
     pub fn abort_deployment(
-        &mut self,
+        &self,
         id: &str,
         delete_file: Option<&std::path::Path>,
     ) -> MnResult<()> {
@@ -889,7 +893,7 @@ impl Orchestrator {
                             .and_then(|c| c.device_id.as_ref())
                             .is_none();
                     if vendor_managed {
-                        if let Some(o) = self.cloud.as_mut() {
+                        if let Some(o) = self.cloud().as_mut() {
                             // 先停推理进程（可能已经起来了），再关机。
                             let _ = o.stop_service_on_port(
                                 provider,
@@ -916,11 +920,11 @@ impl Orchestrator {
 
             // 2) 释放端口预留
             if let Some(port) = rec.plan.local_access_port() {
-                self.scheduler.release_port(port);
+                self.scheduler().release_port(port);
             }
             // 关隧道：机器已关，留着只会反复重连
-            let _ = self.device_tunnels.close_all();
-            if let Some(o) = self.cloud.as_mut() {
+            let _ = self.tunnels().close_all();
+            if let Some(o) = self.cloud().as_mut() {
                 let _ = o.tunnels_mut().close_all();
             }
         }
@@ -999,7 +1003,7 @@ impl Orchestrator {
     ///   避免新进程起来时端口/显存被旧进程占住。
     ///
     /// 返回被清理的记录条数。
-    pub fn purge_model_deployments(&mut self, model_id: &str) -> MnResult<usize> {
+    pub fn purge_model_deployments(&self, model_id: &str) -> MnResult<usize> {
         let records = self.state.list()?;
         let mut removed = 0usize;
         for rec in records {
@@ -1016,7 +1020,7 @@ impl Orchestrator {
                 let port = cloud.engine_port;
                 if let Some(target) = self.device_target_for(cloud) {
                     // 自定义节点：直接 SSH 停进程
-                    let workdir = self.config.cloud.remote_workdir.clone();
+                    let workdir = self.config().cloud.remote_workdir.clone();
                     let _ = mangosteen_device::remote::stop_llama_server_on_port(
                         &target,
                         &workdir,
@@ -1029,7 +1033,7 @@ impl Orchestrator {
                     } = &rec.plan.origin;
                     // 云厂商实例：走驱动停进程，但**不关机**
                     if !provider.trim().is_empty() && !instance_id.trim().is_empty() {
-                        if let Some(o) = self.cloud.as_mut() {
+                        if let Some(o) = self.cloud().as_mut() {
                             let _ = o.stop_service_on_port(provider, instance_id, port);
                         }
                     }
@@ -1037,7 +1041,7 @@ impl Orchestrator {
             }
             // 释放该记录占用的本地端口预留，否则反复部署会吃光端口区间。
             if let Some(port) = rec.plan.local_access_port() {
-                self.scheduler.release_port(port);
+                self.scheduler().release_port(port);
             }
             self.state.remove(&rec.plan.id)?;
             removed += 1;
@@ -1060,7 +1064,7 @@ impl Orchestrator {
     /// Stopped 同样跳过：它是用户的显式动作态（停止服务后隧道必然不通），
     /// 不能因为「探测不到」降级成 Failed——否则破坏「停止保留实例、
     /// 可再启动」的生命周期。
-    pub fn refresh_deployment_mapping(&mut self, id: &str, mapped: bool) -> MnResult<()> {
+    pub fn refresh_deployment_mapping(&self, id: &str, mapped: bool) -> MnResult<()> {
         let Some(record) = self.state.get(id)? else {
             return Ok(());
         };
@@ -1092,7 +1096,7 @@ impl Orchestrator {
 
     /// 标记云端实例已失效：保留历史记录但不再参与复用，
     /// 让下一次部署可以按用户当前 GPU 选择创建新实例。
-    pub fn invalidate_deployment(&mut self, id: &str, reason: &str) -> MnResult<()> {
+    pub fn invalidate_deployment(&self, id: &str, reason: &str) -> MnResult<()> {
         let Some(record) = self.state.get(id)? else {
             return Ok(());
         };
@@ -1104,7 +1108,7 @@ impl Orchestrator {
     }
 
     /// 停止全部部署。
-    pub fn stop_all(&mut self) -> Vec<(String, String)> {
+    pub fn stop_all(&self) -> Vec<(String, String)> {
         let ids: Vec<String> = self
             .state
             .list_active()
@@ -1121,7 +1125,7 @@ impl Orchestrator {
         errors
     }
     /// 关闭网关：停止全部部署，释放资源。
-    pub fn shutdown(&mut self) -> Vec<(String, String)> {
+    pub fn shutdown(&self) -> Vec<(String, String)> {
         self.stop_all()
     }
 }

@@ -78,7 +78,7 @@ pub fn run(args: Args) -> MnResult<i32> {
     println!();
     output::print_info("按 Ctrl-C 停止网关（不会影响已部署的推理服务）");
 
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(gw));
+    let shared = std::sync::Arc::new(gw);
     mangosteen_gateway::spawn_warm_up(std::sync::Arc::clone(&shared));
 
     let server = mangosteen_gateway::GatewayServer::new(

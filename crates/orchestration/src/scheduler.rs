@@ -121,7 +121,10 @@ pub struct Scheduler {
     /// 端口分配起始偏移（每次部署递增，避免重复绑定）
     next_port_offset: std::sync::atomic::AtomicU32,
     /// 本地端口区间（含端点）
-    local_ports: (u16, u16),
+    ///
+    /// 内部锁：Scheduler 被 Orchestrator 以 `&self` 共享，端口区间是
+    /// 仅有的非原子可变状态。
+    local_ports: std::sync::Mutex<(u16, u16)>,
     /// 已被外部占用的端口（来自台账），分配时跳过
     reserved: std::sync::Mutex<Vec<u16>>,
 }
@@ -133,9 +136,19 @@ impl Scheduler {
             assessor,
             config,
             next_port_offset: std::sync::atomic::AtomicU32::new(0),
-            local_ports: (11_435, 11_999),
+            local_ports: std::sync::Mutex::new((11_435, 11_999)),
             reserved: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// 端口区间起点（测试与内部读用）。
+    pub fn port_range_start(&self) -> u16 {
+        self.local_ports.lock().unwrap_or_else(|e| e.into_inner()).0
+    }
+
+    /// 端口区间终点（测试与内部读用）。
+    pub fn port_range_end(&self) -> u16 {
+        self.local_ports.lock().unwrap_or_else(|e| e.into_inner()).1
     }
 
     /// 配置引用。
@@ -179,15 +192,18 @@ impl Scheduler {
 
     fn local_port_base(&self) -> u16 {
         // 端口区间由 local 配置给出；调度器只负责轮转
-        self.local_ports.0
+        self.local_ports.lock().unwrap_or_else(|e| e.into_inner()).0
     }
 
     fn config_port_span(&self) -> u32 {
-        (self.local_ports.1 - self.local_ports.0) as u32 + 1
+        // 一次加锁取整个区间：Mutex 不可重入，同一表达式里 lock 两次
+        // 会同线程自锁死（第一个 guard 活到表达式结束）。
+        let (start, end) = *self.local_ports.lock().unwrap_or_else(|e| e.into_inner());
+        (end - start) as u32 + 1
     }
 
     /// 设置本地端口区间（链式，失败时返回错误）。
-    pub fn with_port_range(mut self, start: u16, end: u16) -> MnResult<Self> {
+    pub fn with_port_range(self, start: u16, end: u16) -> MnResult<Self> {
         self.set_port_range(start, end)?;
         Ok(self)
     }
@@ -219,7 +235,7 @@ impl Scheduler {
     }
 
     /// 就地设置本地端口区间。
-    pub fn set_port_range(&mut self, start: u16, end: u16) -> MnResult<()> {
+    pub fn set_port_range(&self, start: u16, end: u16) -> MnResult<()> {
         if start >= end {
             return Err(MnError::config(
                 "local.port_range",
@@ -232,7 +248,7 @@ impl Scheduler {
                 "不得使用特权端口（<1024）",
             ));
         }
-        self.local_ports = (start, end);
+        *self.local_ports.lock().unwrap_or_else(|e| e.into_inner()) = (start, end);
         Ok(())
     }
 
@@ -739,18 +755,18 @@ mod tests {
     #[test]
     fn released_port_becomes_allocatable_again() {
         let s = scheduler(24, 64);
-        let span = (s.local_ports.1 - s.local_ports.0) as usize + 1;
+        let span = (s.port_range_end() - s.port_range_start()) as usize + 1;
 
         // 把区间里**每一个**端口都预留掉
-        for p in s.local_ports.0..=s.local_ports.1 {
+        for p in s.port_range_start()..=s.port_range_end() {
             s.reserve_port(p);
         }
         // 全被预留时，分配器只能回退到区间起点（此时部署会因端口占用失败）
         let starved = s.allocate_local_port();
-        assert_eq!(starved, s.local_ports.0, "区间耗尽时应回退到起点");
+        assert_eq!(starved, s.port_range_start(), "区间耗尽时应回退到起点");
 
         // 释放其中一个 → 必须能被分配出来
-        let target = s.local_ports.0 + 7;
+        let target = s.port_range_start() + 7;
         s.release_port(target);
         let got = s.allocate_local_port();
         assert_eq!(
@@ -763,7 +779,7 @@ mod tests {
     #[test]
     fn release_port_is_idempotent() {
         let s = scheduler(24, 64);
-        let p = s.local_ports.0 + 3;
+        let p = s.port_range_start() + 3;
         s.reserve_port(p);
         s.release_port(p);
         s.release_port(p); // 再释放一次不应 panic 或影响其它端口

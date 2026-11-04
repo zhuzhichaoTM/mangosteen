@@ -36,7 +36,7 @@
 //! 「登陆方式」只在实例停机再开机后才可能变（端口重新映射），
 //! 属于分钟级变化。20 秒足够，且远低于厂商接口的限流阈值。
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::gateway::Gateway;
@@ -48,30 +48,20 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 ///
 /// 返回 `JoinHandle` 便于测试或优雅退出时观测；生产路径直接丢弃即可
 /// （线程随进程结束）。
-pub fn spawn_ssh_info_refresher(gateway: Arc<Mutex<Gateway>>) -> std::thread::JoinHandle<()> {
+pub fn spawn_ssh_info_refresher(gateway: Arc<Gateway>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
-        // ① 持锁：只读台账。绝不在这里碰网络。
+        // ① 只读台账。绝不在这里碰网络。
         let ids: Vec<String> = {
-            match gateway.lock() {
-                Ok(gw) => gw.deployments_needing_ssh_info(),
-                Err(_) => return,
-            }
+            let gw = gateway.as_ref();
+            gw.deployments_needing_ssh_info()
         };
 
-        // ② 锁外：逐个刷新。
-        //
-        // 每个部署单独取一次锁——`refresh_ssh_info` 需要 `&self`，
-        // 而 `CloudOrchestrator` 归 `Gateway` 所有。为了不让一次刷新
-        // 占住锁几十秒，这里接受「取锁 → 调网 → 放锁」的往返，
-        // 但厂商调用本身在锁内仍然存在。
-        //
-        // 之所以可以接受：本线程是**唯一的调用方**，且 HTTP 路径已经完全
-        // 不依赖它。即使这里卡住，页面也只是看到 pending，不会阻塞。
+        // ② 逐个刷新。网关以 Arc 只读共享，Orchestrator 的云锁是
+        // 细粒度内部锁，厂商调用不会阻塞 HTTP 路径。
         for id in ids {
-            if let Ok(gw) = gateway.lock() {
-                let _ = gw.refresh_ssh_info(&id);
-            }
-            // 让出锁给 HTTP 路径：两个部署之间喘口气
+            let gw = gateway.as_ref();
+            let _ = gw.refresh_ssh_info(&id);
+            // 两个部署之间喘口气，避免打爆厂商限流
             std::thread::sleep(Duration::from_millis(50));
         }
 

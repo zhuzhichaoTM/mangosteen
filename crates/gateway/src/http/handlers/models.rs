@@ -8,10 +8,7 @@ use mangosteen_core::openai::ErrorResponse;
 
 impl GatewayServer {
     pub(crate) fn list_models(&self) -> Response {
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let list = match gw.models().list() {
             Ok(l) => l,
             Err(e) => return Response::error(&e),
@@ -148,10 +145,7 @@ impl GatewayServer {
         }
 
         let cfg = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             gw.config().clone()
         };
 
@@ -246,10 +240,7 @@ impl GatewayServer {
     /// 因为模型动辄数 GiB，误删重下代价很高。
     pub(crate) fn remove_model(&self, id: &str, req: &ParsedRequest) -> Response {
         let delete_file = query_flag(&req.query, "delete_file");
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
 
         // 删之前记下文件路径，删完**核实**是否真的不在了。
         //

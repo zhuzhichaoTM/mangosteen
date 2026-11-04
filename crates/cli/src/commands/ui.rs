@@ -296,7 +296,7 @@ pub fn run(args: Args) -> MnResult<i32> {
         }
     }
 
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(gw));
+    let shared = std::sync::Arc::new(gw);
 
     // 后台模式（`ui start`）由本进程自注册 PID：包装命令与真实网关进程的
     // PID 未必一致，只有进程自己写才是准确记录。

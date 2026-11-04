@@ -9,10 +9,7 @@ use mangosteen_core::openai::HealthResponse;
 
 impl GatewayServer {
     pub(crate) fn health(&self) -> Response {
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let backend = gw.active_backend().ok();
         let h = HealthResponse {
             status: "ok".to_string(),
@@ -24,10 +21,7 @@ impl GatewayServer {
         Response::json(200, &h)
     }
     pub(crate) fn models(&self) -> Response {
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let mut entries: Vec<(String, String)> = match gw.models().list() {
             Ok(list) => list
                 .into_iter()
@@ -77,10 +71,7 @@ impl GatewayServer {
         Response::json(200, &l)
     }
     pub(crate) fn status(&self) -> Response {
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         match gw.status() {
             Ok(s) => {
                 let mut active: Vec<serde_json::Value> = s.active.iter().map(|a| serde_json::json!({
@@ -146,10 +137,7 @@ impl GatewayServer {
     pub(crate) fn doctor(&self) -> Response {
         // 取配置与缓存的引擎版本：两者都在锁内读一次，随后锁外使用
         let (cfg, cached_version) = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             (gw.config().clone(), gw.engine_version())
         };
 
@@ -233,10 +221,7 @@ impl GatewayServer {
 
         // 5. 模型库
         let model_count = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             gw.models().list().map(|l| l.len()).unwrap_or(0)
         };
         checks.push(serde_json::json!({
@@ -259,10 +244,7 @@ impl GatewayServer {
 
         // 各活跃部署的进程资源占用
         let deps = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             let models_dir = gw.config().storage.models_dir.clone();
             gw.list_deployments()
                 .unwrap_or_default()
@@ -289,10 +271,7 @@ impl GatewayServer {
         let dep_json: Vec<serde_json::Value> = deps.into_iter().map(|(v, _)| v).collect();
 
         let hardware = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             let hw = gw.assessor().hardware().clone();
             let models_dir = gw.config().storage.models_dir.clone();
             (hw, models_dir)

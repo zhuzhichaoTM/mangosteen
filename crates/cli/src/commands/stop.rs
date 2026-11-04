@@ -76,7 +76,7 @@ pub fn run(args: Args) -> MnResult<i32> {
         return Ok(2);
     }
 
-    let mut gw = build_gateway(&args)?;
+    let gw = build_gateway(&args)?;
 
     if all {
         let errors = gw.stop_all();

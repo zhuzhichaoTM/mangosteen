@@ -62,29 +62,23 @@ pub use runprobe::{spawn_runtime_probe, RuntimeProbe};
 /// 表现为「页面白屏很久」。
 ///
 /// 预热放在独立线程：启动立即返回，探测完成后状态自动补齐。
-pub fn spawn_warm_up(gateway: std::sync::Arc<std::sync::Mutex<Gateway>>) {
+pub fn spawn_warm_up(gateway: std::sync::Arc<Gateway>) {
     std::thread::spawn(move || {
-        // 1) 短暂持锁：只取引擎副本与路径
-        let snapshot = {
-            let Ok(gw) = gateway.lock() else { return };
-            gw.warm_up_snapshot()
-        };
+        // 1) 只取引擎副本与路径（网关 Arc 只读共享，无锁）
+        let snapshot = gateway.warm_up_snapshot();
         let Some((engine, path)) = snapshot else {
             return;
         };
 
-        // 2) **锁外**执行慢探测（`--version` 可能要 20~30 秒）。
-        //    这一步绝不能持锁，否则期间所有 API 都会被阻塞。
+        // 2) 慢探测（`--version` 可能要 20~30 秒），不阻塞任何 API。
         let probed = engine.probe_version();
 
-        // 3) 再短暂持锁：写回结果。
-        //    失败也要写——否则预估接口为了判断「引擎是否坏了」得自己
-        //    再跑一次 27 秒的命令，而它是部署确认弹窗的必经接口。
-        if let Ok(gw) = gateway.lock() {
-            match probed {
-                Ok(version) => gw.set_engine_version(path, version),
-                Err(e) => gw.set_engine_failure(path, e.to_string()),
-            }
+        // 3) 写回结果。失败也要写——否则预估接口为了判断「引擎是否
+        //    坏了」得自己再跑一次 27 秒的命令，而它是部署确认弹窗的
+        //    必经接口。
+        match probed {
+            Ok(version) => gateway.set_engine_version(path, version),
+            Err(e) => gateway.set_engine_failure(path, e.to_string()),
         }
     });
 }

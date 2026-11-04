@@ -398,7 +398,7 @@ fn e2e_start_model_reuses_saved_local_plan() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("saved.gguf", 4096);
     let cfg = env.config(&engine);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     let reg = gw.models().register_local(&gguf, None).unwrap();
     let req = mangosteen_orchestration::DeploymentRequest::for_model(reg.entry.id.clone());
     let plan = gw.deploy(&req).expect("首次部署生成并保存方案");
@@ -408,7 +408,7 @@ fn e2e_start_model_reuses_saved_local_plan() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -437,7 +437,7 @@ fn e2e_register_assess_deploy_stop() {
     let gguf = env.write_gguf("qwen.gguf", 4096);
     let cfg = env.config(&engine);
 
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
 
     // ---- 1. 登记模型：必须解析出真实架构参数 ----
     let reg = gw
@@ -511,7 +511,7 @@ fn e2e_api_key_enforcement() {
     let gw = env.gateway(cfg);
     let (listener, port) = bind_ephemeral();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         true, // 要求鉴权
         "secret-key".to_string(),
         Duration::from_secs(10),
@@ -568,7 +568,7 @@ fn e2e_local_failure_degrades_and_reports_accurately() {
 
     let gguf = env.write_gguf("qwen.gguf", 4096);
     let cfg = env.config(&broken);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
@@ -607,7 +607,7 @@ fn e2e_local_only_rejects_when_engine_broken() {
     }
     let gguf = env.write_gguf("q.gguf", 2048);
     let cfg = env.config(&broken);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let req = DeploymentRequest::for_model("qwen2.5-7b-instruct")
@@ -692,7 +692,7 @@ fn e2e_web_ui_is_served_and_self_contained() {
 
     let (listener, port) = bind_ephemeral();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -824,7 +824,7 @@ fn e2e_preview_api_shape_is_stable() {
 
     let (listener, port) = bind_ephemeral();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -884,7 +884,7 @@ fn e2e_doctor_api_reports_checks() {
 
     let (listener, port) = bind_ephemeral();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -931,7 +931,7 @@ fn e2e_warm_up_does_not_block_api() {
 
     let cfg = env.config(&slow);
     let gw = env.gateway(cfg);
-    let shared = std::sync::Arc::new(std::sync::Mutex::new(gw));
+    let shared = std::sync::Arc::new(gw);
 
     // 启动预热（会在后台 sleep 3 秒）
     mangosteen_gateway::spawn_warm_up(std::sync::Arc::clone(&shared));
@@ -988,7 +988,7 @@ fn e2e_search_rejects_keyword_on_source_without_search_api() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1027,7 +1027,7 @@ fn e2e_search_requires_query() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1063,7 +1063,7 @@ fn e2e_pull_returns_job_immediately() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1112,7 +1112,7 @@ fn e2e_jobs_api_shape_is_stable() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1161,7 +1161,7 @@ fn e2e_preview_and_doctor_do_not_probe_engine_synchronously() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(30),
@@ -1231,7 +1231,7 @@ fn e2e_models_api_reports_path_and_missing_files() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1290,7 +1290,7 @@ fn e2e_search_defaults_to_100_repos() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1334,7 +1334,7 @@ fn e2e_deployments_expose_model_id_with_quant() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(30),
@@ -1390,7 +1390,7 @@ fn e2e_same_model_cannot_deploy_twice() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(30),
@@ -1455,7 +1455,7 @@ fn e2e_deployments_report_pid() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(30),
@@ -1507,7 +1507,7 @@ fn e2e_prepared_local_gets_model_path_before_launch() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("qwen.gguf", 8192);
     let cfg = env.config(&engine);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
@@ -1570,7 +1570,7 @@ fn e2e_deploy_reports_stage_progress() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("qwen.gguf", 8192);
     let cfg = env.config(&engine);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let seen: std::sync::Mutex<Vec<(DeployStage, StageOutcome, String)>> =
@@ -1693,7 +1693,7 @@ fn e2e_remove_model_accepts_percent_encoded_id() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1741,7 +1741,7 @@ fn e2e_remove_model_reports_actual_file_deletion() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1782,7 +1782,7 @@ fn e2e_abort_deployment_rolls_back_everything() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("qwen.gguf", 8192);
     let cfg = env.config(&engine);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
@@ -1868,7 +1868,7 @@ fn e2e_abort_keeps_file_when_not_downloaded_by_this_job() {
     let engine = env.write_fake_engine();
     let gguf = env.write_gguf("qwen.gguf", 8192);
     let cfg = env.config(&engine);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
@@ -1911,7 +1911,7 @@ fn e2e_sysinfo_exposes_cloud_section() {
 
     let (listener, port) = bind_ephemeral();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -1956,7 +1956,7 @@ fn e2e_forced_local_never_falls_back_to_cloud() {
     // 造一个远超本机能力的模型：64 层、超大隐藏维度
     let gguf = env.write_gguf("huge.gguf", 8192);
     let cfg = env.config(&engine);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let req = DeploymentRequest {
@@ -2035,7 +2035,7 @@ fn e2e_forced_local_blocks_instead_of_silently_going_cloud() {
 
     let gguf = env.write_gguf("qwen.gguf", 4096);
     let cfg = env.config(&broken);
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
@@ -2120,7 +2120,7 @@ fn e2e_deploy_target_param_is_validated() {
 
     let (listener, port) = bind_ephemeral();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -2253,7 +2253,7 @@ fn e2e_deploy_rejects_unsupported_engine() {
     let gguf = env.write_gguf("q.gguf", 4096);
     let mut cfg = env.config(&engine);
     cfg.local.engine = InferenceEngine::Vllm; // 切到未适配引擎
-    let mut gw = env.gateway(cfg);
+    let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
     let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
@@ -2321,7 +2321,7 @@ fn e2e_pull_with_deploy_flag_marks_auto_deploy() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(30),
@@ -2390,7 +2390,7 @@ fn e2e_ui_script_has_no_undefined_function_calls() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),
@@ -2445,7 +2445,7 @@ fn e2e_chat_with_stopped_model_reports_clearly() {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(std::sync::Mutex::new(gw)),
+        std::sync::Arc::new(gw),
         false,
         String::new(),
         Duration::from_secs(20),

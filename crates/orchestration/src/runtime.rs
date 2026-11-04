@@ -111,9 +111,16 @@ pub struct ActiveDeployment {
 ///
 /// 持有执行所需的下层能力；生命周期与状态都收敛在这里，网关只做转发。
 pub struct Orchestrator {
-    config: Config,
+    /// 配置快照。
+    ///
+    /// 内部锁 + Arc：读侧 clone Arc（零成本共享），设置页写盘后由
+    /// `replace_config` 原子换新——读侧借用永不跨锁。
+    config: std::sync::RwLock<std::sync::Arc<Config>>,
     assessor: Assessor,
-    scheduler: Scheduler,
+    /// 调度器。
+    ///
+    /// 内部锁：设置页保存时整体重建，读侧只短暂持读锁。
+    scheduler: std::sync::RwLock<Scheduler>,
     local_engine: LlamaCppEngine,
     /// 引擎插件注册表。
     ///
@@ -122,13 +129,31 @@ pub struct Orchestrator {
     /// `mangosteen_device::EngineRegistry::with_builtin` 里登记，
     /// 本层一行不动（基线「推理引擎插件化原则」）。
     engines_registry: mangosteen_device::EngineRegistry,
-    cloud: Option<CloudOrchestrator>,
+    /// 云端编排器。
+    ///
+    /// 内部锁：与 `device_tunnels` 同理——部署长操作绝不持上层锁，
+    /// 方法一律 `&self`，只有写入时短暂持锁。
+    cloud: std::sync::Mutex<Option<CloudOrchestrator>>,
     /// 自建节点（设置页「设备列表」）的 SSH 隧道。
     ///
     /// 与云端实例分开管理：自建设备不经过厂商接口，即使一个云服务商都
     /// 没配置（`cloud == None`），设备部署也要能用。
-    device_tunnels: TunnelManager,
-    remote_inference_routes: std::collections::BTreeMap<String, u16>,
+    device_tunnels: std::sync::Mutex<TunnelManager>,
+    /// 远端推理路由表：`模型ID → 本地端口`。
+    ///
+    /// ## 为什么改为内部锁（致命缺陷修复）
+    ///
+    /// 它与 `device_tunnels` 是编排器里仅有的**可变**状态。此前
+    /// `Gateway = Arc<Mutex<Orchestrator>>`，HTTP 层每次请求都要拿这把
+    /// 全局锁，而部署线程会持锁跑完整条 `prepare_with_progress`
+    /// （创建实例 → 等开机 → SSH 免密 → 下载权重，1~3 分钟）。后果：
+    /// 部署期间 `/api/status`、`/api/models/jobs` 等**全部**管理接口
+    /// 排队阻塞，UI 一直显示「连接中」，对话转发也已受到牵连。
+    ///
+    /// 把可变状态下沉为细粒度内部锁后，编排器方法一律 `&self`，
+    /// HTTP 层用 `Arc<Orchestrator>` 共享——部署长操作只在自己写入时
+    /// 短暂持有这两把锁，管理接口与界面轮询不再被拖住。
+    remote_inference_routes: std::sync::Mutex<std::collections::BTreeMap<String, u16>>,
     state: StateStore,
     models: ModelStore,
     /// 请求 ID 序号
@@ -168,7 +193,7 @@ impl Orchestrator {
         state: StateStore,
         models: ModelStore,
     ) -> MnResult<Self> {
-        let mut scheduler =
+        let scheduler =
             Scheduler::new(assessor.clone_for_scheduler(), config.scheduler.clone());
         scheduler.set_port_range(config.local.port_range_start, config.local.port_range_end)?;
         // 网关自身端口也要预留：默认 11516 落在引擎区间 11435-11999 内，
@@ -220,9 +245,9 @@ impl Orchestrator {
         }
 
         Ok(Self {
-            config,
+            config: std::sync::RwLock::new(std::sync::Arc::new(config)),
             assessor,
-            scheduler,
+            scheduler: std::sync::RwLock::new(scheduler),
             // 注册表在此构造：内置插件清单只在 device crate 里维护一份，
             // 编排层不关心有哪些引擎、各自怎么启动。
             engines_registry: mangosteen_device::EngineRegistry::with_builtin(
@@ -230,9 +255,9 @@ impl Orchestrator {
                 mangosteen_device::OllamaEngine::new(),
             ),
             local_engine,
-            cloud,
-            device_tunnels,
-            remote_inference_routes,
+            cloud: std::sync::Mutex::new(cloud),
+            device_tunnels: std::sync::Mutex::new(device_tunnels),
+            remote_inference_routes: std::sync::Mutex::new(remote_inference_routes),
             state,
             models,
             req_seq: std::sync::atomic::AtomicU64::new(0),
@@ -255,9 +280,14 @@ impl Orchestrator {
             .unwrap_or_else(|| ConfigStore::platform_default(None))
     }
 
-    /// 配置引用。
-    pub fn config(&self) -> &Config {
-        &self.config
+    /// 配置快照（Arc 共享，读侧零阻塞）。
+    pub fn config(&self) -> std::sync::Arc<Config> {
+        self.config.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// 取调度器读锁。
+    pub(crate) fn scheduler(&self) -> std::sync::RwLockReadGuard<'_, Scheduler> {
+        self.scheduler.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// 台账引用。
@@ -286,6 +316,38 @@ impl Orchestrator {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// 取隧道表锁。
+    ///
+    /// 细粒度锁的**唯一入口**：部署长操作（创建实例、等开机、下载权重）
+    /// 只在真正操作隧道时短暂持有，绝不在整个部署期间占着不放，
+    /// 否则管理 API 会被拖成「一直转圈」。
+    pub(crate) fn tunnels(
+        &self,
+    ) -> std::sync::MutexGuard<'_, TunnelManager> {
+        // 锁中毒说明此前有线程在持锁期间 panic。隧道表本身只是一张
+        // 「远端端口 → 本地转发」的映射，中毒后继续用它比直接崩掉整条
+        // 部署链路代价小得多：`into_inner` 取出残余数据继续服务。
+        self.device_tunnels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 取云端编排器锁（细粒度内部锁，见字段注释）。
+    pub(crate) fn cloud(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Option<CloudOrchestrator>> {
+        self.cloud.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 取远端路由表锁。
+    pub(crate) fn routes(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<String, u16>> {
+        self.remote_inference_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// 用新配置替换内存中的配置。
     ///
     /// 设置页写盘后必须调用它，否则用户改完要重启才生效——
@@ -294,13 +356,15 @@ impl Orchestrator {
     /// 只替换可热更新的部分：调度策略、本地参数、存储默认源、服务商开关。
     /// **不重建**引擎句柄与云端编排器（重建会中断正在服务的推理），
     /// 那些字段的变更需要重启，UI 会明确提示。
-    pub fn replace_config(&mut self, cfg: Config) {
-        self.scheduler = Scheduler::new(self.assessor.clone_for_scheduler(), cfg.scheduler.clone());
-        // 端口区间可能被改过，重新设置（失败则保留旧值，不因设置页写错而崩溃）
-        let _ = self
-            .scheduler
-            .set_port_range(cfg.local.port_range_start, cfg.local.port_range_end);
-        self.config = cfg;
+    pub fn replace_config(&self, cfg: Config) {
+        {
+            let mut sched = self.scheduler.write().unwrap_or_else(|e| e.into_inner());
+            *sched =
+                Scheduler::new(self.assessor.clone_for_scheduler(), cfg.scheduler.clone());
+            // 端口区间可能被改过，重新设置（失败则保留旧值，不因设置页写错而崩溃）
+            let _ = sched.set_port_range(cfg.local.port_range_start, cfg.local.port_range_end);
+        }
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = std::sync::Arc::new(cfg);
     }
 
     /// 用当前配置重建云端驱动注册表（设置页更新厂商密钥/参数后调用）。
@@ -311,12 +375,13 @@ impl Orchestrator {
     /// * 重建结果为空（如唯一服务商的密钥被清空）→ **保留旧注册表**，
     ///   避免活跃部署的生命周期操作因注册表突然变空而失效；
     /// * 本进程启动时没有云能力（`cloud == None`）→ 无法热建，需重启。
-    pub fn reload_cloud_drivers(&mut self) -> (bool, Vec<(String, String)>) {
-        let build = mangosteen_provider::build_registry(&self.config);
+    pub fn reload_cloud_drivers(&self) -> (bool, Vec<(String, String)>) {
+        let build = mangosteen_provider::build_registry(&self.config());
         if build.registry.is_empty() {
             return (false, build.skipped);
         }
-        match self.cloud.as_mut() {
+        let mut cloud = self.cloud();
+        match cloud.as_mut() {
             Some(o) => {
                 o.replace_registry(build.registry);
                 (true, build.skipped)

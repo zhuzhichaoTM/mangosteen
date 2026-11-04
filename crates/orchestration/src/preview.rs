@@ -40,7 +40,7 @@ impl Orchestrator {
 
         // 已保存设备（不含密码），交给前端渲染选择列表
         let devices: Vec<DeviceBrief> = self
-            .config
+            .config()
             .remote_devices
             .iter()
             .map(DeviceBrief::from_config)
@@ -70,7 +70,7 @@ impl Orchestrator {
             max_price_per_hour: req.max_price_per_hour,
             allowed_providers: Vec::new(),
             allowed_regions: Vec::new(),
-            require_stock: self.config.scheduler.require_stock,
+            require_stock: self.config().scheduler.require_stock,
         };
 
         // 三档候选（最低成本 / 综合最优 / 性能最强）：UI 让用户显式选一个。

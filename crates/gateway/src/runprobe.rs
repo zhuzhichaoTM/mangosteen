@@ -148,7 +148,7 @@ fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
 
 /// 启动后台探测线程。
 pub fn spawn_runtime_probe(
-    gateway: Arc<Mutex<Gateway>>,
+    gateway: Arc<Gateway>,
     backend_snapshot: Arc<RwLock<BTreeMap<String, BackendTarget>>>,
     probe: RuntimeProbe,
 ) -> std::thread::JoinHandle<()> {
@@ -156,9 +156,9 @@ pub fn spawn_runtime_probe(
         // ready→failed 的降级计数：跨探测轮次累计，只在连续失败时触发。
         let mut misses: BTreeMap<String, u32> = BTreeMap::new();
         loop {
-            // ① 持锁：只读台账（微秒级）
+            // ① 只读台账（微秒级）
             let targets: Vec<ProbeTarget> = {
-                let Ok(gw) = gateway.lock() else { return };
+                let gw = gateway.as_ref();
                 gw.list_deployments()
                     .unwrap_or_default()
                     .iter()
@@ -179,7 +179,7 @@ pub fn spawn_runtime_probe(
                 }
             }
 
-            // ③ 释放锁：做本地端口探测，按需回写台账。
+            // ③ 做本地端口探测，按需回写台账。
             let mut snapshot = BTreeMap::new();
             let mut changed = false;
             for t in targets {
@@ -216,7 +216,8 @@ pub fn spawn_runtime_probe(
                 let recover = t.status == DeploymentStatus::Failed && mapped;
                 if downgrade || recover {
                     // ④ 只在锁内做微秒级台账状态同步；不做网络操作。
-                    if let Ok(mut gw) = gateway.lock() {
+                    {
+                        let gw = gateway.as_ref();
                         if gw.refresh_deployment_mapping(&t.id, mapped).is_ok() {
                             changed = true;
                         }

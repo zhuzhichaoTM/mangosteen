@@ -33,8 +33,8 @@ impl Orchestrator {
         &self,
         constraints: &SelectionConstraints,
     ) -> MnResult<Vec<mangosteen_core::policy::ScoredCandidate>> {
-        let o = self
-            .cloud
+        let cloud = self.cloud();
+        let o = cloud
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
@@ -90,8 +90,8 @@ impl Orchestrator {
         &self,
         constraints: &SelectionConstraints,
     ) -> MnResult<Vec<crate::deployment::CloudCandidateBrief>> {
-        let o = self
-            .cloud
+        let cloud = self.cloud();
+        let o = cloud
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
@@ -146,7 +146,8 @@ impl Orchestrator {
     pub fn cloud_instance_briefs(&self) -> Vec<crate::deployment::CloudInstanceBrief> {
         use mangosteen_core::cloud::InstanceState;
 
-        let Some(o) = self.cloud.as_ref() else {
+        let cloud = self.cloud();
+        let Some(o) = cloud.as_ref() else {
             return Vec::new();
         };
         // 台账活跃记录 → (provider, instance_id) → 占用模型清单。
@@ -207,8 +208,8 @@ impl Orchestrator {
         &self,
         constraints: &SelectionConstraints,
     ) -> MnResult<Vec<mangosteen_core::policy::ScoredCandidate>> {
-        let o = self
-            .cloud
+        let cloud = self.cloud();
+        let o = cloud
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
@@ -222,8 +223,8 @@ impl Orchestrator {
     pub fn list_cloud_specs(
         &self,
     ) -> MnResult<Vec<(String, mangosteen_core::cloud::AvailableSpec)>> {
-        let o = self
-            .cloud
+        let cloud = self.cloud();
+        let o = cloud
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
@@ -243,8 +244,8 @@ impl Orchestrator {
         &self,
         constraints: &SelectionConstraints,
     ) -> MnResult<Vec<(String, mangosteen_core::cloud::AvailableSpec)>> {
-        let o = self
-            .cloud
+        let cloud = self.cloud();
+        let o = cloud
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
@@ -269,8 +270,8 @@ impl Orchestrator {
         constraints: &SelectionConstraints,
         name: Option<&str>,
     ) -> MnResult<(String, mangosteen_core::cloud::Instance)> {
-        let o = self
-            .cloud
+        let cloud = self.cloud();
+        let o = cloud
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
@@ -285,12 +286,12 @@ impl Orchestrator {
     ///
     /// 返回清理过程中的错误列表（空 = 全部成功）。
     pub fn destroy_cloud_instance(
-        &mut self,
+        &self,
         provider: &str,
         instance_id: &str,
     ) -> MnResult<Vec<String>> {
-        let o = self
-            .cloud
+        let mut cloud = self.cloud();
+        let o = cloud
             .as_mut()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
@@ -418,8 +419,8 @@ impl Orchestrator {
             return Ok(None);
         };
 
-        let o = self
-            .cloud
+        let cloud_guard = self.cloud();
+        let o = cloud_guard
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),

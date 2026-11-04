@@ -27,10 +27,7 @@ impl GatewayServer {
     ///   "supported": ["qwen2.5-0.5b", "qwen3.8-27b"] }
     /// ```
     pub(crate) fn list_model_templates(&self) -> Response {
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let cfg = gw.config();
         let models: Vec<serde_json::Value> = cfg
             .model_whitelist
@@ -153,11 +150,8 @@ impl GatewayServer {
         }
 
         let (mut cfg, store) = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
-            (gw.config().clone(), gw.config_store())
+            let gw = self.gateway.as_ref();
+            (gw.config().as_ref().clone(), gw.config_store())
         };
 
         let entry = cfg
@@ -194,11 +188,8 @@ impl GatewayServer {
         let model = percent_decode_path(model.trim());
         let slot = percent_decode_path(slot.trim());
         let (mut cfg, store) = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
-            (gw.config().clone(), gw.config_store())
+            let gw = self.gateway.as_ref();
+            (gw.config().as_ref().clone(), gw.config_store())
         };
         let Some(wl) = cfg.model_whitelist.get_mut(&model) else {
             return Response::json(
@@ -226,7 +217,7 @@ impl GatewayServer {
                 ),
             );
         }
-        if let Err(e) = persist_config(self, cfg, &store) {
+        if let Err(e) = persist_config(self, cfg.clone(), &store) {
             return Response::error(&e);
         }
         Response::json(200, &serde_json::json!({ "ok": true }))
@@ -289,8 +280,6 @@ fn persist_config(
     store: &mangosteen_base::config::ConfigStore,
 ) -> mangosteen_core::MnResult<()> {
     store.save(&cfg)?;
-    if let Ok(mut gw) = server.gateway.lock() {
-        gw.replace_config(cfg);
-    }
+    server.gateway.replace_config(cfg);
     Ok(())
 }

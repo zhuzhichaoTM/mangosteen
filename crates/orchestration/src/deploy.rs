@@ -18,7 +18,7 @@ impl Orchestrator {
     /// 执行部署。这是系统的主入口（模型已在本地时用）。
     ///
     /// 完整流程见模块文档。返回的 `DeploymentPlan` 已落台账。
-    pub fn deploy(&mut self, req: &DeploymentRequest) -> MnResult<DeploymentPlan> {
+    pub fn deploy(&self, req: &DeploymentRequest) -> MnResult<DeploymentPlan> {
         self.deploy_with_progress(req, &crate::progress::noop_sink)
     }
     /// 「准备」阶段：评估 → 选择设备 → 生成配置，**不启动**。
@@ -42,7 +42,7 @@ impl Orchestrator {
     /// 本方法返回时已落台账（`provisioning`），因此下载失败会留下一条
     /// 失败记录——便于用户查「刚才那次为什么没成」。
     pub fn prepare_with_progress(
-        &mut self,
+        &self,
         evaluated: Evaluated,
         req: &DeploymentRequest,
         sink: crate::progress::ProgressSink<'_>,
@@ -59,13 +59,13 @@ impl Orchestrator {
     }
     /// 执行部署，并在每个阶段上报进度。
     ///
-    /// `sink` 是在**持有网关锁的状态下**被调用的（部署全程 `&mut self`），
+    /// `sink` 是在**持有网关锁的状态下**被调用的（部署全程 `&self`），
     /// 因此实现必须极轻：只写内存里的任务表，不做网络/磁盘 IO。
     /// 否则几 GB 的下载期间会把整个 API 拖死。
     ///
     /// 阶段语义见 [`crate::progress`]。
     pub fn deploy_with_progress(
-        &mut self,
+        &self,
         req: &DeploymentRequest,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
@@ -85,7 +85,7 @@ impl Orchestrator {
     ///
     /// 实现上就是「prepare + commit」背靠背，中间不插下载。
     pub(crate) fn deploy_inner(
-        &mut self,
+        &self,
         req: &DeploymentRequest,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
@@ -109,7 +109,7 @@ impl Orchestrator {
     }
     /// 「准备」阶段主体：唯一性检查 → 引擎检查 → 选择设备 → 落台账。
     pub(crate) fn prepare_inner(
-        &mut self,
+        &self,
         evaluated: Evaluated,
         req: &DeploymentRequest,
         sink: crate::progress::ProgressSink<'_>,
@@ -207,7 +207,7 @@ impl Orchestrator {
         //
         // 未适配的引擎必须**明确拒绝并说明**，绝不假装能跑：
         // 假装的结果是用户等到超时才发现根本没有服务在监听。
-        let engine = self.config.local.engine;
+        let engine = self.config().local.engine;
         if !self.engines_registry.has(engine) {
             return Err(MnError::bad_request(format!(
                 "当前推理引擎为 {}，但该引擎尚未适配（未注册插件；需要 {} 格式的模型，\
@@ -230,7 +230,7 @@ impl Orchestrator {
 
         let trail: Vec<String> = Vec::new();
         let reason = LOCAL_REMOVED.to_string();
-        let mut cloud_plan = match self.scheduler.build_cloud_plan(&evaluated, req, &reason) {
+        let mut cloud_plan = match self.scheduler().build_cloud_plan(&evaluated, req, &reason) {
             Ok(p) => p,
             Err(e) => {
                 sink(DeployStage::Selecting, StageOutcome::Failed, e.to_string());
@@ -242,7 +242,7 @@ impl Orchestrator {
         // llama-server 端口，不能所有模型都固定使用 8080。
         cloud_plan.engine_port = self.allocate_remote_engine_port();
         cloud_plan.engine.port = cloud_plan.engine_port;
-        let why = self.scheduler.explain_local_failure(&evaluated);
+        let why = self.scheduler().explain_local_failure(&evaluated);
         // 远端模型下载和节点配置由 prepare_cloud 按严格顺序执行：
         // 先等待实例创建并完成节点配置，再在节点侧下载模型。这里不能提前
         // 下载阶段由 prepare 内部在节点确认后上报，随后直接进入启动阶段。

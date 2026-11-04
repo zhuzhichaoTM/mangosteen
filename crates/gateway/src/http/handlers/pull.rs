@@ -138,10 +138,7 @@ impl GatewayServer {
 
         // ---- 持锁期间只做「取快照」，不做任何网络操作 ----
         let (cfg, models, gw_for_deploy) = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             (
                 gw.config().clone(),
                 // ModelStore 是 Clone 的（内部只有路径 + 策略）。
@@ -368,11 +365,8 @@ impl GatewayServer {
 
                 let evaluated = if local_final_path.is_file() {
                     // 本地已有 → 读盘解析，最准且零网络延迟
-                    let g = gw_p
-                        .lock()
-                        .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                    let g = gw_p.as_ref();
                     let ev = g.assessor_public().evaluate_file(&local_final_path, &req);
-                    drop(g);
                     match ev {
                         Ok(ev) => {
                             jobs_p.set_stage(
@@ -402,11 +396,8 @@ impl GatewayServer {
                         REMOTE_HEADER_BYTES,
                     ) {
                         Ok(meta) => {
-                            let g = gw_p
-                                .lock()
-                                .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                            let g = gw_p.as_ref();
                             let ev = g.evaluate_remote(&meta.info, &req);
-                            drop(g);
                             jobs_p.set_stage(
                                 &jid_p,
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
@@ -418,11 +409,8 @@ impl GatewayServer {
                         }
                         Err(e) => {
                             // 预取失败不阻断部署，但必须如实标注为估算。
-                            let g = gw_p
-                                .lock()
-                                .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                            let g = gw_p.as_ref();
                             let ev = g.evaluate_estimated(&est_name, est_quant, est_size, &req);
-                            drop(g);
                             jobs_p.set_stage(
                                 &jid_p,
                                 mangosteen_orchestration::progress::DeployStage::Assessing,
@@ -450,9 +438,7 @@ impl GatewayServer {
                         stage: "节点配置环境".to_string(),
                     });
                 }
-                let mut g = gw_p
-                    .lock()
-                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                let g = gw_p.as_ref();
                 g.prepare_with_progress(evaluated, &req, &sink)
             });
 
@@ -482,9 +468,7 @@ impl GatewayServer {
                                  detail: String| {
                     sink_jobs.set_stage(&sink_id, stage, outcome, detail);
                 };
-                let mut g = gw_cc
-                    .lock()
-                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                let g = gw_cc.as_ref();
                 let plan = g.commit_cloud(prepared, &sink)?;
                 Ok(plan.id)
             });
@@ -500,35 +484,27 @@ impl GatewayServer {
                                  detail: String| {
                     sink_jobs.set_stage(&sink_id, stage, outcome, detail);
                 };
-                let mut g = gw_rs
-                    .lock()
-                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                let g = gw_rs.as_ref();
                 g.start_service_with_progress(dep_id, &sink)?;
                 Ok(dep_id.to_string())
             });
 
             let abort: crate::pulljobs::AbortHook = Arc::new(move |dep_id, delete_file| {
                 let Some(dep_id) = dep_id else { return Ok(()) };
-                let mut g = gw_a
-                    .lock()
-                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                let g = gw_a.as_ref();
                 g.abort_deployment(dep_id, delete_file)
             });
 
             let gw_invalid = Arc::clone(&gw_for_abort);
             let invalidate: crate::pulljobs::InvalidateHook = Arc::new(move |dep_id, reason| {
-                let mut g = gw_invalid
-                    .lock()
-                    .map_err(|_| MnError::bad_request("网关状态锁中毒"))?;
+                let g = gw_invalid.as_ref();
                 g.invalidate_deployment(dep_id, reason)
             });
 
             let refresh_gateway = Arc::clone(&self.gateway);
             let refresh_snapshot = Arc::clone(&self.backend_snapshot);
             let refresh_routes: crate::pulljobs::RefreshRoutesHook = Arc::new(move || {
-                let Ok(gw) = refresh_gateway.lock() else {
-                    return;
-                };
+                let gw = refresh_gateway.as_ref();
                 let Ok(records) = gw.list_deployments() else {
                     return;
                 };
@@ -581,10 +557,8 @@ impl GatewayServer {
         // 下载阶段会重新做真实文件校验并复用完整资源。
         if deploy_after {
             if let Some(id) = purge_model_id.as_deref() {
-                if let Ok(mut g) = self.gateway.lock() {
-                    if let Err(e) = g.purge_model_deployments(id) {
-                        return Response::error(&e);
-                    }
+                if let Err(e) = self.gateway.purge_model_deployments(id) {
+                    return Response::error(&e);
                 }
             }
         }

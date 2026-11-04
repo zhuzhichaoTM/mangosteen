@@ -85,10 +85,7 @@ impl GatewayServer {
             }
         }
 
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         match gw.preview(&dreq) {
             Ok(p) => Response::json(200, &p),
             Err(e) => Response::error(&e),
@@ -98,10 +95,7 @@ impl GatewayServer {
         // 运行态来自后台探测缓存（微秒级读锁）；未启用探测时回退台账状态。
         // 绝不在这里现场探测：部署页几秒轮询一次，现场探测会把页面拖卡。
         let probe = self.runtime_probe.as_ref();
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         match gw.list_deployments() {
             Ok(list) => {
                 let arr: Vec<serde_json::Value> = list
@@ -198,10 +192,7 @@ impl GatewayServer {
         }
     }
     pub(crate) fn deployment(&self, id: &str) -> Response {
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         match gw.get_deployment(id) {
             Ok(Some(r)) => {
                 let payload = serde_json::json!({
@@ -226,12 +217,8 @@ impl GatewayServer {
     /// 实例与磁盘保留，下次点「部署」会复用同一实例开机重启。
     /// 实例的最终销毁由系统按策略回收，或在用户删除自定义节点时处理。
     pub(crate) fn unload(&self, id: &str) -> Response {
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let result = gw.unload(id);
-        drop(gw);
         // 卸载后必须重建业务转发快照：该模型已不可服务，不能继续留在
         // 快照里把对话路由到一个已关闭的隧道端口。
         if result.is_ok() {
@@ -258,12 +245,8 @@ impl GatewayServer {
 
     /// 停止服务：云端关机（停 GPU 计费，实例与权重保留），本地停引擎进程。
     pub(crate) fn stop_service(&self, id: &str) -> Response {
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let result = gw.stop_service(id);
-        drop(gw);
         if result.is_ok() {
             self.rebuild_backend_snapshot();
         }
@@ -277,10 +260,7 @@ impl GatewayServer {
     }
     /// 启动服务：云端开机并重新拉起推理进程。
     pub(crate) fn start_service(&self, id: &str) -> Response {
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         match gw.start_service(id) {
             Ok(()) => Response::json(
                 200,
@@ -297,7 +277,7 @@ impl GatewayServer {
     ///
     /// ## 锁的边界（与 `cloudmon` 同一原则）
     ///
-    /// 网关是 `Arc<Mutex<Gateway>>` 单锁，**任何网络调用都不得在锁内执行**。
+    /// 网关是 `Arc<Gateway>` 单锁，**任何网络调用都不得在锁内执行**。
     /// 这个接口被部署页轮询，缓存每 60 秒过期一次；过期那一刻若在锁内
     /// 调 `driver.describe()`（厂商接口慢、网络抖动时重试数十秒），整个
     /// HTTP 层都会排队——实测表现为下载/启动过程中「消息中断、连接失败」。
@@ -310,10 +290,7 @@ impl GatewayServer {
     /// 宁可让「登陆方式」晚几十秒才有值，也不能让整个网关跟着厂商接口一起卡。
     pub(crate) fn ssh_info(&self, id: &str) -> Response {
         let cached = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             // 纯内存读，无 I/O
             gw.cached_ssh_info(id)
         };
@@ -334,12 +311,8 @@ impl GatewayServer {
         ssh_info_response(info)
     }
     pub(crate) fn stop(&self, id: &str) -> Response {
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let result = gw.stop(id);
-        drop(gw);
         // 停止服务后必须重建业务转发快照：该模型已不可服务，不能继续留在
         // 快照里把对话路由到一个已关闭的隧道端口。
         if result.is_ok() {
@@ -454,10 +427,7 @@ impl GatewayServer {
             }
         }
 
-        let mut gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         match gw.deploy(&dreq) {
             Ok(plan) => {
                 let cloud = plan.cloud.as_ref();
@@ -517,10 +487,7 @@ impl GatewayServer {
             dreq.context_len = Some(c as u32);
         }
 
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         match gw.evaluate(&dreq) {
             Ok(e) => Response::json(
                 200,

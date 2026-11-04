@@ -189,12 +189,10 @@ impl GatewayServer {
 /// 只持有 `gateway` 与 `backend_snapshot` 两个 Arc，翻转台账状态后
 /// 通过它同步对话路由，保证探测自愈的模型立刻可对话。
 pub(crate) fn rebuild_snapshot(
-    gateway: &std::sync::Mutex<crate::gateway::Gateway>,
+    gateway: &std::sync::Arc<crate::gateway::Gateway>,
     snapshot: &std::sync::RwLock<std::collections::BTreeMap<String, BackendTarget>>,
 ) {
-    let Ok(gw) = gateway.lock() else {
-        return;
-    };
+    let gw = gateway.as_ref();
     let Ok(records) = gw.list_deployments() else {
         return;
     };

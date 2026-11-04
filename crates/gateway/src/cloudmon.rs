@@ -113,13 +113,13 @@ impl Default for CloudMonitor {
 ///
 /// 首轮立即刷新一次，让设备页打开时就有数据，而不是等 5 秒。
 pub fn spawn_cloud_monitor(
-    gateway: Arc<Mutex<Gateway>>,
+    gateway: Arc<Gateway>,
     monitor: CloudMonitor,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
-        // ① 持锁：只读台账（微秒级，不含网络）
+        // ① 只读台账（微秒级，不含网络）
         let target = {
-            let Ok(gw) = gateway.lock() else { return };
+            let gw = gateway.as_ref();
             gw.active_cloud_deployment().map_err(|e| e.to_string())
         };
 
@@ -127,15 +127,12 @@ pub fn spawn_cloud_monitor(
             // 没有云端部署：本地算力场景，清空快照
             Ok(None) => monitor.store(None, None),
             Err(e) => monitor.store(None, Some(e)),
-            // ② 锁外：调用厂商接口（百毫秒级）。
-            //
-            // 这里重新取一次锁是必要的——`CloudOrchestrator` 归 `Gateway` 所有，
-            // 而它内部持有驱动注册表。为避免长时间持锁，驱动查询本身很快
-            // （一次 HTTP，无重试循环），且失败会立即返回。
+            // ② 厂商接口调用（百毫秒级）不持任何全局锁：Orchestrator
+            // 可变状态均已下沉为细粒度内部锁，网关以 Arc 只读共享。
             Ok(Some(target)) => {
                 let outcome = {
-                    let Ok(gw) = gateway.lock() else { return };
-                    query_metrics(&gw, &target)
+                    let gw = gateway.as_ref();
+                    query_metrics(gw, &target)
                 };
                 monitor.store(Some(outcome.0), outcome.1);
             }

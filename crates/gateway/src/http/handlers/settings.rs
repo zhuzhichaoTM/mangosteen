@@ -9,10 +9,7 @@ use mangosteen_core::openai::ErrorResponse;
 
 impl GatewayServer {
     pub(crate) fn get_devices(&self) -> Response {
-        let gw = match self.gateway.lock() {
-            Ok(g) => g,
-            Err(_) => return Response::text(500, "网关状态锁中毒"),
-        };
+        let gw = self.gateway.as_ref();
         let devices: Vec<serde_json::Value> = gw
             .config()
             .remote_devices
@@ -68,11 +65,8 @@ impl GatewayServer {
             Err(e) => return Response::error(&e),
         };
         let (mut cfg, store) = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
-            (gw.config().clone(), gw.config_store())
+            let gw = self.gateway.as_ref();
+            (gw.config().as_ref().clone(), gw.config_store())
         };
         if let Some(slot) = cfg.remote_devices.iter_mut().find(|d| d.id == device.id) {
             *slot = device.clone();
@@ -84,9 +78,7 @@ impl GatewayServer {
         }
         match store.save(&cfg) {
             Ok(path) => {
-                if let Ok(mut gw) = self.gateway.lock() {
-                    gw.replace_config(cfg);
-                }
+                self.gateway.replace_config(cfg);
                 Response::json(
                     200,
                     &serde_json::json!({ "ok": true, "id": device.id, "host": device.host, "port": device.port, "user": device.user, "path": path.display().to_string() }),
@@ -99,10 +91,7 @@ impl GatewayServer {
     pub(crate) fn test_device(&self, id: &str) -> Response {
         let id = percent_decode_path(id);
         let device = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             gw.config()
                 .remote_devices
                 .iter()
@@ -128,11 +117,8 @@ impl GatewayServer {
     pub(crate) fn remove_device(&self, id: &str) -> Response {
         let id = percent_decode_path(id);
         let (mut cfg, store) = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
-            (gw.config().clone(), gw.config_store())
+            let gw = self.gateway.as_ref();
+            (gw.config().as_ref().clone(), gw.config_store())
         };
         let before = cfg.remote_devices.len();
         let removed = cfg
@@ -155,10 +141,7 @@ impl GatewayServer {
         // 计费。这里按 device_id / 节点 IP 反查部署台账并销毁对应实例；
         // 销毁失败则中止删除，避免出现「节点没了但机器还在扣钱」。
         let destroyed = {
-            let mut gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             match removed.as_ref() {
                 Some((device_id, host)) => {
                     match gw.destroy_instances_bound_to_device(device_id, host) {
@@ -172,9 +155,7 @@ impl GatewayServer {
 
         match store.save(&cfg) {
             Ok(_) => {
-                if let Ok(mut gw) = self.gateway.lock() {
-                    gw.replace_config(cfg);
-                }
+                self.gateway.replace_config(cfg);
                 Response::json(
                     200,
                     &serde_json::json!({
@@ -190,10 +171,7 @@ impl GatewayServer {
 
     pub(crate) fn get_settings(&self) -> Response {
         let cfg = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
+            let gw = self.gateway.as_ref();
             gw.config().clone()
         };
 
@@ -293,11 +271,8 @@ impl GatewayServer {
         };
 
         let (mut cfg, store) = {
-            let gw = match self.gateway.lock() {
-                Ok(g) => g,
-                Err(_) => return Response::text(500, "网关状态锁中毒"),
-            };
-            (gw.config().clone(), gw.config_store())
+            let gw = self.gateway.as_ref();
+            (gw.config().as_ref().clone(), gw.config_store())
         };
 
         let mut applied: Vec<String> = Vec::new();
@@ -447,22 +422,17 @@ impl GatewayServer {
         match store.save(&cfg) {
             Ok(path) => {
                 // 同步更新内存中的配置：否则用户改完设置要重启才生效
-                if let Ok(mut gw) = self.gateway.lock() {
-                    gw.replace_config(cfg);
-                }
+                self.gateway.replace_config(cfg);
                 // 厂商密钥/参数有变更时热重建云端驱动注册表（不动隧道，
                 // 不影响活跃部署）；未生效时给出原因供 UI 提示。
                 let providers_reload = if applied.iter().any(|a| a.starts_with("providers."))
                 {
-                    match self.gateway.lock() {
-                        Ok(mut gw) => {
-                            let (hot, skipped) = gw.reload_cloud_drivers();
-                            Some(serde_json::json!({
-                                "hot_reload": hot,
-                                "skipped": skipped,
-                            }))
-                        }
-                        Err(_) => None,
+                    {
+                        let (hot, skipped) = self.gateway.reload_cloud_drivers();
+                        Some(serde_json::json!({
+                            "hot_reload": hot,
+                            "skipped": skipped,
+                        }))
                     }
                 } else {
                     None

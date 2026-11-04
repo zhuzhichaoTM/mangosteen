@@ -53,7 +53,7 @@ pub(crate) use crate::http::response::Response;
 
 /// 网关 HTTP 服务。
 pub struct GatewayServer {
-    pub(crate) gateway: Arc<Mutex<Gateway>>,
+    pub(crate) gateway: Arc<Gateway>,
     pub(crate) backend_snapshot: Arc<RwLock<std::collections::BTreeMap<String, BackendTarget>>>,
     pub(crate) require_key: bool,
     pub(crate) api_key: String,
@@ -72,24 +72,26 @@ pub struct GatewayServer {
 impl GatewayServer {
     /// 构造。
     pub fn new(
-        gateway: Arc<Mutex<Gateway>>,
+        gateway: Arc<Gateway>,
         require_key: bool,
         api_key: String,
         upstream_timeout: Duration,
     ) -> Self {
         // API 网关重启后自动恢复台账中已就绪模型的本地隧道映射。
         // 只恢复进程内连接状态，不创建实例、不下载模型、不重启节点。
-        if let Ok(mut gw) = gateway.lock() {
+        {
+            let gw = gateway.as_ref();
             let _ = gw.restore_deployment_tunnels();
         }
         let backend_snapshot = Arc::new(RwLock::new(std::collections::BTreeMap::new()));
         // 只读台账，把**全部**已就绪模型一次性做成业务转发快照。
         //
         // 绝不能调用 `active_backend()`：它只返回一个模型，而且会触发
-        // Orchestrator::refresh。部署线程执行节点配置/下载时会长时间持有
-        // Gateway 锁，若对话请求在快照中找不到自己的模型再回退拿这把锁，
-        // 就会被部署流程阻塞。业务转发应只读快照，部署控制完全走另一条路径。
-        if let Ok(gw) = gateway.lock() {
+        // Orchestrator::refresh。业务转发只读快照，部署控制完全走另一条
+        // 路径；Orchestrator 可变状态已下沉为细粒度内部锁，此处不再有
+        // 全局锁竞争。
+        {
+            let gw = gateway.as_ref();
             if let Ok(records) = gw.list_deployments() {
                 if let Ok(mut snapshot) = backend_snapshot.write() {
                     for record in records {

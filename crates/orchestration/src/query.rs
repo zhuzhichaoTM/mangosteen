@@ -126,7 +126,7 @@ impl Orchestrator {
     ///
     /// 本地引擎可能已崩溃、云端实例可能被厂商回收，
     /// 因此「台账说 Ready」不等于「现在真的能服务」。
-    pub fn refresh(&mut self) -> MnResult<Vec<ActiveDeployment>> {
+    pub fn refresh(&self) -> MnResult<Vec<ActiveDeployment>> {
         let records = self.state.list_active()?;
         let mut out = Vec::new();
 
@@ -175,8 +175,8 @@ impl Orchestrator {
     ///
     /// 纯云端架构下只取最近就绪的云端部署（本地推理由 Ollama 承担，
     /// 不在 Mangosteen 的部署编排范围内）。
-    pub fn active_backend(&mut self) -> MnResult<BackendTarget> {
-        if let Some((model_id, port)) = self.remote_inference_routes.iter().next() {
+    pub fn active_backend(&self) -> MnResult<BackendTarget> {
+        if let Some((model_id, port)) = self.routes().iter().next() {
             return Ok(BackendTarget {
                 host: "127.0.0.1".to_string(),
                 port: *port,
@@ -207,9 +207,9 @@ impl Orchestrator {
     ///
     /// 指定了具体模型却**没在运行**时必须明确报错，而不是悄悄退回自动：
     /// 静默换模型比报错更难排查（用户会以为「就是这个模型答的」）。
-    pub fn active_backend_for(&mut self, want: Option<&str>) -> MnResult<BackendTarget> {
+    pub fn active_backend_for(&self, want: Option<&str>) -> MnResult<BackendTarget> {
         if let Some(id) = want.filter(|x| *x != "auto") {
-            if let Some(port) = self.remote_inference_routes.get(id) {
+            if let Some(port) = self.routes().get(id) {
                 return Ok(BackendTarget {
                     host: "127.0.0.1".to_string(),
                     port: *port,
@@ -217,7 +217,7 @@ impl Orchestrator {
                     origin_label: "remote-inference".to_string(),
                 });
             }
-        } else if let Some((model_id, port)) = self.remote_inference_routes.iter().next() {
+        } else if let Some((model_id, port)) = self.routes().iter().next() {
             return Ok(BackendTarget {
                 host: "127.0.0.1".to_string(),
                 port: *port,
@@ -339,14 +339,15 @@ impl Orchestrator {
         provider: &str,
         instance_id: &str,
     ) -> MnResult<Option<mangosteen_core::cloud::InstanceMetrics>> {
-        let Some(orch) = self.cloud.as_ref() else {
+        let cloud = self.cloud();
+        let Some(orch) = cloud.as_ref() else {
             // 未配置云服务商：不是错误，设备页显示「未启用云端」即可
             return Ok(None);
         };
         orch.instance_metrics(Some(provider), instance_id)
     }
     /// 状态快照。
-    pub fn status(&mut self) -> MnResult<GatewayStatus> {
+    pub fn status(&self) -> MnResult<GatewayStatus> {
         let engine_path = self.local_engine.locate().ok();
         // 只读缓存：`--version` 在部分安装上要 20~30 秒，绝不能在请求路径上跑
         let engine_version = engine_path
@@ -358,7 +359,7 @@ impl Orchestrator {
             hardware: self.assessor.hardware().describe(),
             // 「已就绪」而非「已启用」：凭证缺失的服务商不能降级，
             // 展示成已就绪会误导用户以为本地不足时一定能上云。
-            providers: mangosteen_provider::build_registry(&self.config)
+            providers: mangosteen_provider::build_registry(&self.config())
                 .registry
                 .names()
                 .iter()

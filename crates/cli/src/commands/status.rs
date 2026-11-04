@@ -17,7 +17,7 @@ const ALLOWED: &[&str] = &["config", "json", "quiet"];
 /// `status` 入口。
 pub fn run(args: Args) -> MnResult<i32> {
     reject_unknown_options(&args, ALLOWED)?;
-    let mut gw = build_gateway(&args)?;
+    let gw = build_gateway(&args)?;
     let st = gw.status()?;
 
     if args.has("json") {
