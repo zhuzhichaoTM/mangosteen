@@ -703,7 +703,9 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
             self.ensure_capacity(&gpu_type, gpu, cpu, memory_gb)?;
         }
 
-        // 3. 提交创建
+        // 3. 提交创建（自带随机密码：厂商自动生成的密码不通过 API 返回，
+        //    拿不到就无法完成首次 SSH 免密配置）
+        let login_password = generate_login_password();
         let req = CreateRequest {
             gpu_type: gpu_type.clone(),
             gpu,
@@ -718,6 +720,8 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
             name: Some(self.config.instance_name(name.unwrap_or(""))),
             remark: Some(self.config.remark.clone()),
             quantity: None,
+            login_mode: Some("Password".to_string()),
+            password_b64: Some(super::base64::encode(login_password.as_bytes())),
         };
         let resp = self.client.create_instance(&req)?;
         let id = resp
@@ -732,10 +736,14 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
 
         // 4. 补齐详情。失败也要返回带 ID 的占位实例——
         //    否则编排器拿不到 ID，回滚就无从谈起，实例会持续计费。
-        match self.describe_raw(&id) {
-            Ok(u) => Ok(mapping::to_instance(&self.name, &u, &self.config.image_id)),
-            Err(_) => Ok(self.placeholder_instance(&id, &gpu_type, gpu, cpu, memory_gb, name)),
-        }
+        //    describe 响应不含密码，这里必须把创建时设置的密码写回，
+        //    供给流程的第一步（用密码装公钥）才有凭证可用。
+        let mut inst = match self.describe_raw(&id) {
+            Ok(u) => mapping::to_instance(&self.name, &u, &self.config.image_id),
+            Err(_) => self.placeholder_instance(&id, &gpu_type, gpu, cpu, memory_gb, name),
+        };
+        inst.network.ssh_password = Some(login_password);
+        Ok(inst)
     }
 
     fn start(&self, instance_id: &str) -> MnResult<Instance> {
@@ -952,6 +960,29 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
             }
         }
     }
+}
+
+/// 生成满足厂商密码规范的随机登录密码（16 位，含大小写、数字、特殊字符）。
+///
+/// 项目依赖极简（不引入 rand）：用纳秒时钟 + 进程 ID 做种子的 xorshift。
+/// 前 4 位固定覆盖四类字符，保证任何随机位组合都满足复杂度要求。
+fn generate_login_password() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    const TABLE: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%&*+=";
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() ^ (d.subsec_nanos() as u64).rotate_left(32))
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut state = seed | 1;
+    let mut pw = String::from("Mn7#");
+    for _ in 0..12 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        pw.push(TABLE[(state % TABLE.len() as u64) as usize] as char);
+    }
+    pw
 }
 
 /// 判断错误是否是「实例不存在」。

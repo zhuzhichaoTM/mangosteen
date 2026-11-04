@@ -503,6 +503,11 @@ impl CloudOrchestrator {
         let deadline = Instant::now() + self.config.start_timeout;
         let mut started = false;
 
+        // describe/start 的响应不含密码字段（厂商不回传），直接覆盖会把
+        // 创建时设置的登录密码冲掉——后续「用密码装公钥」就没凭证了。
+        // 这里记住原密码，刷新后补回（仅当新值没带密码时）。
+        let login_password = instance.network.ssh_password.clone();
+
         loop {
             match instance.state {
                 InstanceState::Running => return Ok(()),
@@ -524,6 +529,9 @@ impl CloudOrchestrator {
                     // 创建后处于关机态 → 主动启动
                     *instance = driver.start(&instance.id)?;
                     started = true;
+                    if instance.network.ssh_password.is_none() {
+                        instance.network.ssh_password = login_password.clone();
+                    }
                 }
                 _ => {}
             }
@@ -547,6 +555,9 @@ impl CloudOrchestrator {
             }
             std::thread::sleep(self.config.poll_interval);
             *instance = driver.describe(&instance.id)?;
+            if instance.network.ssh_password.is_none() {
+                instance.network.ssh_password = login_password.clone();
+            }
         }
     }
 

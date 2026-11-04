@@ -83,6 +83,17 @@ pub struct CreateRequest {
     pub remark: Option<String>,
     /// 购买时长（`Month` 为月数，`Day` 为天数）
     pub quantity: Option<u32>,
+    /// 登录方式。`Some("Password")` 时必须同时给出 [`Self::password_b64`]。
+    ///
+    /// ## 为什么创建时要带上密码
+    ///
+    /// 不带密码创建时，厂商自动生成 root 密码且**不通过任何 API 返回**
+    /// （只发到控制台/邮件）——我们永远拿不到它，SSH 免密配置的第一步
+    /// （用密码装公钥）就必然 `Permission denied`。创建时自带密码是
+    /// 唯一可靠的取法。
+    pub login_mode: Option<String>,
+    /// root 密码，**Base64 编码后**的原值（厂商要求）。
+    pub password_b64: Option<String>,
 }
 
 /// 库存检查请求。
@@ -672,6 +683,9 @@ impl<T: Transport> CompshareClient<T> {
         }
         if let Some(q) = req.quantity {
             p.set_i64("Quantity", i64::from(q));
+        }
+        if let (Some(mode), Some(pw)) = (&req.login_mode, &req.password_b64) {
+            p.set("LoginMode", mode.clone()).set("Password", pw.clone());
         }
         p.set_json(
             "Disks",
@@ -1334,6 +1348,8 @@ mod tests {
             name: Some("mangosteen-test".into()),
             remark: Some("managed-by-mangosteen".into()),
             quantity: None,
+            login_mode: Some("Password".into()),
+            password_b64: Some("cGFzc3dvcmQ=".into()),
         };
         let r = c.create_instance(&req).unwrap();
         assert_eq!(r.uhost_ids, vec!["uhost-new"]);
@@ -1343,6 +1359,10 @@ mod tests {
         assert!(body.contains("GpuType=4090"), "{body}");
         assert!(body.contains("GPU=1"), "{body}");
         assert!(body.contains("CPU=16"), "{body}");
+        // 创建必须自带密码：厂商自动生成的密码不通过 API 返回，
+        // 拿不到就无法完成首次 SSH 免密配置（实测踩到 Permission denied）。
+        assert!(body.contains("LoginMode=Password"), "{body}");
+        assert!(body.contains("Password=cGFzc3dvcmQ%3D"), "{body}");
         // 内存必须是 MB
         assert!(body.contains("Memory=65536"), "{body}");
         // 磁盘必须扁平为 Disks.0.*
