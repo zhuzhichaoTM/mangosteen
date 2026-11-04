@@ -82,6 +82,18 @@ impl Orchestrator {
         {
             return None;
         }
+        // ## 明确要云厂商时同样不能兜底到「第一个已保存设备」
+        //
+        // `target=Cloud` 表示调用方已经决定创建/复用厂商实例（部署页
+        // 「部署」按钮的默认路径）。此时若配置里恰好登记过任意一台
+        // 自定义节点，旧兜底会把请求劫持成「部署到那台机器」——实测
+        // 表现为：新实例已创建成功，部署却去连一台密码为空的旧设备，
+        // 报「自定义节点未提供登录密码」，而新实例成为无人认领的
+        // 计费孤儿。设备兜底只对「本地优先、跑不动才找已登记机器」
+        // 的 Auto/Local 请求生效。
+        if req.target == crate::ComputeTarget::Cloud {
+            return None;
+        }
         self.config
             .remote_devices
             .first()
