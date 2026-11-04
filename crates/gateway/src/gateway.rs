@@ -171,7 +171,6 @@ impl GatewayBuilder {
                         start_timeout: Duration::from_secs(
                             self.config.scheduler.provision_timeout_secs,
                         ),
-                        // 密码供隧道认证用（优云这类只支持密码登录的厂商必需）
                         ssh_password: self
                             .config
                             .cloud

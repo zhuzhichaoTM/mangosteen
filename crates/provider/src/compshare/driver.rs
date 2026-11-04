@@ -877,34 +877,6 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
     /// `GetCompShareInstanceMonitor` 的 `Region` **必填且必须与实例所在地域一致**
     /// （这是这条链路最容易出错的地方）。如果直接用客户端配置的地域去查，
     /// 而实例其实建在别的地域，厂商会对该实例静默返回空 `List`——
-    /// 表现为「有实例但永远没有监控数据」，极难排查。
-    ///
-    /// 因此这里先不限地域查出实例真实所在地域，再用该地域派生客户端发监控请求。
-    fn reset_root_password(&self, instance_id: &str, password: &str) -> MnResult<()> {
-        // 厂商要求密码同时含大写、小写、数字与特殊字符，且长度有限。
-        // 这里先自检：把「密码不合规」在本地就报出来，比等厂商回 8314
-        // 再翻译成人话要快得多。
-        let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
-        let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
-        let has_digit = password.chars().any(|c| c.is_ascii_digit());
-        let has_special = password.chars().any(|c| !c.is_ascii_alphanumeric());
-        if !(has_upper && has_lower && has_digit && has_special) {
-            return Err(MnError::config(
-                "cloud.ssh_password",
-                "密码必须同时包含大写字母、小写字母、数字与特殊字符（优云智算的强制要求）",
-            ));
-        }
-
-        let r = self.client.reset_instance_password(instance_id, password)?;
-        if r.ret_code != 0 {
-            return Err(MnError::Provider {
-                provider: self.name.clone(),
-                code: r.ret_code.to_string(),
-                message: format!("设置实例密码失败：{}", r.message),
-            });
-        }
-        Ok(())
-    }
 
     fn instance_metrics(&self, instance_id: &str) -> MnResult<Option<InstanceMetrics>> {
         // 1. 定位实例真实地域（不限地域查询，避免误判）

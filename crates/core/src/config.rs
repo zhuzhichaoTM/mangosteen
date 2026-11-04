@@ -155,13 +155,10 @@ impl ProviderConfig {
 /// 云端通用配置（与具体服务商无关）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CloudConfig {
-    /// 实例 root 登录密码。
+    /// 自定义节点 root 登录密码（云端实例由厂商 API 返回，不使用本字段）。
     ///
-    /// ## 为什么放在通用段而不是服务商段
-    ///
-    /// 「建完实例要能登录进去」是所有服务商的共性需求，只是达成方式不同：
-    /// 支持注入 SSH key 的服务商用 `identity_file`（不需要本字段），
-    /// 只支持密码登录的（如优云智算）需要本字段。
+    /// 云端实例通过厂商 API (`DescribeCompShareInstance`) 返回密码，
+    /// 本字段仅用于自定义节点的首次 SSH 免密配置。
     ///
     /// ## 安全
     ///
@@ -171,7 +168,7 @@ pub struct CloudConfig {
     /// [cloud]
     /// ssh_password = { file = "/path/to/pw" }    # 文件内容为单行密码
     /// # 或
-    /// ssh_password = { env = "MN_CLOUD_SSH_PASSWORD" }
+    /// ssh_password = { env = "MN_NODE_SSH_PASSWORD" }
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_password: Option<SecretRef>,

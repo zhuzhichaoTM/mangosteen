@@ -24,7 +24,6 @@
 //! `provision` 返回 `Err` 时，云端不应残留任何由本次调用创建的资源。
 //! 若回滚本身也失败，必须把「残留实例 ID」写进错误消息，让用户能手工清理。
 
-use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
 use mangosteen_core::cloud::{AvailableSpec, DriverRegistry, Instance, InstanceState};
@@ -118,11 +117,10 @@ pub struct OrchestratorConfig {
     pub tunnel_timeout: Duration,
     /// 轮询间隔
     pub poll_interval: Duration,
-    /// 实例 root 登录密码（`None` 表示靠密钥/agent 认证）。
+    /// 实例 root 登录密码（仅用于隧道认证，不用于重置密码）。
     ///
-    /// 优云智算这类厂商不支持创建时注入 SSH key，只能由我们主动设密码。
-    /// 设完之后隧道用它认证，ssh 通过 `SSH_ASKPASS` 取——见
-    /// [`TunnelSpec::password`]。
+    /// 云端实例密码由厂商 API 返回，本字段仅用于厂商不返回密码时的兜底。
+    /// 不会调用 `reset_root_password` API。
     pub ssh_password: Option<String>,
     /// 云端工作目录（模型、二进制、日志都放这儿）
     pub remote_workdir: String,
@@ -820,11 +818,7 @@ impl CloudOrchestrator {
             )],
             control_master: true,
             allow_unready_remote: false,
-            password: instance
-                .network
-                .ssh_password
-                .clone()
-                .or_else(|| self.config.ssh_password.clone()),
+            password: instance.network.ssh_password.clone(),
         })
     }
 
@@ -1095,86 +1089,6 @@ pub fn configure_existing_ssh_access(
     })
 }
 
-fn vendor_ssh_target(
-    driver: &dyn mangosteen_core::cloud::ProviderDriver,
-    instance: &Instance,
-    config: &OrchestratorConfig,
-) -> MnResult<mangosteen_device::remote::SshTarget> {
-    let host = instance
-        .network
-        .ssh_host
-        .clone()
-        .ok_or_else(|| MnError::Network {
-            stage: "读取 SSH 信息".to_string(),
-            reason: format!(
-                "服务商 {} 未返回实例 {} 的 SSH 地址，无法建立隧道",
-                instance.provider, instance.id
-            ),
-        })?;
-    let port = instance.network.ssh_port.unwrap_or(22);
-    // 本次重置使用的密码必须与 ssh-copy-id/SSH 探测使用的密码完全一致。
-    // 配置密码优先；只有未配置重置密码时才使用厂商下发密码。
-    let password = config
-        .ssh_password
-        .clone()
-        .or_else(|| instance.network.ssh_password.clone());
-
-    let password_target = mangosteen_device::remote::SshTarget {
-        host: host.clone(),
-        port,
-        user: "root".to_string(),
-        password: password.clone(),
-        identity_file: None,
-    };
-    if password.is_none() {
-        return Err(MnError::Network {
-            stage: "SSH 登录".to_string(),
-            reason: "节点未提供可用 SSH 密码，无法继续密码认证".to_string(),
-        });
-    }
-    // “重置密码 → 等待生效 → 清理目标指纹 → ssh-copy-id → 密钥确认”
-    // 是节点配置环境的一部分；每次尝试都重新执行，最多 3 次。
-    let mut last_error = String::new();
-    for attempt in 1..=3 {
-        if let Some(pw) = config.ssh_password.as_deref() {
-            driver.reset_root_password(&instance.id, pw)?;
-            std::thread::sleep(Duration::from_secs(2));
-        }
-        wait_tcp(&host, port, config.start_timeout, config.poll_interval)?;
-        match mangosteen_device::remote::install_ssh_copy_id(&password_target) {
-            Ok(key) => {
-                let key_target = mangosteen_device::remote::SshTarget {
-                    host: host.clone(),
-                    port,
-                    user: "root".to_string(),
-                    password: None,
-                    identity_file: Some(key),
-                };
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    match mangosteen_device::remote::ssh_exec(&key_target, "true", 5) {
-                        Ok(_) => return Ok(key_target),
-                        Err(_e) if Instant::now() < deadline => {
-                            std::thread::sleep(Duration::from_millis(250));
-                        }
-                        Err(e) => {
-                            last_error = format!("第 {attempt} 次密钥确认失败：{e}");
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(e) => last_error = format!("第 {attempt} 次 ssh-copy-id 失败：{e}"),
-        }
-        if attempt < 3 {
-            std::thread::sleep(Duration::from_secs(1));
-        }
-    }
-    Err(MnError::Network {
-        stage: "节点配置环境 / SSH 免密登录".to_string(),
-        reason: format!("连续 3 次未能确认 SSH 公钥登录成功：{last_error}"),
-    })
-}
 
 /// 为云端实例建立**密钥认证**的 SSH 通道。
 ///
@@ -1395,8 +1309,7 @@ impl CloudOrchestrator {
         &self,
         instance: &Instance,
     ) -> MnResult<mangosteen_device::remote::SshTarget> {
-        let driver = self.registry.get(&instance.provider)?;
-        vendor_ssh_target(driver, instance, &self.config)
+        vendor_password_target(instance, &self.config)
     }
 
     /// **启动模型阶段**：在已准备好的节点上拉起 `llama-server`。
@@ -1462,7 +1375,7 @@ fn finish_provision(
     config: &OrchestratorConfig,
     on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> MnResult<Provisioned> {
-    let target = match vendor_ssh_target(driver, &instance, config) {
+    let target = match vendor_password_target(&instance, config) {
         Ok(t) => t,
         Err(e) => {
             let cleanup = stop_with_retry(driver, &instance.id);
@@ -1871,36 +1784,6 @@ fn is_retryable_create_error(e: &MnError) -> bool {
     PATTERNS.iter().any(|p| lower.contains(p))
 }
 
-/// 等一个 TCP 端口可连（用于等 sshd 接受新设的密码后开始监听）。
-fn wait_tcp(host: &str, port: u16, budget: Duration, interval: Duration) -> MnResult<()> {
-    let started = Instant::now();
-    // 主机名要解析成 SocketAddr；用 ToSocketAddrs 而不是直接拼字符串，
-    // 否则 `host:port` 里的 IPv6 会解析失败。
-    let addrs: Vec<std::net::SocketAddr> = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| MnError::Network {
-            stage: "解析实例地址".to_string(),
-            reason: format!("{host}:{port} 无法解析：{e}"),
-        })?
-        .collect();
-    while started.elapsed() < budget {
-        if addrs
-            .iter()
-            .any(|a| std::net::TcpStream::connect_timeout(a, Duration::from_millis(800)).is_ok())
-        {
-            return Ok(());
-        }
-        std::thread::sleep(interval);
-    }
-    Err(MnError::Network {
-        stage: "等待 SSH 可用".to_string(),
-        reason: format!(
-            "{host}:{port} 在 {}s 内无法连接。实例可能仍在初始化，\
-             或安全组未放行该端口",
-            budget.as_secs()
-        ),
-    })
-}
 
 /// 在错误消息里附加「资源清理结果」。
 ///
@@ -2144,7 +2027,6 @@ mod tests {
 
     fn cfg() -> OrchestratorConfig {
         OrchestratorConfig {
-            ssh_password: None,
             remote_workdir: "/root/mangosteen".to_string(),
             llama_server_url: String::new(),
             provision_timeout: Duration::from_millis(200),

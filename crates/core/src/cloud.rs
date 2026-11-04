@@ -478,19 +478,6 @@ pub trait ProviderDriver: Send + Sync {
     /// ## 为什么需要这个能力
     ///
     /// 建立 SSH 隧道总得有个认证方式。允许创建时注入 SSH key 的厂商不需要
-    /// 它（用 `identity_file` 即可），但优云智算这类**只支持密码登录**的
-    /// 厂商必须由我们主动设一个密码，否则「一键部署」会卡在隧道那一步。
-    ///
-    /// 默认实现返回「不支持」：新增服务商不必实现它，上层会在需要时
-    /// 给出明确错误，而不是静默失败。
-    fn reset_root_password(&self, instance_id: &str, password: &str) -> MnResult<()> {
-        let _ = (instance_id, password);
-        Err(MnError::Provider {
-            provider: self.name().to_string(),
-            code: "reset_password_unsupported".to_string(),
-            message: "该服务商不支持由程序设置实例密码，请在控制台配置 SSH 密钥".to_string(),
-        })
-    }
 
     /// 查询实例实时监控（CPU / 内存 / GPU / 磁盘使用率）。
     ///
