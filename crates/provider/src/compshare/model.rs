@@ -171,6 +171,13 @@ pub struct UHost {
     /// SSH 登录命令，形如 `ssh root@1.2.3.4 -p 60022`
     #[serde(rename = "SshLoginCommand", default)]
     pub ssh_login_command: String,
+    /// 登录密码，**Base64 编码**（厂商描述接口返回的就是编码值）。
+    ///
+    /// 这是「创建成功后获取登录密码」的唯一 API 途径：创建响应不回传
+    /// 密码，但 describe 会带上（无论密码是创建时指定还是厂商生成）。
+    /// 解码后写入 `network.ssh_password`，SSH 免密配置才有凭证可用。
+    #[serde(rename = "Password", default)]
+    pub password_b64: String,
     /// IP 列表
     #[serde(rename = "IPSet", default, deserialize_with = "de_vec_or_null")]
     pub ip_set: Vec<IpInfo>,

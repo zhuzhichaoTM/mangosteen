@@ -328,14 +328,28 @@ pub fn network_endpoint(uhost: &UHost) -> NetworkEndpoint {
         inference_host: None,
         inference_port: None,
         public_url: None,
-        // 优云智算不返回密码，由上层主动设置后经 TunnelSpec 传入
-        ssh_password: None,
+        // describe 响应携带 Base64 编码的登录密码（无论密码来自创建时
+        // 指定还是厂商生成）。解码失败或为空就保持 None，由上层决定
+        // 是否用配置里的统一密码兜底。
+        ssh_password: decode_password(&uhost.password_b64),
         ssh_login_command: if login_cmd.is_empty() {
             None
         } else {
             Some(login_cmd.to_string())
         },
     }
+}
+
+/// 解码厂商返回的 Base64 登录密码；空值或非法编码返回 `None`。
+fn decode_password(b64: &str) -> Option<String> {
+    let trimmed = b64.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    crate::compshare::base64::decode(trimmed)
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// 厂商百分数 → 0~1 比例。
@@ -1022,6 +1036,8 @@ mod tests {
             instance_type: "UHost".into(),
             os_type: "Linux".into(),
             ssh_login_command: "ssh root@203.0.113.10 -p 60022".into(),
+            // 厂商 describe 返回 Base64 密码（TW43... 是真实采集样本）
+            password_b64: "TW43I2I9NypBOVo2MjZMJQ==".into(),
             ip_set: vec![IpInfo {
                 ip: "203.0.113.10".into(),
                 kind: "Bgp".into(),
