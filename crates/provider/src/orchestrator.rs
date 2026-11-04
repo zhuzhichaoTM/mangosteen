@@ -589,6 +589,65 @@ impl CloudOrchestrator {
         errors
     }
 
+    /// **真正销毁**实例（区别于 [`Self::teardown`] 的「关机保留」）。
+    ///
+    /// `cloud destroy --instance` 的语义就是销毁：实例消失、计费彻底停止。
+    /// 此前的实现错拿了 [`Self::teardown`]——只关机不删除，CLI 却输出
+    /// 「实例已销毁」，用户以为资源释放了，实际实例一直挂在厂商那里。
+    ///
+    /// 销毁前的关机由驱动内部保证（Terminate 仅对 Stopped 有效）；厂商
+    /// 处于异步任务中（8903）时按 [`stop_with_retry`] 的节奏重试。
+    pub fn destroy_instance(&mut self, provider: &str, instance_id: &str) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // 隧道关了实例就不可达，先清理本地侧资源（失败只记录）
+        if let Err(e) = self.tunnels.close_all() {
+            errors.push(format!("关闭隧道失败：{e}"));
+        }
+
+        match self.registry.get(provider) {
+            Ok(driver) => {
+                match driver.describe(instance_id) {
+                    // 已是终态：幂等成功
+                    Ok(inst) if inst.state == InstanceState::Destroyed => {}
+                    Ok(_) => {
+                        const ATTEMPTS: usize = 6;
+                        let mut last: Option<MnError> = None;
+                        for i in 0..ATTEMPTS {
+                            match driver.destroy(instance_id) {
+                                Ok(()) => {
+                                    last = None;
+                                    break;
+                                }
+                                Err(e) => {
+                                    let text = e.to_string().to_ascii_lowercase();
+                                    let transient = text.contains("8903")
+                                        || text.contains("in the task")
+                                        || text.contains("try again later");
+                                    last = Some(e);
+                                    if !transient || i + 1 == ATTEMPTS {
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_secs(3 + 2 * i as u64));
+                                }
+                            }
+                        }
+                        if let Some(e) = last {
+                            errors.push(format!(
+                                "销毁实例 {instance_id} 失败（可能仍在计费）：{e}"
+                            ));
+                        }
+                    }
+                    // 查不到实例：可能已删除，视为幂等成功
+                    Err(_) => {}
+                }
+            }
+            Err(e) => errors.push(format!("找不到服务商驱动 {provider}：{e}")),
+        }
+
+        errors
+    }
+
     /// 构造某个实例的 SSH 目标（供「启动/停止服务」用）。
     ///
     /// ## 必须与供给流程用同一套认证策略
@@ -1752,6 +1811,7 @@ fn stop_with_retry(
         reason: "未知失败".to_string(),
     }))
 }
+
 
 /// 创建实例失败是否值得换下一个候选重试。
 ///

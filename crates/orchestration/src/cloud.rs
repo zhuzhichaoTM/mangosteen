@@ -295,7 +295,7 @@ impl Orchestrator {
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
             })?;
-        Ok(o.teardown(provider, instance_id))
+        Ok(o.destroy_instance(provider, instance_id))
     }
 }
 
