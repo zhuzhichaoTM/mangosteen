@@ -988,10 +988,21 @@ fn vendor_password_target(
             ),
         })?;
     let port = instance.network.ssh_port.unwrap_or(22);
-    let password = config
+    // ## 密码优先级：实例自带 > 配置统一密码
+    //
+    // 厂商为**每台实例**生成独立密码（创建时指定或厂商随机），
+    // `DescribeCompShareInstance` 会通过 `Password` 字段回传。配置里的
+    // `ssh_password` 只是「用户手动填的统一密码」，对厂商实例通常早已
+    // 失效（换机、重建、或从未对上）。
+    //
+    // 旧实现把配置密码放在前面，于是只要用户填过一次，就会永久覆盖
+    // 厂商真实密码——每台新实例都拿旧密码认证，`Permission denied`
+    // 必然发生，且现象是「密码明明对却登不上」，极难定位。
+    let password = instance
+        .network
         .ssh_password
         .clone()
-        .or_else(|| instance.network.ssh_password.clone());
+        .or_else(|| config.ssh_password.clone());
     if password.is_none() {
         return Err(MnError::Network {
             stage: "读取 SSH 信息".to_string(),
