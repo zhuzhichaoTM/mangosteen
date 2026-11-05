@@ -283,6 +283,7 @@ impl Orchestrator {
                 &ssh,
                 cloud.engine_port,
                 false,
+                Some(cloud.engine_port),
             );
             if cloud.device_id.is_some() {
                 let _ = self.tunnels().close(&spec);
@@ -531,7 +532,7 @@ impl Orchestrator {
         self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
 
         let spec =
-            mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true);
+            mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true, Some(cloud_plan.engine_port));
         let local_port = self
             .tunnels()
             .establish(&spec, Duration::from_secs(30))?
@@ -815,6 +816,7 @@ impl Orchestrator {
                 &ssh,
                 cloud_plan.engine_port,
                 false,
+                Some(cloud_plan.engine_port),
             );
             let _ = self.tunnels().close(&spec);
             self.tunnels()
@@ -947,7 +949,7 @@ impl Orchestrator {
         //    其它模型的本地转发一起断掉。
         if let Some(c) = own.as_ref() {
             let spec =
-                mangosteen_provider::orchestrator::tunnel_spec_for(ssh, c.engine_port, false);
+                mangosteen_provider::orchestrator::tunnel_spec_for(ssh, c.engine_port, false, Some(c.engine_port));
             if c.device_id.is_some() {
                 let _ = self.tunnels().close(&spec);
             } else if let Some(o) = self.cloud().as_mut() {

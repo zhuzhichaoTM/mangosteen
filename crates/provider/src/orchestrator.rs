@@ -774,7 +774,7 @@ impl CloudOrchestrator {
     ) -> MnResult<String> {
         let driver = self.registry.get(provider)?;
         let instance = driver.describe(instance_id)?;
-        let spec = self.tunnel_spec_for(&instance, plan)?;
+        let spec = self.tunnel_spec_for(&instance, plan, Some(plan.engine_port))?;
         // 优先用 heal：隧道已存在且健康时直接复用，断了则原地重建。
         // 直接 establish 也能复用，但会绕过「按远端端口定位」的清理逻辑，
         // 残留的 ssh 进程会占着本地端口不放。
@@ -798,7 +798,12 @@ impl CloudOrchestrator {
     }
 
     /// 由实例信息与方案构造隧道参数（供给与「启动服务」共用）。
-    fn tunnel_spec_for(&self, instance: &Instance, plan: &CloudPlan) -> MnResult<TunnelSpec> {
+    fn tunnel_spec_for(
+        &self,
+        instance: &Instance,
+        plan: &CloudPlan,
+        local_port: Option<u16>,
+    ) -> MnResult<TunnelSpec> {
         let ssh_host = instance
             .network
             .ssh_host
@@ -813,7 +818,7 @@ impl CloudOrchestrator {
             ssh_user: "root".to_string(),
             identity_file: None,
             forwards: vec![mangosteen_core::net::PortForward::loopback(
-                0,
+                local_port.unwrap_or(0),
                 plan.engine_port,
             )],
             control_master: true,
@@ -1147,13 +1152,14 @@ pub fn tunnel_spec_for(
     ssh: &mangosteen_device::remote::SshTarget,
     remote_port: u16,
     allow_unready_remote: bool,
+    local_port: Option<u16>,
 ) -> TunnelSpec {
     TunnelSpec {
         ssh_host: ssh.host.clone(),
         ssh_port: ssh.port,
         ssh_user: ssh.user.clone(),
         identity_file: ssh.identity_file.clone(),
-        forwards: vec![mangosteen_core::net::PortForward::loopback(0, remote_port)],
+        forwards: vec![mangosteen_core::net::PortForward::loopback(local_port.unwrap_or(0), remote_port)],
         control_master: true,
         // 两段式部署：设备配置阶段就建隧道，此时引擎还没起，
         // 不能要求转发目标立刻可达。
@@ -1215,7 +1221,7 @@ impl CloudOrchestrator {
             }
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
             let ssh = ensure_key_target(&instance, &self.config)?;
-            let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(plan.engine_port));
             let local_port = self
                 .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
@@ -1243,7 +1249,7 @@ impl CloudOrchestrator {
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
                 let ssh = ensure_key_target(&instance, &self.config)?;
-                let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
+                let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(plan.engine_port));
                 let local_port = self
                     .tunnels()
                     .establish(&spec, self.config.tunnel_timeout)?
@@ -1283,7 +1289,7 @@ impl CloudOrchestrator {
             // 不再依赖密码 askpass（它对时序极敏感，是本模块最脆的一环）。
             let ssh = ensure_key_target(&instance, &self.config)?;
             // 节点创建完成后只建立基础隧道；模型与引擎准备由编排层按阶段执行。
-            let spec = tunnel_spec_for(&ssh, plan.engine_port, true);
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(plan.engine_port));
             let local_port = self
                 .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
@@ -1331,7 +1337,7 @@ impl CloudOrchestrator {
         ssh: &mangosteen_device::remote::SshTarget,
         remote_port: u16,
     ) -> MnResult<u16> {
-        let spec = tunnel_spec_for(ssh, remote_port, true);
+        let spec = tunnel_spec_for(ssh, remote_port, true, Some(remote_port));
         Ok(self
             .tunnels()
             .establish(&spec, self.config.tunnel_timeout)?
@@ -1349,7 +1355,7 @@ impl CloudOrchestrator {
         ssh: &mangosteen_device::remote::SshTarget,
         remote_port: u16,
     ) -> MnResult<u16> {
-        let spec = tunnel_spec_for(ssh, remote_port, false);
+        let spec = tunnel_spec_for(ssh, remote_port, false, Some(remote_port));
         // 严格模式前主动关闭同一目标的旧隧道。旧隧道可能是配置阶段
         // 用 allow_unready_remote 建立的惰性转发：SSH 进程还活着，但
         // 远端端口并未真正转发，继续复用会表现为本地 connection refused。
@@ -1400,7 +1406,7 @@ fn finish_provision(
         }
     }
 
-    let spec = tunnel_spec_for(&target, plan.engine_port, false);
+    let spec = tunnel_spec_for(&target, plan.engine_port, false, Some(plan.engine_port));
     let local_port = match tunnels.establish(&spec, config.tunnel_timeout) {
         Ok(t) => t.local_port,
         Err(e) => {
@@ -2033,6 +2039,7 @@ mod tests {
             start_timeout: Duration::from_millis(300),
             tunnel_timeout: Duration::from_millis(200),
             poll_interval: Duration::from_millis(10),
+            ssh_password: None,
         }
     }
 

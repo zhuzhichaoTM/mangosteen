@@ -643,7 +643,7 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
   <div class="view" id="v-deploy" hidden data-page-node-id="GJ6GHAp8Vcex90X66ZLc5I">
     <div class="pane" data-page-node-id="EEh1jLEORSW5015XofeBbb"><div class="pane-narrow" data-page-node-id="sX8ejSvdOvgZCJydkyeXo7">
       <h1 data-page-node-id="B4EE8PyIVgM8QQGnB64ziW">模型部署</h1>
-      <div class="sub" data-page-node-id="CD80AVl4dVgFx5rtzLB1DB">进行模型评估、GPU 节点选择、节点配置、模型下载和加载</div>
+      <div class="sub" data-page-node-id="CD80AVl4dVgFx5rtzLB1DB">进行模型评估、设备选择、设备配置、模型下载和加载</div>
       <div class="card deploy-content" data-page-node-id="NuWQllqSqCykcOFBlsmsQZ">
         <div id="dp-chain" hidden data-page-node-id="lOGsFdlAPvzN07KOw984pc">
           <div class="row" style="justify-content:space-between;align-items:flex-start" data-page-node-id="CRuEJBseWgYTDB4TSbJiPK">
@@ -694,7 +694,7 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
         <div class="card node-card" data-page-node-id="gdTKUaWQsCjtS2KDCrDkB8">
           <h3 data-page-node-id="fCmQKA8taFw1jjnEdHQ1Ys">自定义节点<button class="qmark" type="button" aria-label="显示说明"
             onclick="const h=this.closest('h3').nextElementSibling; h.hidden=!h.hidden" data-page-node-id="NOzz4MKcENyJCfU9nGGhDG">?</button></h3>
-          <div class="hint" hidden data-page-node-id="4WFipOwOsmrpDkFx0ffmq5">已添加的节点会出现在部署页 GPU 节点选择中。密码只用于 SSH 连接，不会回显。点「添加」按钮弹出添加对话框。</div>
+          <div class="hint" hidden data-page-node-id="4WFipOwOsmrpDkFx0ffmq5">已添加的节点会出现在部署页设备选择中。密码只用于 SSH 连接，不会回显。点「添加」按钮弹出添加对话框。</div>
           <div id="se-devices" style="margin-top:14px" data-page-node-id="uFPaqoRSbOWiDdieQa0AEd"><div class="empty" data-page-node-id="HfYgdtSeAsvjtHKhROdKfR">加载中…</div></div>
           <div class="node-actions" data-page-node-id="6rHnD1FJjXu4XdbBkCcLAp">
             <button class="primary sm" id="se-dev-open" data-page-node-id="wdKo5r8gEr2Ey7KBX7WGNe">添加</button>
@@ -742,10 +742,10 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 <div class="ov" id="ov-node" data-page-node-id="rNsbViRJFDyy7Jc7BjGD2Q">
   <div class="modal" data-page-node-id="ylVOKqlXJx3m6vyNqtuJvj">
     <h2 data-page-node-id="fWTyTGCkchw8oREP5DFMg1">添加自定义节点</h2>
-    <div class="msub" data-page-node-id="HrPW6TOFdekExXDSrjRE2a">节点会出现在部署页 GPU 节点选择中；密码只用于 SSH 连接，不会回显。</div>
+    <div class="msub" data-page-node-id="HrPW6TOFdekExXDSrjRE2a">节点会出现在部署页设备选择中；密码只用于 SSH 连接，不会回显。</div>
     <div class="mbody" data-page-node-id="JZa2ugCGwgDE4CnQkXuDhS">
       <div class="node-form" style="grid-template-columns:1fr 1fr" data-page-node-id="ntjyyaM4aZqLFERWgnu2Q4">
-<input id="se-dev-name" type="text" placeholder="节点名称（GPU 节点选择中的标识）" data-page-node-id="w8xHPcZ1ZBN4UCN9kMjnyV">
+<input id="se-dev-name" type="text" placeholder="节点名称（设备选择中的标识）" data-page-node-id="w8xHPcZ1ZBN4UCN9kMjnyV">
 <input id="se-dev-host" type="text" placeholder="IP 地址" data-page-node-id="5MrMFIk6pbtTz1KtyBLPUK">
         <input id="se-dev-port" type="number" value="22" min="1" max="65535" placeholder="SSH 端口" data-page-node-id="kLIiGzZHutHzWtnHE9R7WA">
         <input id="se-dev-user" type="text" value="root" placeholder="用户名" data-page-node-id="36SYYmGVHQSQv5VtHr2ggj">
@@ -1496,7 +1496,7 @@ Tabs.register("deploy", (() => {
     { id: "qwen2.5-0.5b", name: "Qwen2.5-0.5B", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
     { id: "qwen3.8-27b", name: "Qwen3.8-27B", source: "hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" },
   ];
-  const stages = ["模型评估", "GPU 节点选择", "节点配置", "模型下载", "启动模型", "建立隧道"];
+  const stages = ["模型评估", "设备选择", "设备配置", "模型下载", "启动模型", "建立隧道"];
   let registry = {};
   let liveMap = {};
   // 轮询短暂失败时保留最后一个已确认阶段，不能把流程重置为模型评估。
@@ -1544,7 +1544,10 @@ Tabs.register("deploy", (() => {
       const row = el("div", "stage-output-row");
       const head = el("div", "stage-output-head");
       head.appendChild(el("b", "stage-output-name", ev.label || ev.stage || "阶段"));
-      head.appendChild(el("span", "stage-output-state", ev.outcome || ""));
+      // 如果前一个阶段任务完成，状态设置为 done
+      const outcome = ev.outcome || "";
+      const isDone = outcome === "done" || outcome === "success" || outcome === "completed";
+      head.appendChild(el("span", "stage-output-state", isDone ? "done" : outcome));
       row.appendChild(head);
       row.appendChild(el("div", "stage-output-detail", ev.detail || ""));
       detail.appendChild(row);
@@ -1800,14 +1803,15 @@ Tabs.register("deploy", (() => {
     // 那正是「选 Uncensored 却下载 default 权重」的根因。
     const tplText = templateText(mdef.id, template);
     const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, model_id:mdef.id, target:"cloud", config_template:template, config_template_text:tplText})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
-    renderChain(1, "模型评估完成，请选择 GPU 节点后继续");
+    console.log("DEBUG: pv response:", pv);
+    renderChain(1, "模型评估完成，请选择设备后继续");
     const saved = (pv.devices || []).map(d => ({
-      id: d.id, custom: true, gpu_model: d.name || "自定义 GPU 节点", provider: "本地自定义",
+      id: d.id, custom: true, gpu_model: d.name || "自定义设备", provider: "本地自定义",
       region: "SSH", spec_id: d.id, vram_bytes: 0, memory_bytes: 0, disk_bytes: 0,
       cpu_cores: 0, stock: 1, host: d.host, port: d.port, user: d.user,
       label: d.host + ":" + d.port + " · " + d.user
     }));
-    // 云端已有实例（仅运行中）：GPU 节点选择中作为「可复用节点」展示。
+    // 云端已有实例（仅运行中）：设备选择中作为「可复用节点」展示。
     // spec_id 用 "reuse:provider:instance" 防止与厂商规格 ID / 设备 ID 冲突；
     // 确认后请求携带 reuse_instance_id / reuse_provider，部署不再新建实例。
     // 已停机实例由后端按 GPU 型号在后台自动开机复用，不进选择列表。
@@ -1829,13 +1833,15 @@ Tabs.register("deploy", (() => {
     }));
     // 候选 = 自定义节点 + 运行中已有节点 + 有库存的新购规格。
     // 库存为 0 的规格不展示（用户要求：只显示有库存的 GPU 类型）。
+    // stock == null（厂商未返回库存）也放行——优云的库存查询经常超时返回 None，
+    // 严格过滤会导致所有节点都不可选。库存不足时由创建失败兜底。
     const candidates = saved.concat(
       existing,
       (pv.cloud_candidates || []).filter(x => x.stock == null || x.stock > 0)
     );
     if (!candidates.length && pv.cloud) candidates.push(pv.cloud);
     const chosen = await chooseGpu(candidates);
-    if (!chosen) { renderChain(1, "已取消：未确认 GPU 节点", true); return; }
+    if (!chosen) { renderChain(1, "已取消：未确认设备", true); return; }
     const selectedCandidate = candidates.find(x => (x.spec_id || x.gpu_model) === chosen) || {};
     const source = mdef.source;
     const payload = {model:source, model_id:mdef.id, deploy:true, target:"cloud", config_template:template, config_template_text:tplText};
@@ -1859,7 +1865,7 @@ Tabs.register("deploy", (() => {
       ? "已选择复用节点 " + selectedCandidate.instance_id
       : "已选择 " + chosen) + "，正在提交部署任务");
     const r = await api("/api/models/pull", {
-      method:"POST", timeoutMs:30000,
+      method:"POST",
       body:JSON.stringify(payload)
     }).catch(e => ({error:e.message}));
     if (r.error) { renderChain(1, r.error.message || r.error, true); return; }
@@ -1872,7 +1878,7 @@ Tabs.register("deploy", (() => {
     const usable = cands.filter(x => availability(x).ok);
     return new Promise(resolve => {
       const box = el("div", "gpu-confirm");
-      box.innerHTML = '<h3>确认 GPU 节点</h3><div class="hint">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>';
+      box.innerHTML = '<h3>确认设备</h3><div class="hint">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>';
       const list = el("div", "gpu-pick"); let selected = null;
       cands.forEach((x, i) => {
         const av = availability(x);
@@ -2236,7 +2242,7 @@ Tabs.register("setting", (() => {
     try {
       const r = await api("/api/devices");
       box.innerHTML = "";
-      if (!r.devices.length) { box.innerHTML = '<div class="empty">暂无自定义 GPU 节点</div>'; return; }
+      if (!r.devices.length) { box.innerHTML = '<div class="empty">暂无自定义设备</div>'; return; }
       r.devices.forEach((d) => {
         const row = el("div", "kv");
         row.innerHTML = '<span class="k"><b>' + esc(d.name || "自定义节点") + '</b> · ' + esc(d.host) + ':' + d.port + ' · ' + esc(d.user) + '</span>' +

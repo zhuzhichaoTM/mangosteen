@@ -307,9 +307,9 @@ pub struct AvailableSpec {
 }
 
 impl AvailableSpec {
-    /// 是否有库存。厂商不提供库存字段时视为有货。
+    /// 是否有库存。厂商不提供库存字段时视为无库存。
     pub fn is_in_stock(&self) -> bool {
-        self.stock.map(|s| s > 0).unwrap_or(true)
+        self.stock.map(|s| s > 0).unwrap_or(false)
     }
 }
 
@@ -731,7 +731,7 @@ mod tests {
         };
         assert!(mk(Some(5)).is_in_stock());
         assert!(!mk(Some(0)).is_in_stock());
-        assert!(mk(None).is_in_stock());
+        assert!(!mk(None).is_in_stock());  // 厂商不提供库存字段时视为无库存
     }
 
     #[test]

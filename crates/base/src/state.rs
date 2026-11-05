@@ -110,6 +110,7 @@ impl DeploymentRecord {
                 | (DeploymentStatus::Ready, DeploymentStatus::Failed)
                 | (DeploymentStatus::Ready, DeploymentStatus::Destroyed)
                 | (DeploymentStatus::Stopped, DeploymentStatus::Provisioning)
+                | (DeploymentStatus::Stopped, DeploymentStatus::Stopped)
                 | (DeploymentStatus::Stopped, DeploymentStatus::Destroyed)
                 | (DeploymentStatus::Failed, DeploymentStatus::Provisioning)
                 | (DeploymentStatus::Failed, DeploymentStatus::Stopped)

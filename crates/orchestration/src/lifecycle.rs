@@ -39,6 +39,7 @@ impl Orchestrator {
                     &target,
                     cloud_plan.engine_port,
                     false,
+                    Some(cloud_plan.engine_port),
                 );
                 self.tunnels()
                     .establish(&spec, Duration::from_secs(30))
@@ -117,6 +118,24 @@ impl Orchestrator {
         let state = record.status;
         let shared_node = self.has_other_active_on_node(id, &record);
 
+        // 0) 先把台账置为 `stopped`（带「正在停止」说明），再做停止动作。
+        //
+        // 为什么必须在停进程**之前**：停止远端进程到关隧道、写终态之间
+        // 有一个秒级窗口——进程已死但本地隧道还在，后台探测（runprobe）
+        // 在这个窗口里会把 `ready` 记录连续两轮探测失败后降级成
+        // `failed`（「本地端口与远端引擎端口映射不存在或健康检查失败」），
+        // UI 轮询拿到失败状态弹出错误提示，随后卸载收尾又把它改回
+        // `stopped`——表现为「卸载成功却闪过一个报错」。
+        //
+        // `stopped` 是探测豁免态（用户的显式动作态），提前置位即可让
+        // 探测线程跳过，消除这条竞态。若后续停止动作失败，仍会按各自
+        // 的错误路径显式改回 `failed`，不影响真实故障的上报。
+        if matches!(state, DeploymentStatus::Ready | DeploymentStatus::Failed) {
+            let _ = self
+                .state
+                .set_status(id, DeploymentStatus::Stopped, Some("正在停止推理服务…".to_string()));
+        }
+
         // 1) 先停远端推理进程：无论哪种来源，GPU 显存都该释放。
         if let Some(c) = cloud.as_ref() {
             match self.device_target_for(c) {
@@ -128,10 +147,25 @@ impl Orchestrator {
                         &workdir,
                         Some(port),
                     ) {
-                        return Err(MnError::Network {
-                            stage: "卸载（停止模型进程）".to_string(),
-                            reason: format!("模型远端端口 {port} 的 llama-server 停止失败：{e}"),
-                        });
+                        // 停止脚本失败不等于进程还在：SSH 抖动（连接层中断、
+                        // 厂商网关限流）可能发生在「已发出 kill、确认命令
+                        // 未返回」的半程。此时按实际状态判定——进程确实
+                        // 不在了就视为停止成功，继续卸载；仍在运行才报错。
+                        // 否则一次网络抖动会把已经成功的卸载误报成失败，
+                        // 而 UI 也随之弹出多余的错误窗口。
+                        let still_running =
+                            mangosteen_device::remote::llama_server_running_on_port(
+                                &target, &workdir, port,
+                            )
+                            .unwrap_or(false);
+                        if still_running {
+                            return Err(MnError::Network {
+                                stage: "卸载（停止模型进程）".to_string(),
+                                reason: format!(
+                                    "模型远端端口 {port} 的 llama-server 停止失败：{e}"
+                                ),
+                            });
+                        }
                     }
                     // 二次校验同样只作辅助证据：它的 SSH 错误不能推翻
                     // 主操作的成功结论（详见 stop_service_on_self_hosted）。
@@ -204,7 +238,7 @@ impl Orchestrator {
         //    节点共享时只停止当前模型进程，GPU 节点和其它模型保持运行。
         let keep_node = cloud
             .as_ref()
-            .map(|c| c.device_id.is_some())
+            .map(|c| c.device_id.as_deref().map(|d| !d.trim().is_empty()).unwrap_or(false))
             .unwrap_or(false)
             || shared_node;
         let mut stopped_instance = None;
@@ -236,17 +270,16 @@ impl Orchestrator {
 
         // 4) 台账改为 `stopped`（不是删除）：实例还在，下次部署可复用。
         //    已经是 stopped 时保持原状态——重复卸载应当幂等。
-        if state != DeploymentStatus::Stopped {
-            self.state.set_status(
-                id,
-                DeploymentStatus::Stopped,
-                Some(if keep_node {
-                    "已停止推理服务；自定义节点的机器保留".to_string()
-                } else {
-                    "已停止推理服务并关机，实例保留可复用".to_string()
-                }),
-            )?;
-        }
+        //    允许更新 detail，以便把「正在停止…」换成最终说明。
+        let _ = self.state.set_status(
+            id,
+            DeploymentStatus::Stopped,
+            Some(if keep_node {
+                "已停止推理服务；自定义节点的机器保留".to_string()
+            } else {
+                "已停止推理服务并关机，实例保留可复用".to_string()
+            }),
+        );
         Ok(UnloadOutcome {
             stopped_instance,
             node_kept: keep_node,
@@ -693,6 +726,7 @@ impl Orchestrator {
                         &target,
                         cloud_plan.engine_port,
                         false,
+                        Some(cloud_plan.engine_port),
                     );
                     let _ = self.tunnels().close(&spec);
                     let local_port = match self

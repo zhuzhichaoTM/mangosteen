@@ -237,6 +237,7 @@ impl Orchestrator {
                 &target,
                 remote.remote_port,
                 false,
+                Some(remote.remote_port),
             );
             let local = device_tunnels
                 .establish(&spec, Duration::from_secs(30))?

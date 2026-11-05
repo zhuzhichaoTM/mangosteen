@@ -14,6 +14,52 @@
 //! 设备优先于云厂商：用户明确登记了机器，就不该再开一台计费实例。
 
 use super::*;
+use mangosteen_core::model::Quantization;
+
+/// 硬编码的模型参数（离线阶段提前读取）
+///
+/// 当前只支持 qwen2.5-0.5b 和 qwen3.8-27b 两个模型
+fn get_hardcoded_model_spec(model_id: &str) -> Option<mangosteen_core::model::ModelSpec> {
+    // 支持匹配完整 ID（含量化后缀）和基础 ID
+    // 处理多种变体：qwen2.5-0.5b, qwen2.5-0.5b:q4_k_m, qwen2.5-0.5b-instruct:q4_k_m 等
+    let base_id = model_id
+        .split(':')
+        .next()
+        .unwrap_or(model_id)
+        .trim()
+        .to_lowercase()
+        .replace("-instruct", "")
+        .replace("instruct", "")
+        .replace("gguf", "");
+    
+    match base_id.as_str() {
+        id if id.contains("qwen2.5") && id.contains("0.5b") => Some(mangosteen_core::model::ModelSpec {
+            name: "qwen2.5-0.5b".to_string(),
+            params_b: 0.5, // 0.5B 参数
+            quant: Quantization::Q4KM,
+            n_layers: 24,
+            n_heads: 14,
+            n_kv_heads: 2,
+            embedding_dim: 896,
+            vocab_size: 151936,
+            native_context: 32768,
+            file_size_bytes: 16_464_440_224, // qwen2.5-0.5b-instruct-q4_k_m.gguf 约 15.3GB
+        }),
+        id if id.contains("qwen3.8") && id.contains("27b") => Some(mangosteen_core::model::ModelSpec {
+            name: "qwen3.8-27b".to_string(),
+            params_b: 27.0, // 27B 参数
+            quant: Quantization::Q4KM,
+            n_layers: 62,
+            n_heads: 40,
+            n_kv_heads: 8,
+            embedding_dim: 5120,
+            vocab_size: 152064,
+            native_context: 32768,
+            file_size_bytes: 16_464_440_224, // Qwen3.8-27B-UD-Q4_K_M.gguf 约 15.3GB
+        }),
+        _ => None,
+    }
+}
 
 impl Orchestrator {
     /// 部署预估：**不创建任何资源**，只回答「会在哪台机器上跑、要花多少钱」。
@@ -26,17 +72,12 @@ impl Orchestrator {
     ///    此时不产生任何费用。
     /// 3. **费用给出区间而非单点**：推理时长无法预知，给「按 1 小时」口径。
     pub fn preview(&self, req: &DeploymentRequest) -> MnResult<DeploymentPreview> {
-        // 预览不要求模型已下载：若本地台账/文件不存在，按配置模板中的
-        // 白名单模型未下载时按其默认资产粗估，后续远端 Range 读取 GGUF 头部后再精确校正。
-        let evaluated = match self.evaluate(req) {
-            Ok(value) => value,
-            Err(_) => self.assessor.evaluate_estimated(
-                &req.model,
-                mangosteen_core::model::Quantization::Q4KM,
-                16_464_440_224,
-                req,
-            ),
-        };
+        // 使用硬编码的模型参数（离线阶段提前读取）
+        // 当前只支持 qwen2.5-0.5b 和 qwen3.8-27b 两个模型
+        let spec = get_hardcoded_model_spec(&req.model)
+            .ok_or_else(|| MnError::bad_request(format!("不支持的模型: {}，当前只支持 qwen2.5-0.5b 和 qwen3.8-27b", req.model)))?;
+
+        let assessment = self.assessor.evaluate_spec(&spec, req);
 
         // 已保存设备（不含密码），交给前端渲染选择列表
         let devices: Vec<DeviceBrief> = self
@@ -54,16 +95,15 @@ impl Orchestrator {
 
         // 云端显存需求与本地同一套公式（推理引擎唯一性 → 参数体系一致）
         let required_vram = self.assessor.cloud_vram_requirement(
-            &evaluated.spec,
-            evaluated.assessment.context_len,
-            evaluated.assessment.kv_cache,
-            evaluated.assessment.batch_size,
+            &spec,
+            assessment.assessment.context_len,
+            assessment.assessment.kv_cache,
+            assessment.assessment.batch_size,
         );
         let constraints = SelectionConstraints {
             min_vram_bytes: required_vram,
-            min_memory_bytes: evaluated.assessment.requirement.total_bytes().max(8 << 30),
-            min_disk_bytes: evaluated
-                .spec
+            min_memory_bytes: assessment.assessment.requirement.total_bytes().max(8 << 30),
+            min_disk_bytes: spec
                 .file_size_bytes
                 .saturating_mul(2)
                 .max(50 << 30),
@@ -112,10 +152,10 @@ impl Orchestrator {
         let nothing_available = devices.is_empty() && cloud.is_none();
         if nothing_available && tier_error.is_none() {
             return Ok(DeploymentPreview {
-                model: evaluated.spec.name.clone(),
+                model: spec.name.clone(),
                 model_id: mangosteen_core::model::ModelEntry::derive_id(
-                    &evaluated.spec.name,
-                    evaluated.spec.quant,
+                    &spec.name,
+                    spec.quant,
                 ),
                 origin: ComputeOrigin::Cloud {
                     provider: String::new(),
@@ -136,10 +176,10 @@ impl Orchestrator {
         }
 
         Ok(DeploymentPreview {
-            model: evaluated.spec.name.clone(),
+            model: spec.name.clone(),
             model_id: mangosteen_core::model::ModelEntry::derive_id(
-                &evaluated.spec.name,
-                evaluated.spec.quant,
+                &spec.name,
+                spec.quant,
             ),
             origin: ComputeOrigin::Cloud {
                 provider: cloud

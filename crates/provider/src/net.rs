@@ -326,13 +326,27 @@ impl TunnelManager {
         }
 
         // 分配本地端口
-        let local_port = self
-            .allocator
-            .allocate(process::is_port_bindable)
-            .ok_or_else(|| MnError::Network {
-                stage: "分配本地端口".to_string(),
-                reason: "端口区间已耗尽，请检查是否有大量残留隧道".to_string(),
-            })?;
+        // 「强制端口固定」：如果 spec 已指定 local_port != 0，则使用指定端口，
+        // 跳过 PortAllocator 自动分配，保证本地端口 = 远端端口一一映射。
+        let local_port = if let Some(fwd) = spec.forwards.first() {
+            if fwd.local_port != 0 {
+                fwd.local_port
+            } else {
+                self.allocator
+                    .allocate(process::is_port_bindable)
+                    .ok_or_else(|| MnError::Network {
+                        stage: "分配本地端口".to_string(),
+                        reason: "端口区间已耗尽，请检查是否有大量残留隧道".to_string(),
+                    })?
+            }
+        } else {
+            self.allocator
+                .allocate(process::is_port_bindable)
+                .ok_or_else(|| MnError::Network {
+                    stage: "分配本地端口".to_string(),
+                    reason: "端口区间已耗尽，请检查是否有大量残留隧道".to_string(),
+                })?
+        };
 
         // 用真实本地端口重建转发规则
         let mut effective = spec.clone();
