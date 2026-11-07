@@ -1634,7 +1634,12 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
         // 仍然残留上一个模板的值，直到下一次 5 秒轮询才消失。
         refreshStatus();
       };
-      $("dp-deploy-btn").onclick = () => { const mdef = currentModelDef(); begin(mdef, $("dp-template-sel").value, registry[mdef.id]); };
+      $("dp-deploy-btn").onclick = () => {
+        // 立即禁用，防止 begin() 异步执行期间重复点击
+        const deploy = $("dp-deploy-btn");
+        deploy.disabled = true;
+        const mdef = currentModelDef(); begin(mdef, $("dp-template-sel").value, registry[mdef.id]);
+      };
       $("dp-chain-abort").onclick = cancelDeployment;
       $("dp-remove-btn").onclick = () => { const mdef = currentModelDef(); unload(mdef.id); };
       $("dp-detail-btn").onclick = () => {
@@ -1868,7 +1873,8 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
     // 否则新任务会被 renderChain 的「只前进」逻辑直接顶到旧位置。
     lastChainIndex = 0;
     lastChainNote = "";
-    currentJob = null; // 方案2：置空并发标记，允许立即重新部署
+    // 并发防护：若已有部署任务在进行，忽略重复点击
+    if (currentJob) return;
     // 每次点击「开始部署」前，**清空上一次阶段处理输出的内容**
     // （避免上一次失败的错误提示残留）。
     $("dp-chain-detail").innerHTML = "";
