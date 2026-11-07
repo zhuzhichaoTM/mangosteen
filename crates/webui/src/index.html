@@ -2321,7 +2321,7 @@ Tabs.register("setting", (() => {
           '<div class="node-actions">' +
           '<button class="primary sm pk-save">保存</button>' +
           (isCompshare
-            ? '<button class="ghost sm pk-register">注册</button>'
+            ? '<button class="primary sm pk-register">注册</button>'
             : "") +
           '<span class="hint pk-msg"></span></div>';
         sec.querySelector(".pk-save").onclick = () => saveProviderKeys(p.name, sec);
@@ -2402,8 +2402,8 @@ Tabs.register("setting", (() => {
           '<span class="ci-cell"><span class="badge ' + stateCls + '">' + esc(state) + '</span></span>' +
           '<span class="ci-actions">' +
           (x.status === "running"
-            ? '<button class="sm ci-stop">关机</button>'
-            : '<button class="sm ci-start">开机</button>') +
+            ? '<button class="primary sm ci-stop">关机</button>'
+            : '<button class="primary sm ci-start">开机</button>') +
           ' <button class="danger sm ci-destroy">删除</button>' +
           '</span>';
         const instanceId = x.instance_id;
