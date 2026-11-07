@@ -707,6 +707,10 @@ impl CloudOrchestrator {
         engine_port: u16,
     ) -> MnResult<()> {
         let target = self.service_target(provider, instance_id)?;
+        // 修复1：外层不再叠加 3 次重试。停止脚本幂等，ssh_exec 内部已有
+        // 5 次连接层重试；旧实现 3×5 最坏要数分钟，期间持有云锁，把
+        // preview/deploy 等所有云端操作全部堵死（实测「卡在模型评估」）。
+        // 失败后上层 unload 会按「进程是否真的还在」判定，不依赖这里的重试。
         mangosteen_device::remote::stop_llama_server_on_port(
             &target,
             &self.config.remote_workdir,
@@ -714,7 +718,22 @@ impl CloudOrchestrator {
         )
     }
 
-    /// **启动服务**：在已有实例上重新拉起 `llama-server`。
+    /// 检查指定端口的推理服务是否在运行。
+    pub fn is_service_running(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        engine_port: u16,
+    ) -> MnResult<bool> {
+        let target = self.service_target(provider, instance_id)?;
+        mangosteen_device::remote::llama_server_running_on_port(
+            &target,
+            &self.config.remote_workdir,
+            engine_port,
+        )
+    }
+
+    /// **启动服务**：在已有实例上重新拉起 `llama-server`.
     ///
     /// 权重与二进制都已在远端（供给时传过/装过），所以这里只需一条启动命令。
     /// 启动后等 `/health` 由调用方负责——本函数只保证进程活着。
@@ -843,7 +862,37 @@ impl CloudOrchestrator {
             )));
         }
         driver.stop(instance_id)?;
-        Ok(())
+        // 关机后立即验证实例状态（防止厂商 API 延迟导致状态还是 running）
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let inst = driver.describe(instance_id)?;
+            if inst.state == InstanceState::Stopped {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(MnError::Network {
+                    stage: "关机（停止实例）".to_string(),
+                    reason: format!("实例 {instance_id} 关机后状态仍为 running：{}", inst.state),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// 开机实例并等待 Running（**管理动作**：无部署上下文，不绑定引擎端口）。
+    ///
+    /// 供编排层「云端节点」管理页调用——那里只有 (provider, instance_id)，
+    /// 没有 CloudPlan。与 [`Self::power_on`] 的区别只是缺少 plan 参数。
+    pub fn power_on_managed(&self, provider: &str, instance_id: &str) -> MnResult<()> {
+        let driver = self.registry.get(provider)?;
+        let mut instance = driver.describe(instance_id)?;
+        if instance.state == InstanceState::Running {
+            return Ok(());
+        }
+        if instance.state == InstanceState::Stopped || instance.state == InstanceState::Created {
+            instance = driver.start(instance_id)?;
+        }
+        self.wait_until_running(driver, &mut instance, None)
     }
 
     /// 开机实例并等到 Running。
@@ -1009,12 +1058,14 @@ fn vendor_password_target(
         .ssh_password
         .clone()
         .or_else(|| config.ssh_password.clone());
+
     if password.is_none() {
         return Err(MnError::Network {
             stage: "读取 SSH 信息".to_string(),
             reason: "节点已运行但未返回可用 SSH 密码".to_string(),
         });
     }
+
     Ok(mangosteen_device::remote::SshTarget {
         host,
         port,
@@ -1086,6 +1137,22 @@ pub fn configure_existing_ssh_access(
         if attempt < 3 {
             std::thread::sleep(Duration::from_secs(1));
         }
+    }
+
+    // 密码认证降级（方案1）：公钥安装连续失败时，若用户提供了密码，
+    // 退回密码 askpass 认证而不是直接中止部署。askpass 的平台差异
+    // （macOS/Linux `/bin/sh` 脚本、Windows `.cmd` 批处理）全部由
+    // `mangosteen_platform::ssh::write_askpass` 收敛，三平台行为一致。
+    //
+    // 为什么这是「能用但脆」的降级路径：ssh 延迟调用 askpass，临时脚本
+    // 必须活到认证时刻（见 `Tunnel` 的 askpass 生命周期注释）；密钥才是
+    // 主路径。但降级远好于报错——用户至少还能把模型跑起来。
+    if target.password.is_some() {
+        eprintln!(
+            "[cloud] ⚠ 节点 {}:{} 公钥安装失败，降级为密码认证（后续命令走 askpass）：{last_error}",
+            target.host, target.port
+        );
+        return Ok(target.clone());
     }
 
     Err(MnError::Network {
@@ -1221,7 +1288,7 @@ impl CloudOrchestrator {
             }
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
             let ssh = ensure_key_target(&instance, &self.config)?;
-            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(plan.engine_port));
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(0));
             let local_port = self
                 .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
@@ -1249,7 +1316,7 @@ impl CloudOrchestrator {
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
                 let ssh = ensure_key_target(&instance, &self.config)?;
-                let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(plan.engine_port));
+                let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(0));
                 let local_port = self
                     .tunnels()
                     .establish(&spec, self.config.tunnel_timeout)?
@@ -1289,7 +1356,7 @@ impl CloudOrchestrator {
             // 不再依赖密码 askpass（它对时序极敏感，是本模块最脆的一环）。
             let ssh = ensure_key_target(&instance, &self.config)?;
             // 节点创建完成后只建立基础隧道；模型与引擎准备由编排层按阶段执行。
-            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(plan.engine_port));
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(0));
             let local_port = self
                 .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
@@ -1355,7 +1422,11 @@ impl CloudOrchestrator {
         ssh: &mangosteen_device::remote::SshTarget,
         remote_port: u16,
     ) -> MnResult<u16> {
-        let spec = tunnel_spec_for(ssh, remote_port, false, Some(remote_port));
+        // 本地端口不能跟随 remote_port（多模型同节点时必然撞车）：
+        // 传 0 让 TunnelManager 在分配区间内挑一个空闲端口。
+        // 业务上 local_port 已由调度器写入台账（plan.cloud.local_port），
+        // 调用方（commit_cloud）随后会把真实值回写台账，这里只是建立通道。
+        let spec = tunnel_spec_for(ssh, remote_port, false, Some(0));
         // 严格模式前主动关闭同一目标的旧隧道。旧隧道可能是配置阶段
         // 用 allow_unready_remote 建立的惰性转发：SSH 进程还活着，但
         // 远端端口并未真正转发，继续复用会表现为本地 connection refused。
@@ -1406,7 +1477,9 @@ fn finish_provision(
         }
     }
 
-    let spec = tunnel_spec_for(&target, plan.engine_port, false, Some(plan.engine_port));
+    // 本地端口不能跟随 engine_port（多模型同节点时必然撞车）：
+    // 传 0 让 TunnelManager 在分配区间内挑一个空闲端口。
+    let spec = tunnel_spec_for(&target, plan.engine_port, false, Some(0));
     let local_port = match tunnels.establish(&spec, config.tunnel_timeout) {
         Ok(t) => t.local_port,
         Err(e) => {

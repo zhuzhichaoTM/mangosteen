@@ -3,90 +3,238 @@
 //! 归属：第三层 · 编排调度核心。
 //! `Orchestrator` 的字段在 `super` 中定义，子模块可直接访问。
 
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::deployment::{DeviceTarget, UnloadOutcome};
 
 impl Orchestrator {
-    /// API 网关启动后的业务自恢复：根据持久化台账重建已部署模型的隧道。
+    /// API 网关启动后的业务自恢复：根据持久化台账恢复已部署模型的完整状态。
+    ///
+    /// 恢复步骤：
+    /// 1. 查询云端实例实际状态（running/stopped）
+    /// 2. 同步台账状态与实际状态
+    /// 3. 对于应该运行的实例（厂商侧 running + 台账 ready/failed）：
+    ///    - 重建 SSH 隧道
+    ///    - 启动推理进程（如果进程未运行）
+    ///    - 更新台账为 ready
+    /// 4. 对于不应该运行的实例（厂商侧 stopped + 台账 ready）：
+    ///    - 更新台账为 stopped
     ///
     /// GPU 节点和远端模型进程可能在 API 网关重启期间继续运行；本地
     /// `TunnelManager` 是进程内状态，重启后必须重新建立映射，否则台账虽是
-    /// `ready`，对话仍找不到本地端口。该方法只恢复隧道，不重新创建节点、
-    /// 不重新下载模型、不改变模型部署状态。
+    /// `ready`，对话仍找不到本地端口。
     pub fn restore_deployment_tunnels(&self) -> Vec<String> {
         let records = match self.state.list() {
             Ok(records) => records,
             Err(e) => return vec![format!("读取部署台账失败：{e}")],
         };
         let mut errors = Vec::new();
+
         for record in records {
-            // `Failed` 记录同样重建隧道：瞬时探测失败会把实际仍在服务的
-            // 部署标成 failed，网关重启后若不重建隧道，探测自愈永远等不到
-            // 健康端口，模型在对话页签消失。状态这里不翻转，仍由后台探测
-            // 在 `/health` 通过时翻回 `ready`（真死的部署保持 failed 无害）。
-            if !matches!(
-                record.status,
-                DeploymentStatus::Ready | DeploymentStatus::Failed
-            ) {
-                continue;
-            }
+            // 只处理云端部署（有 cloud plan）
             let Some(cloud_plan) = record.plan.cloud.clone() else {
                 continue;
             };
+
+            // 获取云端实例实际状态
+            let instance_state = self.query_instance_state(&record);
+
             let id = record.plan.id.clone();
-            let result = if let Some(target) = self.device_target_for(&cloud_plan) {
-                let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
-                    &target,
-                    cloud_plan.engine_port,
-                    false,
-                    Some(cloud_plan.engine_port),
-                );
-                self.tunnels()
-                    .establish(&spec, Duration::from_secs(30))
-                    .map(|t| t.local_port)
-            } else {
-                let (provider, instance_id) = match &record.plan.origin {
-                    ComputeOrigin::Cloud {
-                        provider,
-                        instance_id,
-                    } => (provider.as_str(), instance_id.as_str()),
+            let ComputeOrigin::Cloud {
+                provider,
+                instance_id,
+            } = &record.plan.origin;
+
+            // 情况1：云端实例已停止，但台账显示 ready/failed → 同步为 stopped
+            if matches!(instance_state, Some(mangosteen_core::cloud::InstanceState::Stopped))
+                && matches!(
+                    record.status,
+                    DeploymentStatus::Ready | DeploymentStatus::Failed
+                )
+            {
+                if let Err(e) = self.state.set_status(
+                    &id,
+                    DeploymentStatus::Stopped,
+                    Some("云端实例已停止，同步台账状态".to_string()),
+                ) {
+                    errors.push(format!("{id}：同步台账状态失败：{e}"));
+                }
+                eprintln!("[restore] {id}：云端实例已停止，台账状态已同步为 stopped");
+                continue;
+            }
+
+            // 情况2：云端实例正在运行，但台账显示 stopped → 尝试恢复服务
+            if matches!(instance_state, Some(mangosteen_core::cloud::InstanceState::Running))
+                && matches!(record.status, DeploymentStatus::Stopped)
+            {
+                eprintln!("[restore] {id}：云端实例正在运行但台账为 stopped，尝试恢复服务");
+                if let Err(e) = self.start_service(&id) {
+                    errors.push(format!("{id}：恢复服务失败：{e}"));
+                }
+                continue;
+            }
+
+            // 情况3：云端实例正在运行，台账为 ready/failed → 恢复隧道和进程
+            if matches!(instance_state, Some(mangosteen_core::cloud::InstanceState::Running))
+                && matches!(
+                    record.status,
+                    DeploymentStatus::Ready | DeploymentStatus::Failed
+                )
+            {
+                eprintln!("[restore] {id}：云端实例正在运行，恢复隧道和推理进程");
+
+                // 恢复隧道
+                let tunnel_result = if let Some(target) = self.device_target_for(&cloud_plan) {
+                    let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
+                        &target,
+                        cloud_plan.engine_port,
+                        false,
+                        Some(cloud_plan.engine_port),
+                    );
+                    self.tunnels()
+                        .establish(&spec, Duration::from_secs(30))
+                        .map(|t| t.local_port)
+                } else {
+                    let mut cloud = self.cloud();
+                    let Some(orchestrator) = cloud.as_mut() else {
+                        errors.push(format!("{id}：未配置云端能力，无法恢复隧道"));
+                        continue;
+                    };
+                    orchestrator
+                        .establish_tunnel(provider, instance_id, &cloud_plan)
+                        .and_then(|base| {
+                            base.rsplit(':')
+                                .next()
+                                .and_then(|p| p.trim_end_matches("/v1").parse::<u16>().ok())
+                                .ok_or_else(|| {
+                                    MnError::bad_request(format!("隧道地址无法解析：{base}"))
+                                })
+                        })
                 };
-                let mut cloud = self.cloud();
-                let Some(orchestrator) = cloud.as_mut() else {
-                    errors.push(format!("{id}：未配置云端能力，无法恢复隧道"));
-                    continue;
+
+                let local_port = match tunnel_result {
+                    Ok(p) => p,
+                    Err(e) => {
+                        errors.push(format!("{id}：恢复隧道失败：{e}"));
+                        continue;
+                    }
                 };
-                orchestrator
-                    .establish_tunnel(provider, instance_id, &cloud_plan)
-                    .and_then(|base| {
-                        base.rsplit(':')
-                            .next()
-                            .and_then(|p| p.trim_end_matches("/v1").parse::<u16>().ok())
-                            .ok_or_else(|| {
-                                MnError::bad_request(format!("隧道地址无法解析：{base}"))
-                            })
-                    })
-            };
-            match result {
-                Ok(local_port) => {
-                    self.scheduler().reserve_port(local_port);
-                    match self.state.get(&id) {
-                        Ok(Some(mut current)) => {
-                            if let Some(c) = current.plan.cloud.as_mut() {
-                                c.local_port = local_port;
+
+                self.scheduler().reserve_port(local_port);
+
+                // 更新台账中的端口信息
+                match self.state.get(&id) {
+                    Ok(Some(mut current)) => {
+                        if let Some(c) = current.plan.cloud.as_mut() {
+                            c.local_port = local_port;
+                        }
+                        if let Err(e) = self.state.upsert(current) {
+                            errors.push(format!("{id}：保存恢复端口失败：{e}"));
+                        }
+                    }
+                    Ok(None) => errors.push(format!("{id}：台账记录在恢复期间消失")),
+                    Err(e) => errors.push(format!("{id}：读取记录失败：{e}")),
+                }
+
+                // 检查并启动推理进程（如果进程未运行）
+                if let Some(target) = self.device_target_for(&cloud_plan) {
+                    // 自定义节点路径
+                    let workdir = self.config().cloud.remote_workdir.clone();
+                    let port = cloud_plan.engine_port;
+                    let running = mangosteen_device::remote::llama_server_running_on_port(
+                        &target, &workdir, port,
+                    )
+                    .unwrap_or(false);
+
+                    if !running {
+                        eprintln!("[restore] {id}：推理进程未运行，尝试启动");
+                        let launch_config = match self.cloud_launch_config(&cloud_plan) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                errors.push(format!("{id}：获取启动配置失败：{e}"));
+                                continue;
                             }
-                            if let Err(e) = self.state.upsert(current) {
-                                errors.push(format!("{id}：保存恢复端口失败：{e}"));
+                        };
+                        if let Err(e) = mangosteen_provider::orchestrator::start_node_engine(
+                            &target,
+                            &workdir,
+                            &launch_config,
+                        ) {
+                            errors.push(format!("{id}：启动推理进程失败：{e}"));
+                            continue;
+                        }
+                    }
+                } else {
+                    // 云厂商实例路径
+                    let mut cloud = self.cloud();
+                    if let Some(o) = cloud.as_mut() {
+                        let running = o.is_service_running(provider, instance_id, cloud_plan.engine_port)
+                            .unwrap_or(false);
+
+                        if !running {
+                            eprintln!("[restore] {id}：推理进程未运行，尝试启动");
+                            let launch_config = match self.cloud_launch_config(&cloud_plan) {
+                                Ok(cfg) => cfg,
+                                Err(e) => {
+                                    errors.push(format!("{id}：获取启动配置失败：{e}"));
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = o.start_service(provider, instance_id, &cloud_plan, &launch_config) {
+                                errors.push(format!("{id}：启动推理进程失败：{e}"));
+                                continue;
                             }
                         }
-                        Ok(None) => errors.push(format!("{id}：台账记录在恢复期间消失")),
-                        Err(e) => errors.push(format!("{id}：读取记录失败：{e}")),
                     }
                 }
-                Err(e) => errors.push(format!("{id}：恢复模型隧道失败：{e}")),
+
+                // 等待健康检查通过
+                let health = format!("http://127.0.0.1:{local_port}/health");
+                let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
+                match mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2)) {
+                    Ok(_) => {
+                        // 健康检查通过，更新台账为 ready
+                        if let Err(e) = self.state.set_status(&id, DeploymentStatus::Ready, None) {
+                            errors.push(format!("{id}：更新台账状态失败：{e}"));
+                        } else {
+                            eprintln!("[restore] {id}：恢复成功，状态已更新为 ready");
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("{id}：健康检查失败：{e}"));
+                        // 健康检查失败，标记为 failed
+                        let _ = self.state.set_status(
+                            &id,
+                            DeploymentStatus::Failed,
+                            Some(format!("恢复后健康检查失败：{e}")),
+                        );
+                    }
+                }
             }
         }
         errors
+    }
+
+    /// 查询云端实例的实际状态。
+    fn query_instance_state(
+        &self,
+        record: &mangosteen_base::state::DeploymentRecord,
+    ) -> Option<mangosteen_core::cloud::InstanceState> {
+        let ComputeOrigin::Cloud {
+            provider,
+            instance_id,
+        } = &record.plan.origin;
+
+        if provider.trim().is_empty() || instance_id.trim().is_empty() {
+            return None;
+        }
+
+        let mut cloud = self.cloud();
+        let o = cloud.as_mut()?;
+        let driver = o.registry().get(provider).ok()?;
+        let inst = driver.describe(instance_id).ok()?;
+        Some(inst.state)
     }
 
     /// 卸载一个部署：停止推理服务、关隧道、**停止实例**（不销毁）。
@@ -182,27 +330,81 @@ impl Orchestrator {
                     }
                 }
                 None => {
-                    // 云厂商实例：直接由驱动停止服务（内部走 ssh）
+                    // 云厂商实例：直接由驱动停止服务（内部走 ssh）。
+                    //
+                    // 方案3：停止后**等待端口确认空闲**，最多 10 秒。停止命令
+                    // 返回成功不代表端口已释放（TIME_WAIT / 进程收尾），直接
+                    // 关机或复用会撞 address in use。查询失败只记录不阻断：
+                    // 它是辅助证据，不是主判据（见 stop_service_on_self_hosted）。
                     let ComputeOrigin::Cloud {
                         provider,
                         instance_id,
                     } = &record.plan.origin;
                     if let Some(o) = self.cloud().as_mut() {
                         if !provider.trim().is_empty() && !instance_id.trim().is_empty() {
-                            if let Err(e) = o.stop_service_on_port(
-                                provider,
-                                instance_id,
-                                record
-                                    .plan
-                                    .cloud
-                                    .as_ref()
-                                    .map(|c| c.engine_port)
-                                    .unwrap_or(8080),
-                            ) {
-                                return Err(MnError::Network {
-                                    stage: "卸载（停止模型进程）".to_string(),
-                                    reason: format!("模型远端进程停止失败：{e}"),
-                                });
+                            let port = record
+                                .plan
+                                .cloud
+                                .as_ref()
+                                .map(|c| c.engine_port)
+                                .unwrap_or(8080);
+                            if let Err(e) = o.stop_service_on_port(provider, instance_id, port) {
+                                // 停止命令失败不等于进程还在：SSH 抖动可能发生在
+                                // 「已发出 kill、确认命令未返回」的半程（与上方
+                                // 自建设备路径同一判据）。进程确实不在了就继续
+                                // 卸载，否则一次网络抖动会把成功的卸载误报成失败。
+                                let still_running = self
+                                    .vendor_wait_target(provider, instance_id)
+                                    .map(|wt| {
+                                        mangosteen_device::remote::llama_server_running_on_port(
+                                            &wt,
+                                            &self.config().cloud.remote_workdir,
+                                            port,
+                                        )
+                                        .unwrap_or(true) // 查询不到时按「仍在运行」保守处理
+                                    })
+                                    .unwrap_or(true);
+                                if still_running {
+                                    return Err(MnError::Network {
+                                        stage: "卸载（停止模型进程）".to_string(),
+                                        reason: format!("模型远端进程停止失败：{e}"),
+                                    });
+                                }
+                                eprintln!(
+                                    "[unload] 停止命令报错但进程已不在，视为停止成功：{e}"
+                                );
+                            }
+                            // 端口空闲确认轮询（方案3）
+                            let wait_target = self.vendor_wait_target(provider, instance_id);
+                            let deadline = Instant::now() + Duration::from_secs(10);
+                            loop {
+                                let Some(wt) = wait_target.clone() else {
+                                    eprintln!("[unload] 端口空闲确认跳过（无法获取 SSH 目标）");
+                                    break;
+                                };
+                                match mangosteen_device::remote::llama_server_running_on_port(
+                                    &wt,
+                                    &self.config().cloud.remote_workdir,
+                                    port,
+                                ) {
+                                    Ok(false) => break,
+                                    Ok(true) if Instant::now() >= deadline => {
+                                        return Err(MnError::Network {
+                                            stage: "卸载（停止模型进程）".to_string(),
+                                            reason: format!(
+                                                "停止命令已返回，但端口 {port} 10 秒后仍有 llama-server 监听"
+                                            ),
+                                        });
+                                    }
+                                    Ok(true) => std::thread::sleep(Duration::from_millis(500)),
+                                    Err(e) => {
+                                        // 查询失败不推翻停止成功：网络抖动下的辅助证据
+                                        eprintln!(
+                                            "[unload] 端口空闲确认跳过（查询失败，不阻断）：{e}"
+                                        );
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -236,11 +438,15 @@ impl Orchestrator {
 
         // 3) 云厂商实例：只有该节点没有其它运行模型时才关机。
         //    节点共享时只停止当前模型进程，GPU 节点和其它模型保持运行。
-        let keep_node = cloud
+        //    自建设备（device_id 非空）也是厂商托管的实例，同样允许关机——
+        //    旧实现把「用户给机器起过名字」误判成「用户自己的物理机」，导致
+        //    复用节点的实例永远不关机、持续计费。
+        let is_custom_device = cloud
             .as_ref()
-            .map(|c| c.device_id.as_deref().map(|d| !d.trim().is_empty()).unwrap_or(false))
-            .unwrap_or(false)
-            || shared_node;
+            .and_then(|c| c.device_id.as_deref())
+            .map(|d| !d.trim().is_empty())
+            .unwrap_or(false);
+        let keep_node = is_custom_device && shared_node;
         let mut stopped_instance = None;
         if !keep_node {
             let ComputeOrigin::Cloud {
@@ -335,6 +541,22 @@ impl Orchestrator {
             .iter()
             .find(|d| d.id == device_id)
             .map(|d| DeviceTarget::from_config(d, &cfg.cloud.remote_workdir).ssh)
+    }
+
+    /// 为「停止后的端口空闲确认」重建 SSH 目标（云厂商路径专用）。
+    ///
+    /// 复用 `CloudOrchestrator::service_target` 的取数路径：host/port 来自
+    /// 厂商 `describe()`，密码按「实例自带 > 配置统一」解析。查不到 SSH
+    /// 信息时返回 `None`，调用方据此跳过确认轮询——它是辅助证据，
+    /// 不得因为重建失败而推翻停止动作本身的结论。
+    fn vendor_wait_target(
+        &self,
+        provider: &str,
+        instance_id: &str,
+    ) -> Option<mangosteen_device::remote::SshTarget> {
+        let mut cloud = self.cloud();
+        let o = cloud.as_mut()?;
+        o.service_target(provider, instance_id).ok()
     }
 
     /// 删除自定义节点前，销毁该节点上由本工具创建的云实例。
@@ -637,11 +859,60 @@ impl Orchestrator {
             .state
             .get(id)?
             .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
-        let plan = record.plan.clone();
+        let mut plan = record.plan.clone();
         let cloud_plan = plan
             .cloud
             .clone()
             .ok_or_else(|| MnError::bad_request("台账缺少云端方案，无法启动".to_string()))?;
+
+        // ---- 端口冲突防御（多模型同节点）----
+        //
+        // 复用路径沿用台账里的 engine_port，但该端口可能已被**其它活跃部署**
+        // 占用（模型 A 停止后模型 B 部署时抢走了同一个端口）。启动前检查：
+        // 冲突就重新分配一个空闲端口并回写台账，否则 llama-server 起不来
+        // （address in use）或两个模型共用一条隧道（业务转发串线）。
+        let port_owner = self
+            .state
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| {
+                r.plan.id != id
+                    && r.status.is_active()
+                    && r.plan.cloud.as_ref().map(|c| c.engine_port) == Some(cloud_plan.engine_port)
+                    && r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone())
+                        == cloud_plan.node_ip.clone()
+            });
+        let mut cloud_plan = cloud_plan;
+        if let Some(other) = port_owner {
+            // 排除自己后重新分配：allocate_remote_engine_port 看的是全部活跃
+            // 部署，而本部署此刻仍是 active（provisioning/ready），直接调用
+            // 会把自己的旧端口也当作已占用——正确行为本来就是避开它，
+            // 因此这里先临时把状态当非活跃处理：手动构造排除集。
+            let mut used: std::collections::BTreeSet<u16> = self
+                .state
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.status.is_active() && r.plan.id != id)
+                .filter_map(|r| r.plan.cloud.map(|c| c.engine_port))
+                .collect();
+            used.insert(cloud_plan.engine_port);
+            let new_port = (mangosteen_device::remote::LLAMA_CPP_PORT..=8191u16)
+                .find(|p| !used.contains(p))
+                .unwrap_or(mangosteen_device::remote::LLAMA_CPP_PORT);
+            eprintln!(
+                "[start] 端口 {} 已被部署 {} 占用，本部署改用 {}",
+                cloud_plan.engine_port, other.plan.id, new_port
+            );
+            cloud_plan.engine_port = new_port;
+            cloud_plan.engine.port = new_port;
+            if let Some(c) = plan.cloud.as_mut() {
+                c.engine_port = new_port;
+                c.engine.port = new_port;
+            }
+            self.state.update_plan(id, plan.clone())?;
+        }
 
         sink(
             DeployStage::Selecting,
@@ -1050,6 +1321,7 @@ impl Orchestrator {
             }
             // 只停本模型自己的推理进程（按其 engine_port 定位），
             // 绝不 pkill 全节点，避免误杀同节点其它模型。
+            let mut remote_targets: Vec<mangosteen_device::remote::SshTarget> = Vec::new();
             if let Some(cloud) = rec.plan.cloud.as_ref() {
                 let port = cloud.engine_port;
                 if let Some(target) = self.device_target_for(cloud) {
@@ -1060,6 +1332,7 @@ impl Orchestrator {
                         &workdir,
                         Some(port),
                     );
+                    remote_targets.push(target);
                 } else {
                     let ComputeOrigin::Cloud {
                         provider,
@@ -1069,6 +1342,31 @@ impl Orchestrator {
                     if !provider.trim().is_empty() && !instance_id.trim().is_empty() {
                         if let Some(o) = self.cloud().as_mut() {
                             let _ = o.stop_service_on_port(provider, instance_id, port);
+                            // 厂商实例：取 SSH 目标用于清理下载残留（失败不阻断）
+                            if let Ok(t) = o.service_target(provider, instance_id) {
+                                remote_targets.push(t);
+                            }
+                        }
+                    }
+                }
+            }
+            // 清理该模型在远端的下载残留（断点文件/脚本/pid/日志）：
+            // 上次中断的 aria2c/curl 残留会让新下载「0 字节停滞」误判。
+            // 残留文件按部署方案里的 model_path 派生；辅助文件（mmproj/MTP）
+            // 同样清理。失败只留日志，不阻断清理流程。
+            for t in &remote_targets {
+                if let Some(cloud) = rec.plan.cloud.as_ref() {
+                    for p in std::iter::once(cloud.model_path.clone())
+                        .chain(cloud.auxiliary_downloads.iter().map(|a| a.path.clone()))
+                    {
+                        match mangosteen_device::remote::clean_model_download_artifacts(t, &p) {
+                            Ok(n) if n > 0 => {
+                                eprintln!("[purge] 已清理 {} 的 {} 个下载残留", p, n);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                eprintln!("[purge] 清理 {} 下载残留失败（不阻断）：{e}", p)
+                            }
                         }
                     }
                 }
