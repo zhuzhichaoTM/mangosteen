@@ -1,23 +1,23 @@
 # Mangosteen（山竹）
 
-> 个人级大模型部署客户端 —— **本地算力优先 + 云端算力弹性补位**
+> 云端大模型部署客户端 —— **自动选择租赁多家云厂商GPU算力资源，最优化选择GPU节点，自动化部署开源大模型**
 
-Mangosteen 对标 Ollama 的使用体验，但多了一件事：**本地跑不动的模型，自动帮你上云跑**。
-你只需要说"我要跑这个模型"，剩下的（显存够不够、要不要降量化、云端选哪个节点、实例怎么连）
-由它自己决定。上层应用始终只面对一个 OpenAI 兼容接口。
+Mangosteen 专注于解决本地资源不足的问题。你只需要说"我要跑这个模型"，它会自动：
+- 评估模型所需的 GPU 资源
+- 从多家云厂商中选择最优的 GPU 节点（价格、延迟、可用性、硬件四维打分）
+- 在该节点上自动化部署开源大模型（支持 llama.cpp 引擎）
+- 通过 SSH 隧道将推理服务映射到本地 OpenAI 兼容接口
+
+上层应用始终只面对一个 OpenAI 兼容接口。
 
 ```
 $ mangosteen deploy qwen2.5-7b --context 8192
-✓ 部署完成：qwen2.5-7b-instruct (本地算力)
+✓ 部署完成：qwen2.5-7b-instruct (云端算力 · AutoDL)
+  云上实例正在计费，用完请执行 `mangosteen stop <部署ID>`
   落位形态   全部层驻显存（GPU 全量卸载）
   上下文     8192
   资源占用   权重 4.36 GiB + KV 0.44 GiB + 计算缓冲 0.19 GiB + 开销 0.39 GiB = 5.38 GiB
   OpenAI 入口 http://127.0.0.1:11516/v1
-
-$ mangosteen deploy llama3.3-70b --context 8192
-✓ 部署完成：llama3.3-70b (云端算力 · AutoDL)
-⚠ 发生算力降级：cloud:本地资源不足：需要 42.8 GiB，可用显存 24.0 GiB
-  云上实例正在计费，用完请执行 `mangosteen stop <部署ID>`
 ```
 
 ---
@@ -36,101 +36,51 @@ $ mangosteen deploy llama3.3-70b --context 8192
 | Linux (aarch64) | `mangosteen-linux-aarch64.tar.gz` |
 | Windows (x86_64) | `mangosteen-windows-x86_64.zip` |
 
-### 2. 推理引擎（按 Ollama 的方式集成 llama.cpp）
-
-Mangosteen 以 **llama.cpp 的 `llama-server`** 为唯一推理引擎。集成方式与 Ollama
-一致：**引擎和它的动态库作为一个整体，库搜索路径由 Mangosteen 自己注入**，
-不依赖系统包管理器把 `LC_RPATH` / `RUNPATH` 写对。
-
-```bash
-# 方式一：复用系统已装的 llama.cpp
-brew install llama.cpp                 # macOS / Linux
-
-# 方式二：随包分发的运行时（完全自包含，推荐给不想动系统的用户）
-#   把 llama-server 与它的 .dylib/.so 一起放到 mangosteen 同级目录：
-#   <mangosteen 所在目录>/runtime/darwin-x86_64/llama-server
-#   <mangosteen 所在目录>/runtime/darwin-x86_64/lib*.dylib
-```
-
-查找顺序：`local.engine_path` → 可执行文件同级 `runtime/<平台-架构>/` → `PATH`。
-
-> **为什么需要这一步**：Homebrew 装的 `llama-server` 常常依赖
-> `@rpath/libllama-server-impl.dylib`，但二进制里**没有写 `LC_RPATH`**。
-> 直接执行会报 `Library not loaded ... no LC_RPATH's found`，而 `.dylib`
-> 其实就在 `/usr/local/lib` 里。Mangosteen 启动引擎前会自动探测库目录并注入
-> `DYLD_FALLBACK_LIBRARY_PATH`（Linux 为 `LD_LIBRARY_PATH`），所以**不需要你手工设环境变量**。
->
-> 想确认它到底注入了什么：
->
-> ```bash
-> $ mangosteen engine env
->   二进制                       /usr/local/bin/llama-server
->   DYLD_FALLBACK_LIBRARY_PATH  /usr/local/bin:/usr/local/lib:/usr/lib
-> ```
->
-> `mangosteen doctor` 也会单独列出一项「引擎运行库路径」，把这件事说清楚。
-
-### 3. 初始化并自检
+### 2. 安装并自检
 
 ```bash
 mangosteen config init       # 生成配置模板
 mangosteen doctor            # 环境自检（会告诉你还缺什么）
 ```
 
-### 4. 获取模型
+### 3. 配置云服务商凭证
 
-内置 ModelScope（国内快）与 HuggingFace 两个源，开箱即用：
+配置文件位置（`mangosteen config path` 可查）：
 
-```bash
-# 看某个仓库里有哪些 GGUF 文件（含官方大小与 SHA-256）
-mangosteen models search Qwen/Qwen2.5-0.5B-Instruct-GGUF
-
-# 下载（省略源名时用 storage.default_source，默认 modelscope）
-mangosteen models pull Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf
-
-# 指定源：加前缀或 --source
-mangosteen models pull hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf
-```
-
-下载走的是 Ollama 式的 blob 流程，四个细节都替你处理了：
-
-| 机制 | 效果 |
+| 平台 | 路径 |
 |------|------|
-| 先落 `.part` 临时文件 | 中断不会留下「看起来能用但实际残缺」的 GGUF |
-| 断点续传 | 网络抖动后重跑，从断点继续，不从头开始 |
-| 边下边算 SHA-256 | 与源提供的官方哈希比对，不必下完再读一遍 4.5 GiB |
-| 校验通过才改名 | 同一文件系统内 `rename` 是原子的，不会出现半个模型 |
+| macOS | `~/Library/Application Support/mangosteen/config.toml` |
+| Linux | `${XDG_CONFIG_HOME:-~/.config}/mangosteen/config.toml` |
+| Windows | `%APPDATA%\mangosteen\config.toml` |
 
-下载完成后**自动登记台账**，不需要再 `models add`。重复执行同一条 `pull`
-会直接命中已完成的文件（毫秒级返回），不会重复下载。
-
-已有本地文件时仍可手工登记：
-
-```bash
-mangosteen models add ./qwen2.5-7b-instruct-q4_k_m.gguf
-```
-
-Mangosteen 会解析 GGUF 文件头，读出真实的层数、KV 头数、原生上下文——
-这些是资源评估的依据，不需要你手动填。
-
-模型源列表与自定义源：
-
-```bash
-mangosteen models sources        # 看当前有哪些源、哪个是默认
-```
-
-要接内网私有仓库，只需在配置里加一段，不用改代码：
+配置云服务商凭证（示例使用优云智算）：
 
 ```toml
-[model_sources.myhub]
-name = "myhub"
-kind = "Custom"
-base_url = "https://models.corp.internal"
-default_revision = "main"
-url_template = "{base}/repo/{repo}/raw/{revision}/{file}"
+[providers.compshare]
+driver = "compshare"
+enabled = true
+display_name = "优云智算"
+secret = { env = "COMPSHARE_PRIVATE_KEY" }
+
+[providers.compshare.options]
+public_key = "your-accesskey-id"
+region = "cn-wlcb"
+zone = "cn-wlcb-01"
+image_id = "compshareImage-xxxx"   # 必填：从优云智算控制台「镜像」页复制镜像 ID
+charge_type = "Postpay"            # 按量计费：关机不收费
+gpu_types = "4090,5090"
+max_gpu_count = "1"
 ```
 
-### 5. 部署
+**凭证三种写法**（都不会在 `config show` 里明文输出）：
+
+```toml
+secret = { env = "MY_TOKEN" }         # 从环境变量读（推荐）
+secret = { file = "/run/secrets/tok" } # 从文件读
+secret = { inline = "xxx" }            # 直接内联（仅调试用）
+```
+
+### 4. 部署
 
 ```bash
 mangosteen deploy qwen2.5-7b-instruct --context 8192
@@ -174,21 +124,30 @@ mangosteen ui --no-open  # 只起服务（SSH / 无桌面环境）
 
 ## 核心概念
 
-### 本地优先，不可动摇
+### 云端算力选择
 
-调度决策器严格按这个顺序判断：
+节点选择器对每个候选（服务商 × 规格）做四维归一化打分：
 
 ```
-本地资源满足 → 本地部署        ← 永远优先
-本地资源不足 → 云端降级        ← 只在必要时
-本地部署失败 → 云端降级 + 记录原因
+总分 = w_price·价格分 + w_latency·延迟分 + w_availability·可用性分 + w_hardware·硬件分
 ```
 
-这条原则在三个层面被强制：
+| 维度 | 归一化方式 |
+|------|-----------|
+| 价格 | 候选集内最低价为 1，其它按反比 |
+| 延迟 | 最低延迟为 1；未探测到给中性 0.5 |
+| 可用性 | 库存富余度 × 0.6 + 支持按量释放 × 0.2 + 有报价 × 0.2 |
+| 硬件 | GPU 型号偏好系数 × 0.5 + 显存富余度 × 0.5 |
 
-* 配置层：`scheduler.local_first` 默认 `true`，关闭会在 `doctor` 里告警；
-* 代码层：`Scheduler::decide()` 的本地判断在云端构造之前；
-* 测试层：`tests/layering.rs` 里的 `c4_*` 用例会扫描源码验证顺序。
+硬性约束（不满足直接淘汰）：最低显存、最低内存、最低磁盘、价格上限、服务商白名单、地域白名单、库存要求。
+
+用 `--explain` 可以看到每个候选的明细：
+
+```
+$ mangosteen cloud pick --min-vram 24 --explain
+★ autodl/RTX 4090 [cn-west-1] ¥2.380/h · 42ms · 24.0GiB │ 价格 1.00 延迟 1.00 可用 0.92 硬件 0.94 → 总分 0.9654
+  ucloud/RTX 4090 [cn-east-2] ¥2.650/h · 78ms · 24.0GiB │ 价格 0.90 延迟 0.54 可用 0.92 硬件 0.94 → 总分 0.8123
+```
 
 ### 三个"唯一"
 
@@ -246,13 +205,11 @@ mangosteen ui --no-open  # 只起服务（SSH / 无桌面环境）
 
 | 命令 | 作用 |
 |------|------|
-| `deploy <模型>` | 部署（本地优先，不足自动上云） |
+| `deploy <模型>` | 部署到云端GPU节点 |
 | `run <模型>` | 部署并前台保持运行，Ctrl-C 优雅退出 |
 | `stop <ID> \| --all` | 停止并释放资源 |
-| `status` | 系统状态（硬件 / 引擎 / 配置 / 活跃部署） |
+| `status` | 系统状态（配置 / 活跃部署） |
 | `ps` | 列出全部部署记录 |
-| `models add/list/show/verify/remove` | 模型管理 |
-| `assess <模型>` | **只评估不部署**，看本地能不能跑 |
 | `cloud providers/specs/pick/cheapest/instances/destroy` | 云端算力 |
 | `config show/init/path/validate` | 配置管理 |
 | `serve` | 只起 API 网关（多个终端协作时用） |
@@ -262,12 +219,6 @@ mangosteen ui --no-open  # 只起服务（SSH / 无桌面环境）
 ### 常用组合
 
 ```bash
-# 花钱前先问清楚：本地能跑吗？跑不动需要多大云端显存？
-mangosteen assess llama3.3-70b --context 8192
-
-# 只允许本地，绝不花钱
-mangosteen deploy qwen2.5-7b --local-only
-
 # 云端选点，看清打分依据（不创建实例、不产生费用）
 mangosteen cloud pick --min-vram 24 --max-price 3.0 --explain
 
@@ -300,12 +251,11 @@ mangosteen serve --port 8080
 
 ```toml
 [gateway]
-port = 11516                # 默认值；11434 留给 Ollama 守护进程
+port = 11516                # 默认值
 host = "127.0.0.1"
 require_api_key = false
 
 [scheduler]
-local_first = true                    # 不要关掉
 max_fallbacks = 2                     # 降级重试上限
 max_price_per_hour = 5.0              # 云端价格上限（元/小时）
 
@@ -314,14 +264,6 @@ price = 40                            # 四维相对权重，不必加和为 1
 latency = 15
 availability = 30
 hardware = 15
-
-[local]
-default_context = 8192
-kv_cache = "f16"
-allow_cpu_fallback = true
-allow_partial_offload = true
-port_range_start = 11435
-port_range_end = 11999
 
 [storage]
 models_dir = "~/Library/Application Support/mangosteen/models"
@@ -397,7 +339,7 @@ list_specs = "/v1/gpu/specs"          # ← 厂商改了就改这里
 
 ## 资源评估是怎么算的
 
-一次本地部署占用的显存/内存由四块构成：
+一次云端部署占用的显存/内存由四块构成：
 
 ```
 总需求 = 权重 + KV Cache + 计算缓冲 + 运行时开销
@@ -420,78 +362,7 @@ GQA 模型（如 Qwen2.5，28 heads / 4 KV heads）在 32K 上下文只需 ~1.7 
 
 ---
 
-## 云端是怎么选的
-
-节点选择器对每个候选（服务商 × 规格）做四维归一化打分：
-
-```
-总分 = w_price·价格分 + w_latency·延迟分 + w_availability·可用性分 + w_hardware·硬件分
-```
-
-| 维度 | 归一化方式 |
-|------|-----------|
-| 价格 | 候选集内最低价为 1，其它按反比 |
-| 延迟 | 最低延迟为 1；未探测到给中性 0.5 |
-| 可用性 | 库存富余度 × 0.6 + 支持按量释放 × 0.2 + 有报价 × 0.2 |
-| 硬件 | GPU 型号偏好系数 × 0.5 + 显存富余度 × 0.5 |
-
-硬性约束（不满足直接淘汰）：最低显存、最低内存、最低磁盘、价格上限、服务商白名单、地域白名单、库存要求。
-
-用 `--explain` 可以看到每个候选的明细：
-
-```
-$ mangosteen cloud pick --min-vram 24 --explain
-★ autodl/RTX 4090 [cn-west-1] ¥2.380/h · 42ms · 24.0GiB │ 价格 1.00 延迟 1.00 可用 0.92 硬件 0.94 → 总分 0.9654
-  ucloud/RTX 4090 [cn-east-2] ¥2.650/h · 78ms · 24.0GiB │ 价格 0.90 延迟 0.54 可用 0.92 硬件 0.94 → 总分 0.8123
-```
-
----
-
 ## 故障处理
-
-### `mangosteen doctor` 说引擎有问题
-
-Doctor 会真正执行 `--version` 验证，不只看文件是否存在。
-
-**情况一：动态库找不到**（最常见，且通常**不需要**你动手）
-
-```
-[FAIL] 本地推理引擎
-       /usr/local/bin/llama-server 存在但无法运行：Library not loaded:
-       @rpath/libllama-server-impl.dylib ... no LC_RPATH's found
-```
-
-Mangosteen 已经自动注入库搜索路径，如果仍然失败，说明库不在常见目录。按顺序查：
-
-```bash
-mangosteen engine env      # 看它注入了什么、从哪些目录找
-mangosteen engine locate   # 看搜索过哪些目录
-```
-
-确认库的真实位置后，在配置里手工指定：
-
-```toml
-[local.engine_env]
-DYLD_FALLBACK_LIBRARY_PATH = "/opt/my-llama/lib"
-```
-
-**情况二：架构不匹配**
-
-```
-Bad CPU type in executable
-```
-
-Homebrew 在 Apple Silicon 上装到了 `/usr/local`（Intel 路径），或反之。
-用 `mangosteen engine locate` 看实际路径，必要时用 `local.engine_path` 指向正确的那份。
-
-**情况三：引擎根本没装**
-
-```
-[FAIL] 本地推理引擎
-       未找到 llama-server。已搜索：/usr/local/bin: /usr/bin: ...
-```
-
-Doctor 会把**搜索过的目录**全列出来——这比让你猜 PATH 有没有配更直接。
 
 ### 部署失败了，怎么知道原因
 
@@ -499,10 +370,10 @@ Doctor 会把**搜索过的目录**全列出来——这比让你猜 PATH 有没
 
 ```bash
 mangosteen ps                          # 看状态
-mangosteen status                      # 看活跃部署 + 引擎路径
+mangosteen status                      # 看活跃部署
 ```
 
-引擎日志在 `<日志目录>/engine-<端口>.log`，错误消息里会给出完整路径。
+云端日志在 `<日志目录>/engine-<端口>.log`，错误消息里会给出完整路径。
 
 ### 云端实例忘了关
 
@@ -521,7 +392,7 @@ mangosteen cloud instances       # 只看云端实例
 mangosteen stop --all            # 清理残留进程
 ```
 
-或改配置 `local.port_range_start` / `port_range_end`。
+或改配置 `gateway.port`。
 
 ---
 
@@ -564,7 +435,7 @@ crates/
 │   └── protocol.rs       协议规范化
 ├── orchestration         第三层：评估 / 决策 / 节点配置 / 部署编排 / 生命周期
 │   ├── assess.rs         资源评估
-│   ├── scheduler.rs      本地优先决策与云端候选打分
+│   ├── scheduler.rs      云端候选打分
 │   ├── runtime.rs         编排核心状态、Orchestrator 类型与子模块组装
 │   ├── deploy.rs          部署准备与阶段编排
 │   ├── evaluate.rs        本地 / 远端 / 粗估评估入口
@@ -578,8 +449,8 @@ crates/
 │   ├── deployment.rs     部署产物与预览契约
 │   ├── progress.rs       部署阶段进度契约
 │   └── backend.rs        后端目标（BackendTarget）
-├── device                第四层：本地/云端共用的执行语义
-│   ├── engine.rs         llama.cpp / Ollama 引擎实现
+├── device                第四层：云端执行语义
+│   ├── engine.rs         llama.cpp 引擎实现
 │   ├── plugin.rs         引擎插件注册表
 │   ├── llama_args.rs     引擎参数生成（插件侧）
 │   └── remote.rs         远端 SSH 执行、模型下载、引擎启停（DeviceRuntime）

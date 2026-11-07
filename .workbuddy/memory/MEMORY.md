@@ -1,8 +1,9 @@
 # Mangosteen 项目长期记忆
 
 ## 身份与架构
-- 个人级大模型部署编排客户端，Apache-2.0，仓库 `/Users/zhuzhichao/Documents/mangosteen`
-- 纯云端部署（本地推理交 Ollama）；五层：交互 / 网关(唯一收口) / 编排 / 执行 / 基础
+- 云端大模型部署客户端，Apache-2.0，仓库 `/Users/zhuzhichao/Documents/mangosteen`
+- 定位：解决本地资源不足的情况下，自动选择租赁多家云厂商GPU算力资源，最优化选择GPU节点，然后在该节点上自动化部署开源大模型
+- 五层：交互 / 网关(唯一收口) / 编排 / 执行 / 基础
 - 新增 crate 必改三处：根 Cargo.toml、cli/tests/layering.rs、cli/tests/release_assets.rs
 
 ## 不可违反基线
