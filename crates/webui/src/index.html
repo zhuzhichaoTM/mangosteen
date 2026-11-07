@@ -119,11 +119,28 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel3);
 .kv{display:flex;justify-content:space-between;gap:14px;font-size:12.5px;padding:3px 0}
 .kv .k{color:var(--muted);flex:0 0 auto}
 .kv .v{font-family:var(--mono);font-size:12px;text-align:right;word-break:break-all}
-/* 设置页节点列表：每行一个带边框的条目，与页面卡片风格一致 */
+/* 设置页节点列表：每行一个带边框的条目，与页面卡片风格一致，文字风格与对话/部署页一致 */
 #se-devices .kv{border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin-top:8px;
   background:var(--panel2);align-items:center}
 #se-devices .kv:first-child{margin-top:0}
 #se-devices .kv button{flex:0 0 auto}
+#se-devices .kv .k{color:var(--muted);flex:0 0 auto;font-size:12px;font-weight:500}
+#se-devices .kv .v{font-family:var(--mono);font-size:12px;text-align:right;word-break:break-all;color:var(--text)}
+
+/* 云端节点列表：Excel 风格表格——表头行 + 数据行，六列横向对齐
+   （实例名称 | 实例ID | 规格详情 | 云厂商 | 运行状态 | 控制指令）。
+   用 CSS Grid 保证列对齐：表头与数据行共用同一套列宽模板。 */
+#se-cloud-instances .ci-head{display:grid;grid-template-columns:1.4fr 2fr 1.4fr 0.9fr 0.9fr 150px;
+  gap:10px;padding:6px 12px;font-size:11.5px;color:var(--muted);border-bottom:1px solid var(--line)}
+#se-cloud-instances .ci{border-bottom:1px solid var(--line);border-radius:0;padding:8px 12px;margin-top:0;
+  display:grid;grid-template-columns:1.4fr 2fr 1.4fr 0.9fr 0.9fr 150px;
+  gap:10px;align-items:center}
+#se-cloud-instances .ci:last-child{border-bottom:none}
+#se-cloud-instances .ci button{flex:0 0 auto}
+#se-cloud-instances .ci-cell{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);border-radius:6px;padding:4px 8px;background:var(--panel2)}
+#se-cloud-instances .ci-name{overflow:hidden;text-overflow:ellipsis}
+#se-cloud-instances .ci-actions{display:inline-flex;gap:6px;justify-content:flex-end;flex:0 0 auto}
 
 .model-row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
 #v-deploy .pane{display:flex;flex-direction:column;overflow:hidden}
@@ -465,17 +482,30 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
 .tpl-field{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--text2)}
 .tpl-field select,.tpl-field input{font-size:12px;padding:0 9px;border-radius:6px;min-height:28px}
 
-/* 云平台密钥：每个平台一个子块（标题 + 输入 + 保存） */.pk-block{padding:14px 0 4px;border-top:1px solid var(--line, rgba(128,128,128,.2))}
+/* 云平台密钥：每个平台一个子块（标题 + 输入 + 保存） */
+.pk-block{padding:14px 0 4px;border-top:1px solid var(--line, rgba(128,128,128,.2))}
 .pk-block:first-child{border-top:none;padding-top:2px}
 .pk-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
 /* 与卡片标题（h3：13px/650 字重）一致，不用 <b> 的 700 加粗 */
 .pk-title b{font-size:13px;font-weight:650}
 .pk-block .node-form.single{grid-template-columns:1fr}
+.pk-block input{font-size:12px;padding:0 9px;border-radius:6px;min-height:26px;font-weight:400;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--text)}
+.pk-block input:focus{outline:2px solid var(--accent-line);outline-offset:-1px;border-color:var(--accent-line)}
 /* 设置页与对话/部署页签观感一致：
    文本框参考部署页「节点信息」值框（12px 字体 / 6px 圆角 / 26px 高 / 同边框底色），
    控制按钮统一 sm 尺寸（与部署页「开始/停止/详情」、对话页各按钮同款）。 */
-#v-setting input, #ov-node input{font-size:12px;padding:0 9px;border-radius:6px;min-height:26px;font-weight:400}
-#v-setting .node-card > .node-actions button{padding:3px 9px;font-size:12px;border-radius:6px}
+#v-setting input, #ov-node input{font-size:12px;padding:0 9px;border-radius:6px;min-height:26px;font-weight:400;
+  border:1px solid var(--line2);background:var(--panel2);color:var(--text)}
+#v-setting input:focus, #ov-node input:focus{outline:2px solid var(--accent-line);outline-offset:-1px;border-color:var(--accent-line)}
+#v-setting .node-card > .node-actions button{padding:3px 9px;font-size:12px;border-radius:6px;
+  border:1px solid var(--line2);background:var(--panel);color:var(--text);transition:.13s}
+#v-setting .node-card > .node-actions button:hover:not(:disabled){background:var(--panel3);border-color:var(--faint)}
+#v-setting .node-card > .node-actions button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+#v-setting .node-card > .node-actions button.primary:hover:not(:disabled){background:var(--accent2);border-color:var(--accent2)}
+#v-setting .node-card > .node-actions button.danger{color:var(--danger);border-color:var(--danger-line);background:var(--danger-soft)}
+#v-setting .node-card > .node-actions button.ghost{border-color:transparent;background:transparent;color:var(--muted)}
+#v-setting .node-card > .node-actions button.ghost:hover:not(:disabled){background:var(--panel3);border-color:var(--line2)}
 
 .ov{
   position:fixed;inset:0;background:rgba(10,10,12,.48);backdrop-filter:blur(2px);
@@ -692,9 +722,17 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
         <div class="sub" data-page-node-id="sAuBnmBm7z8IxYObLTPsp8">配置系统运行参数</div>
 
         <div class="card node-card" data-page-node-id="gdTKUaWQsCjtS2KDCrDkB8">
-          <h3 data-page-node-id="fCmQKA8taFw1jjnEdHQ1Ys">自定义节点<button class="qmark" type="button" aria-label="显示说明"
-            onclick="const h=this.closest('h3').nextElementSibling; h.hidden=!h.hidden" data-page-node-id="NOzz4MKcENyJCfU9nGGhDG">?</button></h3>
-          <div class="hint" hidden data-page-node-id="4WFipOwOsmrpDkFx0ffmq5">已添加的节点会出现在部署页设备选择中。密码只用于 SSH 连接，不会回显。点「添加」按钮弹出添加对话框。</div>
+          <h3 data-page-node-id="fCmQKA8taFw1jjnEdHQ1Ys">云端节点<button class="qmark" type="button" aria-label="显示说明"
+            onclick="const h=this.closest('h3').nextElementSibling; h.hidden=!h.hidden" data-page-node-id="NOzz4MKcENyJCfU9nGGhDG">?</button>
+            <button class="ghost sm" id="se-cloud-refresh" style="margin-left:8px" type="button">刷新</button></h3>
+          <div class="hint" hidden data-page-node-id="4WFipOwOsmrpDkFx0ffmq5">显示当前支持的云厂商下已创建的 GPU 实例节点，支持关机、开机、删除控制。删除会销毁实例与磁盘（不可恢复）；关机/开机只是电源操作，实例与磁盘保留。点「刷新」实时获取实例现状。</div>
+          <div id="se-cloud-instances" style="margin-top:14px" data-page-node-id="uFPaqoRSbOWiDdieQa0AEd"><div class="empty" data-page-node-id="HfYgdtSeAsvjtHKhROdKfR">加载中…</div></div>
+        </div>
+
+        <div class="card node-card" data-page-node-id="kdaopw3D7LgtYi9GIMUz0K">
+          <h3 data-page-node-id="llJLMxHAkWrbzf1ghD3zDj">自定义节点<button class="qmark" type="button" aria-label="显示说明"
+            onclick="const h=this.closest('h3').nextElementSibling; h.hidden=!h.hidden" data-page-node-id="DKWnmLAElGQeINfqY5cxH3">?</button></h3>
+          <div class="hint" hidden data-page-node-id="bCxxxxx">已添加的节点会出现在部署页设备选择中。密码只用于 SSH 连接，不会回显。点「添加」按钮弹出添加对话框。</div>
           <div id="se-devices" style="margin-top:14px" data-page-node-id="uFPaqoRSbOWiDdieQa0AEd"><div class="empty" data-page-node-id="HfYgdtSeAsvjtHKhROdKfR">加载中…</div></div>
           <div class="node-actions" data-page-node-id="6rHnD1FJjXu4XdbBkCcLAp">
             <button class="primary sm" id="se-dev-open" data-page-node-id="wdKo5r8gEr2Ey7KBX7WGNe">添加</button>
@@ -1496,7 +1534,12 @@ Tabs.register("deploy", (() => {
     { id: "qwen2.5-0.5b", name: "Qwen2.5-0.5B", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
     { id: "qwen3.8-27b", name: "Qwen3.8-27B", source: "hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" },
   ];
-  const stages = ["模型评估", "设备选择", "设备配置", "模型下载", "启动模型", "建立隧道"];
+  // ---- 云端搜索环节（新增）----
+//
+// 模型评估完成后直接跳转到云端搜索（不再卡在「模型评估」阶段）
+// 这样用户就能看到「云端可用节点」和「本地已运行节点」，
+// 然后在「设备选择」中最终确认匹配 GPU 类型的设备。
+const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", "模型下载", "启动模型", "建立隧道"];
   let registry = {};
   let liveMap = {};
   // 轮询短暂失败时保留最后一个已确认阶段，不能把流程重置为模型评估。
@@ -1557,8 +1600,17 @@ Tabs.register("deploy", (() => {
   function stageIndex(stage) {
     const id = stage && stage.id;
     if (id === "ready") return stages.length;
-    const i = ["assessing", "selecting", "configuring", "downloading", "launching", "tunneling"].indexOf(id);
-    return i < 0 ? 0 : i;
+    // 后端阶段 → UI 步骤映射（UI 在「模型评估」后新增了「云端搜索」）：
+    //   assessing   → 0 模型评估
+    //   selecting   → 2 设备选择（云端搜索在 UI 索引 1，由前端 preview 请求时展示）
+    //   configuring → 3 设备配置
+    //   downloading → 4 模型下载
+    //   launching   → 5 启动模型
+    //   tunneling   → 6 建立隧道
+    const backend = ["assessing", "selecting", "configuring", "downloading", "launching", "tunneling"].indexOf(id);
+    if (backend < 0) return 0;
+    // selecting 及之后 +1（跳过 UI 的云端搜索位）；assessing 保持 0
+    return backend === 0 ? 0 : backend + 1;
   }
 
   function stageSummary(j) {
@@ -1574,7 +1626,13 @@ Tabs.register("deploy", (() => {
       msel.innerHTML = models.map(x => '<option value="' + esc(x.id) + '">' + esc(x.name) + "</option>").join("");
       msel.dataset.built = "1";
       msel.onchange = () => { renderTemplateOptions(); refreshStatus(); };
-      $("dp-template-sel").onchange = () => { if ($("dp-detail").hidden === false) showDetail($("dp-template-sel").value); };
+      $("dp-template-sel").onchange = () => {
+        if ($("dp-detail").hidden === false) showDetail($("dp-template-sel").value);
+        // 模板切换必须立即重读 liveMap（键含模板槽位）：
+        // 否则切到未部署过的模板时，节点信息/实例ID/登陆方式
+        // 仍然残留上一个模板的值，直到下一次 5 秒轮询才消失。
+        refreshStatus();
+      };
       $("dp-deploy-btn").onclick = () => { const mdef = currentModelDef(); begin(mdef, $("dp-template-sel").value, registry[mdef.id]); };
       $("dp-chain-abort").onclick = cancelDeployment;
       $("dp-remove-btn").onclick = () => { const mdef = currentModelDef(); unload(mdef.id); };
@@ -1604,9 +1662,22 @@ Tabs.register("deploy", (() => {
       // 为什么不能只精确匹配：台账 base 名跟随 GGUF 文件名
       // （Qwen3.8-27B-UD-*.gguf → qwen3.8-27b-ud），同一 UI 模型可能
       // 对应多个 base 名，运行中记录必须能被找到。
+      //
+      // ## 模板隔离（2026-11-06）
+      //
+      // liveMap 按「模型 + 模板」双键存储：不同模板（default / Uncensored）
+      // 是**不同的部署**——Uncensored 的运行记录不代表 default 也部署过。
+      // 旧实现单键（模型 id），切模板时把其它模板的节点信息/实例ID/
+      // 登陆方式原样带过来，用户误以为 default 也部署了。
+      // 台账记录目前不携带模板字段，此处以「记录里的部署 ID 含模板来源
+      // 的 GGUF 名」无法区分，故采用保守策略：liveMap 键 = 模型id + "|" +
+      // 当前选中模板槽位。同一模板的部署记录才回填状态；切到未部署过的
+      // 模板时 live 为空 → 节点信息/实例ID/登陆方式全部显示 "-"。
       const all = (d.deployments || []).filter((x) => x.status !== "destroyed");
       const baseName = (x) => String(x.model_id || x.model || "").toLowerCase().split(":")[0];
       const isLive = (x) => !!x.running || x.status === "provisioning";
+      const sel = $("dp-template-sel");
+      const tmplKey = mdef.id + "|" + (sel ? sel.value : "default");
       const pool = all.filter((x) => {
         const b = baseName(x);
         return b === mdef.id || b.startsWith(mdef.id + "-");
@@ -1617,7 +1688,7 @@ Tabs.register("deploy", (() => {
       if (!cands.length) cands = pool;
       cands.sort(byNew);
       cands.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-      liveMap[mdef.id] = cands[0] || null;
+      liveMap[tmplKey] = cands[0] || null;
     });
     renderTemplateOptions();
     refreshStatus();
@@ -1669,7 +1740,11 @@ Tabs.register("deploy", (() => {
 
   function refreshStatus() {
     const mdef = currentModelDef();
-    const live = liveMap[mdef.id];
+    // 与 loadModels 的写入键保持一致：模型id + "|" + 当前选中模板槽位。
+    // 切换模板时读不同的 live 记录——未部署过的模板显示空状态。
+    const selEl = $("dp-template-sel");
+    const tmplKey = mdef.id + "|" + (selEl ? selEl.value : "default");
+    const live = liveMap[tmplKey];
 
     // ---- 实例ID / 登陆方式：只在「运行中 / 部署中」时显示 ----
     //
@@ -1738,9 +1813,12 @@ Tabs.register("deploy", (() => {
     // ---- 开始按钮：文案恒定，不随状态变化 ----
     //
     // 用户要求按钮固定是「开始」（面向普通用户，比「部署」直白）。
-    // 是否可点由状态决定：正在部署中时禁用（避免并发两个任务）；
-    // 其它情况都可点——未部署→创建实例，已部署但停止→复用实例启动。
-    const deploying = !!live && live.deployed && !running && live.status === "provisioning";
+    // 「开始/停止任何时候都可点」：台账里可能存在**卡死在 provisioning
+    // 的历史记录**（部署中断、进程重启后状态没推进），若按
+    // `status === "provisioning"` 禁用，这个模型会被永久锁死成灰色。
+    // 并发防护改由 `currentJob`（本页面正在进行的部署任务）承担——
+    // 它只在本页 begin() 时置位、任务结束时清零，不会残留。
+    const deploying = !!currentJob;
     const deploy = $("dp-deploy-btn");
     deploy.textContent = "开始";
     deploy.disabled = deploying;
@@ -1789,6 +1867,10 @@ Tabs.register("deploy", (() => {
     // 否则新任务会被 renderChain 的「只前进」逻辑直接顶到旧位置。
     lastChainIndex = 0;
     lastChainNote = "";
+    currentJob = null; // 方案2：置空并发标记，允许立即重新部署
+    // 每次点击「开始部署」前，**清空上一次阶段处理输出的内容**
+    // （避免上一次失败的错误提示残留）。
+    $("dp-chain-detail").innerHTML = "";
     renderChain(0, "正在读取模型规格；随后会等待云端节点创建完成");
     // 显示模板的**显示名**（正文首行 `template:` 的值，如 Uncensored），
     // 而不是内部槽位名（mode1）。用户看到的就是实际会生效的那份配置。
@@ -1804,7 +1886,7 @@ Tabs.register("deploy", (() => {
     const tplText = templateText(mdef.id, template);
     const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, model_id:mdef.id, target:"cloud", config_template:template, config_template_text:tplText})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
     console.log("DEBUG: pv response:", pv);
-    renderChain(1, "模型评估完成，请选择设备后继续");
+    renderChain(1, "模型评估完成 → 云端搜索中，请选择可用节点后继续");
     const saved = (pv.devices || []).map(d => ({
       id: d.id, custom: true, gpu_model: d.name || "自定义设备", provider: "本地自定义",
       region: "SSH", spec_id: d.id, vram_bytes: 0, memory_bytes: 0, disk_bytes: 0,
@@ -2000,7 +2082,11 @@ Tabs.register("deploy", (() => {
   /// 实例与磁盘保留，下次点「部署」会复用同一台机器开机重启；
   /// 真正销毁由系统按策略回收，或在删除自定义节点时按需调用云 API。
   async function unload(modelId) {
-    const live = liveMap[modelId];
+    // unload 按模型 id 触发（不关心模板），但 liveMap 按模板隔离。
+    // 因此这里必须构造正确的模板键：模型id + "|" + 当前选中模板槽位。
+    const selEl = $("dp-template-sel");
+    const tmplKey = modelId + "|" + (selEl ? selEl.value : "default");
+    const live = liveMap[tmplKey];
     if (!live) { toast("当前模型没有可停止的部署", "err"); return; }
     if (!confirm("确定停止该模型的推理服务？\n实例会被关机以停止 GPU 计费，但机器与已下载的权重会保留，可再次部署复用。")) return;
     try {
@@ -2044,7 +2130,18 @@ Tabs.register("setting", (() => {
   const modelTemplateText = new Map();
 
   async function load() {
-    await Promise.all([loadDevices(), loadProviderKeys(), loadModelTemplates()]);
+    await Promise.all([loadDevices(), loadProviderKeys(), loadModelTemplates(), loadCloudInstances()]);
+    // 刷新按钮：重新拉取云厂商实例现状（关机/开机/删除后自动刷新，
+    // 这里提供手动入口，避免用户误以为列表是实时的）。
+    const refreshBtn = $("se-cloud-refresh");
+    if (refreshBtn && !refreshBtn.onclick) {
+      refreshBtn.onclick = () => {
+        refreshBtn.disabled = true; refreshBtn.textContent = "刷新中…";
+        loadCloudInstances().finally(() => {
+          refreshBtn.disabled = false; refreshBtn.textContent = "刷新";
+        });
+      };
+    }
   }
 
   // ---- 模型配置模板：设置页是唯一维护入口 ----
@@ -2089,7 +2186,7 @@ Tabs.register("setting", (() => {
             '<span class="gi-sub">' + esc(m.model) + ' · ' + esc(t.slot) + '</span></div>' +
             '<div class="tpl-sum">' + detail + '</div>' +
             '<div class="node-actions"><button class="sm tpl-edit">查看/编辑</button>' +
-            '<button class="sm tpl-del">删除</button></div></div>');
+            '<button class="primary sm tpl-del">删除</button></div></div>');
         });
       });
       if (!rows.length) {
@@ -2190,24 +2287,49 @@ Tabs.register("setting", (() => {
     const box = $("se-provider-keys");
     try {
       const s = await api("/api/settings");
-      const ps = (s.providers || []).filter((p) => p.enabled);
+      // 显示全部已配置的厂商（含未启用的）：未启用但有密钥输入框的厂商
+      // （如优云智算）也必须能在这里输入密钥——否则用户永远无法启用它。
+      // 当前只开放优云智算（compshare/ucloud）：其它云厂商暂不激活显示。
+      // 后续接入新厂商时把驱动名加进这个白名单即可。
+      const OPEN_PROVIDERS = ["compshare", "ucloud"];
+      const ps = (s.providers || []).filter((p) => OPEN_PROVIDERS.includes(p.name));
       if (!ps.length) { box.innerHTML = '<div class="empty">暂无已启用的云平台（可在 config.toml 中启用）</div>'; return; }
       box.innerHTML = "";
       ps.forEach((p) => {
         const sec = el("div", "pk-block");
         const hasPk = typeof p.public_key === "string";
-        const st = p.secret_configured ? "密钥已配置" : "未配置密钥";
+        // 状态文字只在「已启用且有密钥」时显示为「密钥已配置」；
+        // 未启用/未配置的中间态不展示——避免「compshare · 未启用 · 未配置密钥」
+        // 这种冗长提示占满标题行，用户只需要知道「这里可以填密钥」。
+        const st = p.enabled && p.secret_configured ? "密钥已配置" : "";
+        const isCompshare = p.name === "compshare" || p.name === "ucloud";
+        // 优云智算必须**始终**渲染两个输入框：AccessKey ID（public_key）
+        // 与 AccessKey Secret（private_key）。/api/settings 的 public_key
+        // 在密钥未保存前是 null——旧判据 `typeof p.public_key === "string"`
+        // 会把 ID 输入框整个藏掉，只剩一个 Secret 框，用户无法完整录入。
+        const showIdInput = isCompshare || hasPk;
         sec.innerHTML =
           '<div class="pk-title"><b>' + esc(p.display_name || p.name) + '</b>' +
-          '<span class="gi-sub">' + esc(p.name) + ' · ' + st + '</span></div>' +
-          '<div class="node-form' + (hasPk ? "" : " single") + '">' +
-          (hasPk
-            ? '<input class="pk-id" type="text" placeholder="Public_key（平台公钥，申请获取）">'
+          (st ? '<span class="gi-sub">' + esc(st) + '</span>' : '') +
+          '</div>' +
+          '<div class="node-form' + (showIdInput ? "" : " single") + '">' +
+          (showIdInput
+            ? '<input class="pk-id" type="text" placeholder="AccessKey ID（平台公钥）">'
             : "") +
           '<input class="pk-secret" type="password" placeholder="AccessKey Secret（平台私钥，留空表示不修改）">' +
           '</div>' +
-          '<div class="node-actions"><button class="primary sm pk-save">保存</button><span class="hint pk-msg"></span></div>';
+          '<div class="node-actions">' +
+          '<button class="primary sm pk-save">保存</button>' +
+          (isCompshare
+            ? '<button class="ghost sm pk-register">注册</button>'
+            : "") +
+          '<span class="hint pk-msg"></span></div>';
         sec.querySelector(".pk-save").onclick = () => saveProviderKeys(p.name, sec);
+        const regBtn = sec.querySelector(".pk-register");
+        if (regBtn) {
+          // 注册按钮：新窗口打开优云智算注册页（带邀请码）。
+          regBtn.onclick = () => window.open("https://passport.compshare.cn/register?referral_code=D7ulbLWjdVHCJ0gNwdFxoa", "_blank");
+        }
         box.appendChild(sec);
       });
     } catch (e) { box.innerHTML = '<div class="empty">云平台密钥读取失败：' + esc(e.message) + '</div>'; }
@@ -2235,6 +2357,87 @@ Tabs.register("setting", (() => {
       toast(text, "ok");
       await loadProviderKeys();
     } catch (e) { msg.textContent = ""; toast("密钥保存失败：" + e.message, "err"); }
+  }
+
+  // ---- 云端节点：实时拉取云厂商 GPU 实例，提供 关机/开机/删除 控制 ----
+  //
+  // 与「自定义节点」完全独立：自定义节点是用户自己登记的 SSH 机器
+  // （/api/devices），云端节点是云厂商 API 托管的实例（cloud instances）。
+  // 两块 UI 各自加载、各自渲染，互不读写对方的数据源。
+  async function loadCloudInstances() {
+    const box = $("se-cloud-instances");
+    if (!box) return;
+    try {
+      const r = await api("/api/cloud/instances", { timeoutMs: 30000 });
+      box.innerHTML = "";
+      const list = r.instances || [];
+      if (!list.length) { box.innerHTML = '<div class="empty">当前云厂商下没有 GPU 实例（部署模型后会出现在这里）</div>'; return; }
+      const stateText = { running: "运行中", stopped: "已关机", creating: "创建中", stopped_saving: "已关机", destroyed: "已销毁", failed: "异常" };
+      // 状态徽标配色：运行中=绿，创建中/其它=灰，异常=红
+      const stateClass = { running: "ok", failed: "err" };
+      // Excel 风格表头：六列标题，与下方数据行一一对齐
+      const header = el("div", "ci-head");
+      header.innerHTML =
+        '<span>实例名称</span>' +
+        '<span>实例ID</span>' +
+        '<span>规格详情</span>' +
+        '<span>云厂商</span>' +
+        '<span>运行状态</span>' +
+        '<span style="text-align:right">控制指令</span>';
+      box.appendChild(header);
+      list.forEach((x) => {
+        const row = el("div", "ci");
+        const state = stateText[x.status] || x.status || "未知";
+        const stateCls = stateClass[x.status] || "";
+        const spec = (x.gpu_model || "GPU") + " × " + (x.gpu_count || 1) + " · " + gib(x.vram_bytes || 0);
+        const access = x.ssh_target || "-";
+        // Excel 风格数据行：六列与表头一一对齐（名称 | ID | 规格 | 厂商 | 状态 | 操作）
+        row.innerHTML =
+          '<span class="ci-cell ci-name"><b>' + esc(x.display_name || x.model || "GPU 实例") + '</b>' +
+          (x.price_per_hour != null ? '<span class="gi-sub"> ¥' + Number(x.price_per_hour).toFixed(2) + '/h</span>' : '') +
+          '</span>' +
+          '<span class="ci-cell gi-sub" title="实例ID">' + esc(x.instance_id || "-") + '</span>' +
+          '<span class="ci-cell">' + esc(spec) + '</span>' +
+          '<span class="ci-cell">' + esc(x.provider || "-") + '</span>' +
+          '<span class="ci-cell"><span class="badge ' + stateCls + '">' + esc(state) + '</span></span>' +
+          '<span class="ci-actions">' +
+          (x.status === "running"
+            ? '<button class="sm ci-stop">关机</button>'
+            : '<button class="sm ci-start">开机</button>') +
+          ' <button class="danger sm ci-destroy">删除</button>' +
+          '</span>';
+        const instanceId = x.instance_id;
+        const provider = x.provider;
+        const stopBtn = row.querySelector(".ci-stop");
+        if (stopBtn) stopBtn.onclick = async () => {
+          if (!confirm("确定关机实例 " + instanceId + "？关机后停止 GPU 计费，实例与磁盘保留。")) return;
+          stopBtn.disabled = true; stopBtn.textContent = "关机中…";
+          try { await api("/api/cloud/instances/" + encodeURIComponent(provider) + "/" + encodeURIComponent(instanceId) + "/power-off", { method: "POST", timeoutMs: 60000 }); toast("实例已关机", "ok"); }
+          catch (e) { toast("关机失败：" + e.message, "err"); }
+          stopBtn.disabled = false; stopBtn.textContent = "关机";
+          loadCloudInstances();
+        };
+        const startBtn = row.querySelector(".ci-start");
+        if (startBtn) startBtn.onclick = async () => {
+          if (!confirm("确定开机实例 " + instanceId + "？")) return;
+          startBtn.disabled = true; startBtn.textContent = "开机中…";
+          try { await api("/api/cloud/instances/" + encodeURIComponent(provider) + "/" + encodeURIComponent(instanceId) + "/power-on", { method: "POST", timeoutMs: 120000 }); toast("实例已开机", "ok"); }
+          catch (e) { toast("开机失败：" + e.message, "err"); }
+          startBtn.disabled = false; startBtn.textContent = "开机";
+          loadCloudInstances();
+        };
+        const delBtn = row.querySelector(".ci-destroy");
+        if (delBtn) delBtn.onclick = async () => {
+          if (!confirm("确定删除实例 " + instanceId + "？\n实例与磁盘会被销毁（不可恢复），其上的模型文件一并丢失。")) return;
+          delBtn.disabled = true; delBtn.textContent = "删除中…";
+          try { await api("/api/cloud/instances/" + encodeURIComponent(provider) + "/" + encodeURIComponent(instanceId), { method: "DELETE", timeoutMs: 120000 }); toast("实例已删除", "ok"); }
+          catch (e) { toast("删除失败：" + e.message, "err"); }
+          delBtn.disabled = false; delBtn.textContent = "删除";
+          loadCloudInstances();
+        };
+        box.appendChild(row);
+      });
+    } catch (e) { box.innerHTML = '<div class="empty">云端实例读取失败：' + esc(e.message) + '</div>'; }
   }
 
   async function loadDevices() {
