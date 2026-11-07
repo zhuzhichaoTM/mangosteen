@@ -19,6 +19,7 @@ use super::*;
 use mangosteen_device::remote::SshTarget;
 
 use crate::deployment::DeviceTarget;
+use crate::perf::DeployPerfTrace;
 
 impl Orchestrator {
     /// 为云端节点按部署时记录的引擎生成启动配置。
@@ -531,12 +532,34 @@ impl Orchestrator {
         );
         self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
 
+        // 15 秒：手动 ssh 登录实测 10 秒内完成，超时留 50% 余量。
+        // 隧道管理器内部的 6 次瞬时故障重试（退避 3/6/9/12/15s）只在
+        // 「连上即被关」这类网关冷启动窗口触发；认证失败等硬错误不会
+        // 重试，因此正常路径不会把这个超时拖满。
+        //
+        // 本地端口必须用 plan.local_port（调度器在 11435+ 区间全局唯一分配），
+        // 绝不能用远端 engine_port：两个不同节点上的模型 engine_port 可能
+        // 同为 8080，本地隧道端口若跟着远端走必然撞车（实测业务隧道混乱）。
+        // 本地唯一 ↔ 远端唯一的映射关系由台账 (local_port, engine_port) 记录。
         let spec =
-            mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true, Some(cloud_plan.engine_port));
+            mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true, Some(plan.cloud.as_ref().map(|c| c.local_port).unwrap_or(0)));
+        sink(
+            crate::progress::DeployStage::Selecting,
+            crate::progress::StageOutcome::Running,
+            format!(
+                "正在建立 SSH 隧道：{}@{}:{} → 本地端口映射（最长等待 15 秒）",
+                ssh.user, ssh.host, ssh.port
+            ),
+        );
         let local_port = self
             .tunnels()
-            .establish(&spec, Duration::from_secs(30))?
+            .establish(&spec, Duration::from_secs(15))?
             .local_port;
+        sink(
+            crate::progress::DeployStage::Selecting,
+            crate::progress::StageOutcome::Done,
+            format!("SSH 隧道已建立：127.0.0.1:{local_port} → {}:{} · 实例 {}", local_port, cloud_plan.engine_port, id),
+        );
 
         if let Some(c) = plan.cloud.as_mut() {
             c.local_port = local_port;
@@ -592,9 +615,30 @@ impl Orchestrator {
             crate::progress::StageOutcome::Running,
             "GPU 节点创建中：等待实例 Running、SSH 地址和登录方式确认".to_string(),
         );
+        let mut perf = DeployPerfTrace::new(id);
+        perf.enter("实例创建(等待Running+SSH确认)");
+        perf.note(&format!(
+            "约束: 显存≥{:.1}GiB 内存≥{:.1}GiB 磁盘≥{:.1}GiB",
+            constraints.min_vram_bytes as f64 / (1 << 30) as f64,
+            constraints.min_memory_bytes as f64 / (1 << 30) as f64,
+            constraints.min_disk_bytes as f64 / (1 << 30) as f64
+        ));
         let mut cloud = self.cloud();
         let orchestrator = cloud.as_mut().expect("checked above");
         let p = orchestrator.provision_resources(&constraints, &cloud_plan, Some(progress))?;
+        let instance = p
+            .instance
+            .clone()
+            .ok_or_else(|| MnError::bad_request("云端编排未返回实例信息".to_string()))?;
+        let node_ip = instance
+            .network
+            .ssh_host
+            .clone()
+            .unwrap_or_else(|| "未知 IP".to_string());
+        let node_ssh_port = instance.network.ssh_port.unwrap_or(22);
+        perf.note(&format!("实例已 Running: {}:{} · {}", node_ip, node_ssh_port, instance.id));
+        perf.leave("实例创建完成");
+        perf.enter("节点配置(依赖安装+llama-server下载)");
         let instance = p
             .instance
             .clone()
@@ -675,6 +719,7 @@ impl Orchestrator {
             &p.workdir,
             &self.config().cloud.llama_server_url,
         )?;
+        perf.leave("节点配置完成");
         sink(
             crate::progress::DeployStage::Configuring,
             crate::progress::StageOutcome::Done,
@@ -691,7 +736,10 @@ impl Orchestrator {
                 cloud_plan.model_path
             ),
         );
+        perf.enter("模型下载");
         self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
+        perf.leave("模型下载完成");
+        perf.finish(true);
 
         // 模型量化当前暂不激活：不执行任何量化处理，也不把阶段标记为
         // Skipped/Done；启动链路直接使用模板声明的 GGUF 文件。
@@ -709,7 +757,18 @@ impl Orchestrator {
         prepared: PreparedCloud,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
+        // 性能统计：启动模型阶段全程计时
+        let mut perf = DeployPerfTrace::new(&prepared.id);
+        perf.enter("启动模型(拉引擎+健康检查)");
         let result = self.commit_cloud_inner(prepared, sink);
+        perf.leave("启动模型完成");
+        match &result {
+            Ok(_) => perf.finish(true),
+            Err(e) => {
+                perf.note(&format!("启动失败: {e}"));
+                perf.finish(false);
+            }
+        }
         if let Err(e) = &result {
             sink(
                 crate::progress::DeployStage::Failed,
@@ -738,7 +797,8 @@ impl Orchestrator {
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
         let launch_config = self.cloud_launch_config(&cloud_plan)?;
-        // 启动前显存预检：**只针对自定义/已保存节点**。
+        // 性能统计：启动模型子阶段全程计时
+        let mut perf = DeployPerfTrace::new(&id);
         //
         // 云厂商实例在创建时已由 `SelectionConstraints.min_vram_bytes` 按规格
         // 保证显存，不需要也不应该再走一次 SSH 查询——SSH 一时不可用
@@ -799,8 +859,10 @@ impl Orchestrator {
             ),
         );
 
+        perf.enter("拉起llama-server进程");
         let started =
             mangosteen_provider::orchestrator::start_node_engine(&ssh, &workdir, &launch_config);
+        perf.leave("llama-server启动完成");
         if let Err(e) = started {
             self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
             return Err(e);
@@ -811,6 +873,7 @@ impl Orchestrator {
         // prepare 阶段建立的是「远端端口尚未监听也允许存在」的引导隧道。
         // 启动模型后必须关闭并严格重建一次，否则 SSH 进程可能看似存在，
         // 但本地端口实际已经断开，最终只得到 curl (7) connection refused。
+        perf.enter("重建隧道");
         let local_port = if cloud_plan.device_id.is_some() {
             let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
                 &ssh,
@@ -829,6 +892,7 @@ impl Orchestrator {
             })?;
             o.ensure_tunnel_to(&ssh, cloud_plan.engine_port)?
         };
+        perf.leave("隧道重建完成");
         if let Some(c) = self
             .state
             .get(&id)?
@@ -847,9 +911,11 @@ impl Orchestrator {
         }
         let health = format!("http://127.0.0.1:{local_port}/health");
         let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
+        perf.enter("健康检查(/health就绪)");
         if let Err(e) =
             mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2))
         {
+            perf.leave("健康检查失败");
             let diagnostic = mangosteen_device::remote::llama_server_start_diagnostics(
                 &ssh,
                 &workdir,
@@ -863,6 +929,9 @@ impl Orchestrator {
             self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
             return Err(e);
         }
+        perf.leave("健康检查通过");
+        // 性能统计：启动阶段完成
+        perf.finish(true);
 
         self.state.set_status(&id, DeploymentStatus::Ready, None)?;
         sink(

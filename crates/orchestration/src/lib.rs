@@ -30,6 +30,7 @@ pub mod backend;
 pub mod deployment;
 #[path = "runtime.rs"]
 pub mod orchestrator;
+pub mod perf;
 pub mod progress;
 pub mod scheduler;
 mod template_plan;
