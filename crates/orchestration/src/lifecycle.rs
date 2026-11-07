@@ -436,9 +436,10 @@ impl Orchestrator {
             self.scheduler().release_port(port);
         }
 
-        // 3) 云厂商实例：只有该节点没有其它运行模型时才关机。
+        // 3) 云厂商实例：通过 nvidia-smi 检查是否有其他 GPU 进程占用。
+        //    如果没有其他进程，则删除实例；如果有其他进程，则保留实例。
         //    节点共享时只停止当前模型进程，GPU 节点和其它模型保持运行。
-        //    自建设备（device_id 非空）也是厂商托管的实例，同样允许关机——
+        //    自建设备（device_id 非空）也是厂商托管的实例，同样允许删除——
         //    旧实现把「用户给机器起过名字」误判成「用户自己的物理机」，导致
         //    复用节点的实例永远不关机、持续计费。
         let is_custom_device = cloud
@@ -456,36 +457,95 @@ impl Orchestrator {
             let vendor_managed = !provider.trim().is_empty() && !instance_id.trim().is_empty();
             if vendor_managed {
                 if let Some(o) = self.cloud().as_mut() {
-                    // 关机失败意味着仍在计费，必须让用户知道。实例已注册，
-                    // 台账保留，用户可重试卸载。
-                    if let Err(e) = o.power_off(provider, instance_id) {
-                        let _ = self.state.set_status(
-                            id,
-                            DeploymentStatus::Failed,
-                            Some(format!("实例 {instance_id} 关机失败，可能仍在计费：{e}")),
-                        );
-                        return Err(MnError::Network {
-                            stage: "卸载（停止实例）".to_string(),
-                            reason: format!("实例 {instance_id} 关机失败，可能仍在计费：{e}"),
-                        });
+                    // 检查是否有其他 GPU 进程占用
+                    let has_other_processes = if let Some(c) = cloud.as_ref() {
+                        if let Some(target) = self.device_target_for(c) {
+                            match mangosteen_device::remote::has_gpu_processes(&target) {
+                                Ok(true) => {
+                                    eprintln!("[unload] GPU 上仍有其他进程运行，保留实例 {instance_id}");
+                                    true
+                                }
+                                Ok(false) => {
+                                    eprintln!("[unload] GPU 上无其他进程，将删除实例 {instance_id}");
+                                    false
+                                }
+                                Err(e) => {
+                                    eprintln!("[unload] nvidia-smi 查询失败，保守处理保留实例：{e}");
+                                    true // 查询失败时保守处理，保留实例
+                                }
+                            }
+                        } else {
+                            // 云厂商实例路径：通过 SSH 目标检查
+                            match self.vendor_wait_target(provider, instance_id) {
+                                Some(target) => {
+                                    match mangosteen_device::remote::has_gpu_processes(&target) {
+                                        Ok(true) => {
+                                            eprintln!("[unload] GPU 上仍有其他进程运行，保留实例 {instance_id}");
+                                            true
+                                        }
+                                        Ok(false) => {
+                                            eprintln!("[unload] GPU 上无其他进程，将删除实例 {instance_id}");
+                                            false
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[unload] nvidia-smi 查询失败，保守处理保留实例：{e}");
+                                            true
+                                        }
+                                    }
+                                }
+                                None => {
+                                    eprintln!("[unload] 无法获取 SSH 目标，保守处理保留实例");
+                                    true
+                                }
+                            }
+                        }
+                    } else {
+                        eprintln!("[unload] 无 cloud plan，保守处理保留实例");
+                        true
+                    };
+
+                    if !has_other_processes {
+                        // 无其他进程，删除实例
+                        eprintln!("[unload] 正在删除实例 {instance_id}");
+                        let errors = o.destroy_instance(provider, instance_id);
+                        if !errors.is_empty() {
+                            let error_msg = errors.join("; ");
+                            let _ = self.state.set_status(
+                                id,
+                                DeploymentStatus::Failed,
+                                Some(format!("实例 {instance_id} 删除失败，可能仍在计费：{error_msg}")),
+                            );
+                            return Err(MnError::Network {
+                                stage: "卸载（删除实例）".to_string(),
+                                reason: format!("实例 {instance_id} 删除失败，可能仍在计费：{error_msg}"),
+                            });
+                        }
+                        stopped_instance = Some(instance_id.clone());
+                    } else {
+                        // 有其他进程，只关机不删除
+                        eprintln!("[unload] 正在关机实例 {instance_id}");
+                        if let Err(e) = o.power_off(provider, instance_id) {
+                            let _ = self.state.set_status(
+                                id,
+                                DeploymentStatus::Failed,
+                                Some(format!("实例 {instance_id} 关机失败，可能仍在计费：{e}")),
+                            );
+                            return Err(MnError::Network {
+                                stage: "卸载（停止实例）".to_string(),
+                                reason: format!("实例 {instance_id} 关机失败，可能仍在计费：{e}"),
+                            });
+                        }
+                        stopped_instance = Some(instance_id.clone());
                     }
-                    stopped_instance = Some(instance_id.clone());
                 }
             }
         }
 
-        // 4) 台账改为 `stopped`（不是删除）：实例还在，下次部署可复用。
-        //    已经是 stopped 时保持原状态——重复卸载应当幂等。
-        //    允许更新 detail，以便把「正在停止…」换成最终说明。
-        let _ = self.state.set_status(
-            id,
-            DeploymentStatus::Stopped,
-            Some(if keep_node {
-                "已停止推理服务；自定义节点的机器保留".to_string()
-            } else {
-                "已停止推理服务并关机，实例保留可复用".to_string()
-            }),
-        );
+        // 4) 删除台账记录（方案A：停止后删除记录）
+        if let Err(e) = self.state.remove(id) {
+            eprintln!("[unload] 删除台账记录失败：{e}");
+            // 不阻断流程，台账删除失败不是致命错误
+        }
         Ok(UnloadOutcome {
             stopped_instance,
             node_kept: keep_node,

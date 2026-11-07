@@ -753,6 +753,19 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
 ///
 /// 重试 5 次、退避 1s/2s/3s/4s：厂商网关重建转发通常需要数秒，
 /// 只重试 3 次窗口太窄，实测仍会被穿透。
+/// 检查远端是否有 GPU 进程在运行（通过 nvidia-smi）。
+///
+/// 返回 `Ok(true)` 表示有进程占用 GPU，`Ok(false)` 表示无进程，
+/// `Err` 表示 nvidia-smi 不可用或查询失败。
+pub fn has_gpu_processes(target: &SshTarget) -> MnResult<bool> {
+    // 使用 nvidia-smi 查询 GPU 进程，仅输出进程数
+    let cmd = "nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l";
+    let output = ssh_exec(target, cmd, 60)?;
+
+    let count = output.trim().parse::<u32>().unwrap_or(0);
+    Ok(count > 0)
+}
+
 pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<String> {
     // 超时参数当前由 `ConnectTimeout` 与各调用方的轮询/预算逻辑共同约束，
     // 保留在签名里是为了让调用方表达意图；此处显式消费避免未用告警。
@@ -1918,6 +1931,33 @@ pub fn remote_file_size(target: &SshTarget, path: &str) -> MnResult<u64> {
         .trim()
         .parse()
         .unwrap_or(0))
+}
+
+/// 清理远端**指定模型文件**的下载残留（断点文件 + 下载脚本 + 日志 + pid）。
+///
+/// ## 为什么部署前要清
+///
+/// 上一次下载中断后，远端会留下 `{dest}.part`（curl 断点）、
+/// `{dest}.download.sh`（下载脚本）、`.download.pid`（残留 pid）、
+/// `.download.log`（进度日志）。其中**残留的下载脚本/pid** 最危险：
+/// 下次部署时若旧脚本被误判为「仍在下载」，会跳过真实下载或与新脚本
+/// 互相覆盖，表现为「文件大小 0 字节停滞」。
+///
+/// 只清**该模型自己的**残留（按传入的最终文件路径派生），不碰其它模型
+/// 的文件——同节点多模型互不影响。
+///
+/// 返回被删除的文件数（仅用于日志）。
+pub fn clean_model_download_artifacts(target: &SshTarget, dest: &str) -> MnResult<usize> {
+    let out = ssh_exec(
+        target,
+        &format!(
+            "N=0; for f in '{dest}.part' '{dest}.download.sh' '{dest}.download.pid' \
+                    '{dest}.download.log' '{dest}.download.ok'; do \
+               if [ -f \"$f\" ]; then rm -f \"$f\"; N=$((N+1)); fi; done; echo $N"
+        ),
+        30,
+    )?;
+    Ok(out.trim().lines().last().unwrap_or("0").trim().parse().unwrap_or(0))
 }
 
 /// 查询远端 GPU 总显存和当前空闲显存（字节）。
