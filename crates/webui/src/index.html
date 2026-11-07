@@ -1535,15 +1535,11 @@ Tabs.register("deploy", (() => {
     { id: "qwen2.5-0.5b", name: "Qwen2.5-0.5B", source: "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
     { id: "qwen3.8-27b", name: "Qwen3.8-27B", source: "hf:unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_M.gguf" },
   ];
-//
-// 模型评估完成后直接跳转到设备选择环节
-// 这样用户就能看到「云端可用节点」和「本地已运行节点」，
-// 然后在「设备选择」中最终确认 GPU 类型的设备。
-// ---- 云端搜索环节（新增）----
+  // ---- 云端搜索环节（新增）----
 //
 // 模型评估完成后直接跳转到云端搜索（不再卡在「模型评估」阶段）
 // 这样用户就能看到「云端可用节点」和「本地已运行节点」，
-// 然后在「设备选择」中最终确认 GPU 类型的设备。
+// 然后在「设备选择」中最终确认匹配 GPU 类型的设备。
 const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", "模型下载", "启动模型", "建立隧道"];
   let registry = {};
   let liveMap = {};
@@ -1605,15 +1601,16 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
   function stageIndex(stage) {
     const id = stage && stage.id;
     if (id === "ready") return stages.length;
-    // 后端阶段 → UI 步骤映射（UI 保留「云端搜索」位置但不独立显示，确认设备后跳至设备选择）：
+    // 后端阶段 → UI 步骤映射（UI 在「模型评估」后新增了「云端搜索」）：
     //   assessing   → 0 模型评估
-    //   selecting   → 2 设备选择（跳过云端搜索索引1）
+    //   selecting   → 2 设备选择（云端搜索在 UI 索引 1，由前端 preview 请求时展示）
     //   configuring → 3 设备配置
     //   downloading → 4 模型下载
     //   launching   → 5 启动模型
     //   tunneling   → 6 建立隧道
     const backend = ["assessing", "selecting", "configuring", "downloading", "launching", "tunneling"].indexOf(id);
     if (backend < 0) return 0;
+    // selecting 及之后 +1（跳过 UI 的云端搜索位）；assessing 保持 0
     return backend === 0 ? 0 : backend + 1;
   }
 
@@ -1963,22 +1960,9 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
   function chooseGpu(cands) {
     const usable = cands.filter(x => availability(x).ok);
     return new Promise(resolve => {
-      const ov = el("div", "ov gpu-confirm-ov");
-      ov.innerHTML = `
-        <div class="modal" style="max-width:800px">
-          <h2>确认设备</h2>
-          <div class="msub">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>
-          <div class="mbody" style="max-height:400px;overflow-y:auto"></div>
-          <div class="mfoot">
-            <button class="sm" id="gpu-cancel">取消</button>
-            <div class="grow"></div>
-            <button class="primary sm" id="gpu-confirm" disabled>确认节点</button>
-          </div>
-        </div>
-      `;
-      const modal = ov.querySelector(".modal");
-      const list = modal.querySelector(".mbody");
-      let selected = null;
+      const box = el("div", "gpu-confirm");
+      box.innerHTML = '<h3>确认设备</h3><div class="hint">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>';
+      const list = el("div", "gpu-pick"); let selected = null;
       cands.forEach((x, i) => {
         const av = availability(x);
         const item = el("div", "gpu-item" + (av.ok ? "" : " off")); const id = x.spec_id || x.gpu_model || ("candidate-" + i); item.dataset.spec = id;
@@ -1993,23 +1977,15 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
             ? '<div class="gi-reason warn">' + esc("运行中 · 复用该节点，不再新建实例" + occupied) + '</div>'
             : (av.ok ? (av.warn ? '<div class="gi-reason warn">' + esc(av.reason) + '</div>' : "") : '<div class="gi-reason">' + esc(av.reason) + '</div>'));
         if (av.ok) {
-          item.onclick = () => { selected = id; list.querySelectorAll(".gpu-item").forEach(n => n.classList.toggle("on", n === item)); modal.querySelector("#gpu-confirm").disabled = !selected; };
+          item.onclick = () => { selected = id; list.querySelectorAll(".gpu-item").forEach(n => n.classList.toggle("on", n === item)); };
         } else {
           item.title = av.reason;
         }
         list.appendChild(item);
       });
-      if (!usable.length) {
-        const banner = el("div", "banner err");
-        banner.textContent = "实时接口未返回空闲可部署节点：" + cands.map(x => (x.gpu_model || "?") + "（" + availability(x).reason + "）").join("；");
-        list.appendChild(banner);
-      }
-      const cancelBtn = modal.querySelector("#gpu-cancel");
-      const confirmBtn = modal.querySelector("#gpu-confirm");
-      cancelBtn.onclick = () => { ov.remove(); resolve(null); };
-      confirmBtn.onclick = () => { ov.remove(); resolve(selected); };
-      document.body.appendChild(ov);
-      ov.classList.add("show");
+      box.appendChild(list); const foot = el("div", "row"); const cancel = el("button", "", "取消"); const ok = el("button", "primary", "确认节点"); ok.disabled = usable.length === 0; list.onclick = () => { ok.disabled = !selected; };
+      if (!usable.length) box.appendChild(el("div", "banner err", "实时接口未返回空闲可部署节点：" + cands.map(x => (x.gpu_model || "?") + "（" + availability(x).reason + "）").join("；")));
+      cancel.onclick = () => { box.remove(); resolve(null); }; ok.onclick = () => { box.remove(); resolve(selected); }; foot.append(cancel, ok); box.appendChild(foot); $("dp-chain").appendChild(box);
     });
   }
 
