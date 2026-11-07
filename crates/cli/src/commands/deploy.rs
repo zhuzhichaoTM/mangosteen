@@ -1,15 +1,12 @@
-//! `mangosteen deploy` / `mangosteen run`
+//! `mangosteen deploy`
 //!
 //! 归属：**用户交互层 → 命令 `deploy`**。
 //!
 //! ## 行为
 //!
 //! 1. 解析模型与参数；
-//! 2. 调网关 `deploy`（内部完成评估 → 本地优先决策 → 执行 → 降级重试）；
+//! 2. 调网关 `deploy`（部署到云端，由云端调度器选择最优 GPU 节点）；
 //! 3. 打印结果：算力来源、端口、OpenAI base URL、降级轨迹（若有）。
-//!
-//! `run` 与 `deploy` 的区别：`run` 部署后**前台阻塞**并打印推理入口，
-//! Ctrl-C 时优雅停止。适合「就想马上用」的场景。
 
 use mangosteen_core::estimate::KvCacheType;
 use mangosteen_core::MnResult;
@@ -35,16 +32,11 @@ const ALLOWED: &[&str] = &[
 
 /// `deploy` 入口。
 pub fn run(args: Args) -> MnResult<i32> {
-    execute(args, false)
-}
-
-/// `run` 入口。
-pub fn run_foreground(args: Args) -> MnResult<i32> {
-    execute(args, true)
+    execute(args)
 }
 
 /// 共享实现。
-fn execute(args: Args, foreground: bool) -> MnResult<i32> {
+fn execute(args: Args) -> MnResult<i32> {
     reject_unknown_options(&args, ALLOWED)?;
 
     let model = args.positionals.get(1).cloned().ok_or_else(|| {
@@ -110,35 +102,6 @@ fn execute(args: Args, foreground: bool) -> MnResult<i32> {
         }
     }
 
-    if !foreground {
-        return Ok(0);
-    }
-
-    // ---- run 模式：前台阻塞 ----
-    output::print_info("推理服务已就绪。按 Ctrl-C 停止。");
-    println!(
-        "  {}",
-        output::dim(&format!(
-            "OpenAI base URL: http://127.0.0.1:{}/v1  (API Key: {})",
-            gw.config().gateway.port,
-            if gw.config().gateway.require_api_key {
-                "见配置"
-            } else {
-                "无需"
-            }
-        ))
-    );
-    println!();
-
-    wait_for_interrupt();
-
-    output::print_info("正在停止部署…");
-    let id = plan.id.clone();
-    if let Err(e) = gw.stop(&id) {
-        output::print_warning(&format!("停止部署失败：{e}"));
-        return Ok(1);
-    }
-    output::print_success("已停止，资源已释放");
     Ok(0)
 }
 
@@ -202,37 +165,6 @@ fn parse_kv(s: &str) -> MnResult<KvCacheType> {
     }
 }
 
-/// 等待 Ctrl-C。
-#[cfg(unix)]
-fn wait_for_interrupt() {
-    // SAFETY: 只是阻塞等待信号，不涉及内存操作
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::sigaddset(&mut set, libc::SIGTERM);
-        let mut sig: libc::c_int = 0;
-        libc::sigwait(&set, &mut sig);
-    }
-}
-
-#[cfg(windows)]
-fn wait_for_interrupt() {
-    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
-    // 简化处理：轮询直到标准输入被关闭或收到中断。
-    // Windows 下用 SetConsoleCtrlHandler 注册返回 TRUE 的处理器会让程序
-    // 不立即退出，但这里采用最直接的方式：阻塞读取 stdin。
-    let _ = SetConsoleCtrlHandler(None, 1);
-    use std::io::Read;
-    let mut buf = [0u8; 1];
-    let _ = std::io::stdin().read(&mut buf);
-}
-
-#[cfg(not(any(unix, windows)))]
-fn wait_for_interrupt() {
-    std::thread::park();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,7 +180,7 @@ mod tests {
     #[test]
     fn missing_model_is_actionable() {
         let args = crate::cli::parse_args(&["deploy".to_string()]).unwrap();
-        let e = execute(args, false).unwrap_err();
+        let e = execute(args).unwrap_err();
         assert!(e.to_string().contains("缺少模型参数"));
         assert!(e.to_string().contains("mangosteen deploy"));
     }
@@ -262,7 +194,7 @@ mod tests {
             "1".to_string(),
         ])
         .unwrap();
-        let e = execute(args, false).unwrap_err();
+        let e = execute(args).unwrap_err();
         assert!(e.to_string().contains("--bogus"), "got {e}");
     }
 
@@ -271,6 +203,6 @@ mod tests {
         let args =
             crate::cli::parse_args(&["deploy".to_string(), "m".to_string(), "--nope".to_string()]);
         // --nope 是布尔开关形式，会被当成带值选项而缺值 → 解析期报错
-        assert!(args.is_err() || execute(args.unwrap(), false).is_err());
+        assert!(args.is_err() || execute(args.unwrap()).is_err());
     }
 }

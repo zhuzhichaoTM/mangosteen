@@ -128,23 +128,13 @@ fn provider_reference_file_is_marked_as_reference() {
 fn readme_documents_all_commands() {
     let readme = read("README.md");
     for cmd in [
-        "deploy", "run", "stop", "status", "ps", "models", "assess", "cloud", "config", "serve",
-        "tui", "doctor",
+        "deploy", "stop", "status", "models", "cloud", "config", "ui", "doctor",
     ] {
         assert!(
             readme.contains(cmd),
-            "README 未提及命令 `{cmd}`，用户会不知道它存在"
+            "README 未提及命令 `{cmd}`，用户无法自行发现该能力"
         );
     }
-}
-
-#[test]
-fn readme_states_engine_requirement() {
-    let readme = read("README.md");
-    assert!(
-        readme.contains("llama.cpp") && readme.contains("llama-server"),
-        "README 必须说明依赖 llama.cpp 的 llama-server（否则用户跑不起来）"
-    );
 }
 
 #[test]
@@ -319,7 +309,7 @@ fn example_config_documents_engine_library_path() {
 #[test]
 fn readme_documents_pull_and_engine_commands() {
     let r = read("README.md");
-    for cmd in ["models pull", "models search", "models sources", "engine"] {
+    for cmd in ["models pull", "models search", "models sources"] {
         assert!(
             r.contains(cmd),
             "README 未记录命令 `{cmd}`，用户无法自行发现该能力"

@@ -11,14 +11,11 @@
 //! 4. 用 output 模块格式化结果
 //! ```
 
-pub mod assess;
 pub mod cloud;
 pub mod config;
 pub mod deploy;
 pub mod doctor;
-pub mod engine;
 pub mod models;
-pub mod serve;
 pub mod status;
 pub mod stop;
 pub mod ui;

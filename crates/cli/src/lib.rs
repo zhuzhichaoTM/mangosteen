@@ -24,7 +24,6 @@
 pub mod cli;
 pub mod commands;
 pub mod output;
-pub mod tui;
 
 /// 进程退出。
 pub fn run() -> i32 {

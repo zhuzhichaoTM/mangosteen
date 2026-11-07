@@ -8,7 +8,7 @@
 use mangosteen_core::MnResult;
 
 use crate::cli::Args;
-use crate::commands::{build_gateway, load_config, reject_unknown_options, state_store};
+use crate::commands::{build_gateway, load_config, reject_unknown_options};
 use crate::output;
 
 /// `status` 允许的选项。
@@ -97,59 +97,6 @@ pub fn run(args: Args) -> MnResult<i32> {
     Ok(0)
 }
 
-/// `ps` 入口。
-pub fn run_ps(args: Args) -> MnResult<i32> {
-    reject_unknown_options(&args, ALLOWED)?;
-    let store = state_store(&args)?;
-    let all = store.list()?;
-
-    if args.has("json") {
-        let arr: Vec<serde_json::Value> = all
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "id": r.plan.id,
-                    "model": r.plan.model.name,
-                    "origin": r.plan.origin.label(),
-                    "status": r.status.as_str(),
-                    "port": r.plan.local_access_port(),
-                    "ready": r.status.is_active(),
-                    "error": r.error,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({"deployments": arr}))
-                .unwrap_or_default()
-        );
-        return Ok(0);
-    }
-
-    if all.is_empty() {
-        println!("  {}", output::dim("（无部署记录）"));
-        return Ok(0);
-    }
-
-    let rows: Vec<Vec<String>> = all
-        .iter()
-        .map(|r| {
-            vec![
-                r.plan.id.clone(),
-                r.plan.model.name.clone(),
-                r.plan.origin.label(),
-                r.status.as_str().to_string(),
-                r.plan
-                    .local_access_port()
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "-".into()),
-            ]
-        })
-        .collect();
-    output::print_table(&["部署 ID", "模型", "算力来源", "状态", "端口"], &rows);
-    Ok(0)
-}
-
 /// 打印活跃部署表。
 fn print_active(active: &[mangosteen_gateway::ActiveDeployment]) {
     let rows: Vec<Vec<String>> = active
@@ -183,13 +130,5 @@ mod tests {
                 .unwrap();
         let e = reject_unknown_options(&a, ALLOWED).unwrap_err();
         assert!(e.to_string().contains("--formt"), "got {e}");
-    }
-
-    #[test]
-    fn ps_on_empty_state_does_not_fail() {
-        let a = crate::cli::parse_args(&["ps".to_string()]).unwrap();
-        // 用临时路径的配置以免污染真实台账
-        // 这里只验证 reject_unknown_options 与状态判断路径不 panic
-        assert!(reject_unknown_options(&a, ALLOWED).is_ok());
     }
 }

@@ -219,6 +219,12 @@ $ mangosteen cloud pick --min-vram 24 --explain
 ### 常用组合
 
 ```bash
+# 登记模型
+mangosteen models add ./qwen2.5-7b-q4_k_m.gguf   # 登记已有文件
+mangosteen models pull Qwen/Qwen2.5-7B-GGUF/qwen2.5-7b-instruct-q4_k_m.gguf  # 下载模型并登记
+mangosteen models search Qwen/Qwen2.5-7B-GGUF    # 搜索模型仓库
+mangosteen models sources                        # 查看可用模型源
+
 # 云端选点，看清打分依据（不创建实例、不产生费用）
 mangosteen cloud pick --min-vram 24 --max-price 3.0 --explain
 
@@ -232,7 +238,7 @@ mangosteen cloud destroy --instance compshare/uhost-xxxx --yes
 
 # 一个终端部署，另一个终端只提供 API
 mangosteen deploy qwen2.5-7b &
-mangosteen serve --port 8080
+mangosteen ui start --port 8080
 ```
 
 ---

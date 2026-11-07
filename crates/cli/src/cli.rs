@@ -162,16 +162,13 @@ fn normalize_flag(s: &str) -> String {
 /// 顶层命令表。
 fn commands() -> &'static [(&'static str, &'static str)] {
     &[
-        ("deploy", "部署模型（本地优先，资源不足自动降级到云端）"),
-        ("run", "部署并保持前台运行（Ctrl-C 优雅退出）"),
+        ("deploy", "deploy 部署模型到云端"),
         ("stop", "停止部署并释放资源"),
         ("status", "查看网关与部署状态"),
-        ("ps", "列出全部部署"),
         (
             "models",
             "模型管理：pull / search / add / list / show / verify / remove / sources",
         ),
-        ("assess", "仅评估本地可行性，不部署"),
         (
             "cloud",
             "云端算力：providers / specs / pick / instances / destroy",
@@ -180,10 +177,8 @@ fn commands() -> &'static [(&'static str, &'static str)] {
             "config",
             "配置管理：show / init / path / validate / reset-templates",
         ),
-        ("serve", "仅启动 API 网关 HTTP 服务"),
-        ("tui", "启动全屏交互界面"),
+        ("ui", "启动 Web UI 控制台"),
         ("doctor", "环境自检（引擎、硬件、配置、权限）"),
-        ("engine", "本地推理引擎诊断（locate / env / probe）"),
         ("version", "显示版本信息"),
         ("help", "显示帮助"),
     ]
@@ -217,15 +212,11 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
 
     match cmd.as_str() {
         "deploy" => crate::commands::deploy::run(args),
-        "run" => crate::commands::deploy::run_foreground(args),
         "stop" => crate::commands::stop::run(args),
         "status" => crate::commands::status::run(args),
-        "ps" | "list" => crate::commands::status::run_ps(args),
         "models" => crate::commands::models::run(args),
-        "assess" => crate::commands::assess::run(args),
         "cloud" => crate::commands::cloud::run(args),
         "config" => crate::commands::config::run(args),
-        "serve" => crate::commands::serve::run(args),
         "ui" => {
             if args.pos(1).is_some() {
                 crate::commands::ui::run_lifecycle(args)
@@ -233,9 +224,7 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
                 crate::commands::ui::run(args)
             }
         }
-        "tui" => crate::tui::run(args),
         "doctor" => crate::commands::doctor::run(args),
-        "engine" => crate::commands::engine::run(args),
         "help" => {
             print_help();
             Ok(0)
@@ -287,9 +276,7 @@ fn print_help() {
     println!("{}", output::bold("常用示例"));
     println!("  mangosteen models pull <owner>/<仓库>/<文件.gguf>  # 下载模型并登记");
     println!("  mangosteen models add ./qwen2.5-7b-q4_k_m.gguf   # 登记已有文件");
-    println!("  mangosteen assess qwen2.5-7b --context 8192     # 评估能否本地跑");
-    println!("  mangosteen deploy qwen2.5-7b --context 8192     # 部署（本地优先）");
-    println!("  mangosteen deploy llama3.3-70b --allow-cloud    # 本地不足自动上云");
+    println!("  mangosteen deploy qwen2.5-7b --context 8192     # 部署到云端");
     println!("  mangosteen status                               # 看状态");
     println!("  mangosteen stop --all                           # 全部停止");
     println!("  mangosteen ui start                             # 后台稳定启动 UI/API 网关");
@@ -355,13 +342,13 @@ mod tests {
 
     #[test]
     fn get_num_validates() {
-        let args = a(&["assess", "m", "--context", "8192"]);
+        let args = a(&["deploy", "m", "--context", "8192"]);
         let n: Option<u32> = args.get_num("context").unwrap();
         assert_eq!(n, Some(8192));
         let none: Option<u32> = args.get_num("missing").unwrap();
         assert_eq!(none, None);
 
-        let bad = a(&["assess", "m", "--context", "abc"]);
+        let bad = a(&["deploy", "m", "--context", "abc"]);
         assert!(bad.get_num::<u32>("context").is_err());
     }
 
@@ -405,7 +392,7 @@ mod tests {
     fn command_table_covers_help_listing() {
         let names: Vec<&str> = commands().iter().map(|(n, _)| *n).collect();
         for expected in [
-            "deploy", "stop", "status", "models", "cloud", "config", "doctor", "tui",
+            "deploy", "stop", "status", "models", "cloud", "config", "doctor",
         ] {
             assert!(names.contains(&expected), "缺少命令 {expected}");
         }
