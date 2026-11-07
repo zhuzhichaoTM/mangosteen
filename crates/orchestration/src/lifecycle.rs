@@ -424,10 +424,12 @@ impl Orchestrator {
             self.scheduler().release_port(port);
         }
 
-        // 3) 云厂商实例：通过 nvidia-smi 检查是否有其他 GPU 进程占用。
-        //    如果没有其他进程，则删除实例；如果有其他进程，则保留实例。
+        // 3) 云厂商实例：通过 nvidia-smi 检查是否有其他大模型进程占用GPU。
+        //    - 无其他进程：直接关闭实例（不删除实例）
+        //    - 有其他进程：不关闭实例，避免影响其他模型
+        //    实例由云平台系统自动老化删除，或用户通过其他手段删除。
         //    节点共享时只停止当前模型进程，GPU 节点和其它模型保持运行。
-        //    自建设备（device_id 非空）也是厂商托管的实例，同样允许删除——
+        //    自建设备（device_id 非空）也是厂商托管的实例，同样允许关机——
         //    旧实现把「用户给机器起过名字」误判成「用户自己的物理机」，导致
         //    复用节点的实例永远不关机、持续计费。
         let is_custom_device = cloud
@@ -450,16 +452,16 @@ impl Orchestrator {
                         if let Some(target) = self.device_target_for(c) {
                             match mangosteen_device::remote::has_gpu_processes(&target) {
                                 Ok(true) => {
-                                    eprintln!("[unload] GPU 上仍有其他进程运行，保留实例 {instance_id}");
+                                    eprintln!("[unload] GPU 上仍有其他进程运行，不关闭实例 {instance_id}");
                                     true
                                 }
                                 Ok(false) => {
-                                    eprintln!("[unload] GPU 上无其他进程，将删除实例 {instance_id}");
+                                    eprintln!("[unload] GPU 上无其他进程，将关闭实例 {instance_id}");
                                     false
                                 }
                                 Err(e) => {
-                                    eprintln!("[unload] nvidia-smi 查询失败，保守处理保留实例：{e}");
-                                    true // 查询失败时保守处理，保留实例
+                                    eprintln!("[unload] nvidia-smi 查询失败，保守处理不关闭实例：{e}");
+                                    true // 查询失败时保守处理，不关闭实例
                                 }
                             }
                         } else {
@@ -468,50 +470,33 @@ impl Orchestrator {
                                 Some(target) => {
                                     match mangosteen_device::remote::has_gpu_processes(&target) {
                                         Ok(true) => {
-                                            eprintln!("[unload] GPU 上仍有其他进程运行，保留实例 {instance_id}");
+                                            eprintln!("[unload] GPU 上仍有其他进程运行，不关闭实例 {instance_id}");
                                             true
                                         }
                                         Ok(false) => {
-                                            eprintln!("[unload] GPU 上无其他进程，将删除实例 {instance_id}");
+                                            eprintln!("[unload] GPU 上无其他进程，将关闭实例 {instance_id}");
                                             false
                                         }
                                         Err(e) => {
-                                            eprintln!("[unload] nvidia-smi 查询失败，保守处理保留实例：{e}");
+                                            eprintln!("[unload] nvidia-smi 查询失败，保守处理不关闭实例：{e}");
                                             true
                                         }
                                     }
                                 }
                                 None => {
-                                    eprintln!("[unload] 无法获取 SSH 目标，保守处理保留实例");
+                                    eprintln!("[unload] 无法获取 SSH 目标，保守处理不关闭实例");
                                     true
                                 }
                             }
                         }
                     } else {
-                        eprintln!("[unload] 无 cloud plan，保守处理保留实例");
+                        eprintln!("[unload] 无 cloud plan，保守处理不关闭实例");
                         true
                     };
 
                     if !has_other_processes {
-                        // 无其他进程，删除实例
-                        eprintln!("[unload] 正在删除实例 {instance_id}");
-                        let errors = o.destroy_instance(provider, instance_id);
-                        if !errors.is_empty() {
-                            let error_msg = errors.join("; ");
-                            let _ = self.state.set_status(
-                                id,
-                                DeploymentStatus::Failed,
-                                Some(format!("实例 {instance_id} 删除失败，可能仍在计费：{error_msg}")),
-                            );
-                            return Err(MnError::Network {
-                                stage: "卸载（删除实例）".to_string(),
-                                reason: format!("实例 {instance_id} 删除失败，可能仍在计费：{error_msg}"),
-                            });
-                        }
-                        stopped_instance = Some(instance_id.clone());
-                    } else {
-                        // 有其他进程，只关机不删除
-                        eprintln!("[unload] 正在关机实例 {instance_id}");
+                        // 无其他进程，关闭实例（不删除）
+                        eprintln!("[unload] 正在关闭实例 {instance_id}");
                         if let Err(e) = o.power_off(provider, instance_id) {
                             let _ = self.state.set_status(
                                 id,
@@ -524,6 +509,9 @@ impl Orchestrator {
                             });
                         }
                         stopped_instance = Some(instance_id.clone());
+                    } else {
+                        // 有其他进程，不关闭实例
+                        eprintln!("[unload] 实例 {instance_id} 上有其他进程，保持运行状态");
                     }
                 }
             }
