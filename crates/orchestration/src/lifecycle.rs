@@ -19,7 +19,10 @@ impl Orchestrator {
     ///    - 启动推理进程（如果进程未运行）
     ///    - 更新台账为 ready
     /// 4. 对于不应该运行的实例（厂商侧 stopped + 台账 ready）：
-    ///    - 更新台账为 stopped
+    ///    - 删除台账记录（停止后已删除，不应存在）
+    ///
+    /// 注意：由于采用方案A（停止后删除台账记录），stopped状态的记录不存在，
+    /// 因此恢复机制无法恢复stopped状态的部署。只有ready/failed状态的记录会被恢复。
     ///
     /// GPU 节点和远端模型进程可能在 API 网关重启期间继续运行；本地
     /// `TunnelManager` 是进程内状态，重启后必须重新建立映射，否则台账虽是
@@ -46,36 +49,21 @@ impl Orchestrator {
                 instance_id,
             } = &record.plan.origin;
 
-            // 情况1：云端实例已停止，但台账显示 ready/failed → 同步为 stopped
+            // 情况1：云端实例已停止，但台账显示 ready/failed → 删除台账记录
             if matches!(instance_state, Some(mangosteen_core::cloud::InstanceState::Stopped))
                 && matches!(
                     record.status,
                     DeploymentStatus::Ready | DeploymentStatus::Failed
                 )
             {
-                if let Err(e) = self.state.set_status(
-                    &id,
-                    DeploymentStatus::Stopped,
-                    Some("云端实例已停止，同步台账状态".to_string()),
-                ) {
-                    errors.push(format!("{id}：同步台账状态失败：{e}"));
-                }
-                eprintln!("[restore] {id}：云端实例已停止，台账状态已同步为 stopped");
-                continue;
-            }
-
-            // 情况2：云端实例正在运行，但台账显示 stopped → 尝试恢复服务
-            if matches!(instance_state, Some(mangosteen_core::cloud::InstanceState::Running))
-                && matches!(record.status, DeploymentStatus::Stopped)
-            {
-                eprintln!("[restore] {id}：云端实例正在运行但台账为 stopped，尝试恢复服务");
-                if let Err(e) = self.start_service(&id) {
-                    errors.push(format!("{id}：恢复服务失败：{e}"));
+                eprintln!("[restore] {id}：云端实例已停止，删除台账记录");
+                if let Err(e) = self.state.remove(&id) {
+                    errors.push(format!("{id}：删除台账记录失败：{e}"));
                 }
                 continue;
             }
 
-            // 情况3：云端实例正在运行，台账为 ready/failed → 恢复隧道和进程
+            // 情况2：云端实例正在运行，台账为 ready/failed → 恢复隧道和进程
             if matches!(instance_state, Some(mangosteen_core::cloud::InstanceState::Running))
                 && matches!(
                     record.status,
