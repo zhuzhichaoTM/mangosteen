@@ -78,6 +78,13 @@ pub struct DeploymentRecord {
     pub error: Option<String>,
     /// 状态最后变更时间
     pub updated_at: i64,
+    /// 部署时使用的配置模板槽位（default / mode1 / mode2…）。
+    ///
+    /// UI 按「模型 + 模板」隔离展示部署状态：同一模型的 Uncensored 部署
+    /// 不该在切到 default 模板时显示节点信息/实例ID。旧记录无此字段
+    /// （`serde(default)` 兜底为 `None`），按「无模板」参与匹配。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_template: Option<String>,
 }
 
 impl DeploymentRecord {
@@ -89,6 +96,7 @@ impl DeploymentRecord {
             pid: None,
             error: None,
             updated_at: mangosteen_core::time::now_unix(),
+            config_template: None,
         }
     }
 

@@ -239,7 +239,17 @@ impl GatewayServer {
                     },
                 }),
             ),
-            Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
+            // 删除/停止失败也要给出**结构化错误**（ok=false + message），
+            // 与成功响应同构。前端据此弹出提示——之前返回 500 + 自由文本，
+            // fetch 不抛异常但响应体没有 message 字段，UI 表现为「点了没反应」。
+            Err(e) => Response::json(
+                200,
+                &serde_json::json!({
+                    "ok": false,
+                    "id": id,
+                    "message": e.to_string(),
+                }),
+            ),
         }
     }
 
