@@ -59,6 +59,50 @@ impl GatewayServer {
             }
             ("GET", "/api/devices") => self.get_devices(),
             ("POST", "/api/devices") => self.add_device(req),
+            // ---- 设置页「云端节点」管理：实例列表 / 关机 / 开机 / 删除 ----
+            //
+            // 与 /api/devices（用户自登记的 SSH 机器）完全独立：这里是
+            // 云厂商 API 托管的实例，动作直接走厂商驱动。
+            ("GET", "/api/cloud/instances") => self.cloud_instances_list(),
+            ("POST", p) if p.starts_with("/api/cloud/instances/") && p.ends_with("/power-off") => {
+                let rest = &p["/api/cloud/instances/".len()..p.len() - "/power-off".len()];
+                match rest.split_once('/') {
+                    Some((prov, id)) => self.cloud_instance_power_off(prov, id),
+                    None => Response::json(
+                        400,
+                        &ErrorResponse::bad_request(
+                            "路径格式：/api/cloud/instances/{provider}/{instance_id}/power-off",
+                            None,
+                        ),
+                    ),
+                }
+            }
+            ("POST", p) if p.starts_with("/api/cloud/instances/") && p.ends_with("/power-on") => {
+                let rest = &p["/api/cloud/instances/".len()..p.len() - "/power-on".len()];
+                match rest.split_once('/') {
+                    Some((prov, id)) => self.cloud_instance_power_on(prov, id),
+                    None => Response::json(
+                        400,
+                        &ErrorResponse::bad_request(
+                            "路径格式：/api/cloud/instances/{provider}/{instance_id}/power-on",
+                            None,
+                        ),
+                    ),
+                }
+            }
+            ("DELETE", p) if p.starts_with("/api/cloud/instances/") => {
+                let rest = &p["/api/cloud/instances/".len()..];
+                match rest.split_once('/') {
+                    Some((prov, id)) => self.cloud_instance_destroy(prov, id),
+                    None => Response::json(
+                        400,
+                        &ErrorResponse::bad_request(
+                            "路径格式：/api/cloud/instances/{provider}/{instance_id}",
+                            None,
+                        ),
+                    ),
+                }
+            }
             ("POST", p) if p.starts_with("/api/devices/") && p.ends_with("/test") => {
                 let id = &p["/api/devices/".len()..p.len() - "/test".len()];
                 self.test_device(id)
@@ -118,6 +162,14 @@ impl GatewayServer {
                 self.start_service(id)
             }
             ("POST", p) if p.starts_with("/api/deployments/") && p.ends_with("/unload") => {
+                let id = &p["/api/deployments/".len()..p.len() - "/unload".len()];
+                self.unload(id)
+            }
+            // 兼容：前端/旧版本可能用 DELETE 语义表达「删除部署」，但把
+            // 动作后缀（/unload）也带上了。DELETE /api/deployments/{id}/unload
+            // 必须路由到 unload，而不是掉进 DELETE catch-all 把 "id/unload"
+            // 整段当部署 ID 查台账（报「部署 xxx/unload 不存在」或 404）。
+            ("DELETE", p) if p.starts_with("/api/deployments/") && p.ends_with("/unload") => {
                 let id = &p["/api/deployments/".len()..p.len() - "/unload".len()];
                 self.unload(id)
             }

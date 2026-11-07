@@ -8,6 +8,75 @@ use crate::http::server::*;
 use mangosteen_core::openai::ErrorResponse;
 
 impl GatewayServer {
+    /// 设置页「云端节点」：列出云厂商托管的全部实例（含已关机）。
+    pub(crate) fn cloud_instances_list(&self) -> Response {
+        let gw = self.gateway.as_ref();
+        let list: Vec<serde_json::Value> = gw
+            .cloud_instance_admin_briefs()
+            .into_iter()
+            .map(|x| {
+                serde_json::json!({
+                    "provider": x.provider,
+                    "instance_id": x.instance_id,
+                    "gpu_model": x.gpu_model,
+                    "gpu_count": x.gpu_count,
+                    "vram_bytes": x.vram_bytes,
+                    "status": x.state,
+                    "ssh_target": x.ssh_target,
+                    "price_per_hour": x.price_per_hour,
+                    "occupied_models": x.occupied_models,
+                    "display_name": x.display_name,
+                })
+            })
+            .collect();
+        Response::json(200, &serde_json::json!({ "instances": list }))
+    }
+
+    /// 关机实例（停止 GPU 计费，实例与磁盘保留）。
+    pub(crate) fn cloud_instance_power_off(&self, provider: &str, instance_id: &str) -> Response {
+        let gw = self.gateway.as_ref();
+        match gw.cloud_power_off(provider, instance_id) {
+            Ok(()) => Response::json(
+                200,
+                &serde_json::json!({"ok": true, "instance_id": instance_id, "message": "实例已关机"}),
+            ),
+            Err(e) => Response::error(&e),
+        }
+    }
+
+    /// 开机实例（并等待进入运行状态）。
+    pub(crate) fn cloud_instance_power_on(&self, provider: &str, instance_id: &str) -> Response {
+        let gw = self.gateway.as_ref();
+        match gw.cloud_power_on(provider, instance_id) {
+            Ok(()) => Response::json(
+                200,
+                &serde_json::json!({"ok": true, "instance_id": instance_id, "message": "实例已开机"}),
+            ),
+            Err(e) => Response::error(&e),
+        }
+    }
+
+    /// 删除实例（销毁实例与磁盘，不可恢复）。
+    pub(crate) fn cloud_instance_destroy(&self, provider: &str, instance_id: &str) -> Response {
+        let gw = self.gateway.as_ref();
+        match gw.destroy_cloud_instance(provider, instance_id) {
+            Ok(errs) => {
+                if errs.is_empty() {
+                    Response::json(
+                        200,
+                        &serde_json::json!({"ok": true, "instance_id": instance_id, "message": "实例已删除"}),
+                    )
+                } else {
+                    Response::json(
+                        500,
+                        &serde_json::json!({"ok": false, "instance_id": instance_id, "message": errs.join("；")}),
+                    )
+                }
+            }
+            Err(e) => Response::error(&e),
+        }
+    }
+
     pub(crate) fn get_devices(&self) -> Response {
         let gw = self.gateway.as_ref();
         let devices: Vec<serde_json::Value> = gw
@@ -397,6 +466,13 @@ impl GatewayServer {
                                 slot.secret =
                                     mangosteen_core::config::SecretRef::File(path);
                                 applied.push(format!("providers.{name}.secret"));
+                                // 密钥写入成功 → 自动启用该厂商：
+                                // 「输入了完整密钥即视为要用这个厂商」，
+                                // 用户不必再手动开 enabled 开关。
+                                if !slot.enabled {
+                                    slot.enabled = true;
+                                    applied.push(format!("providers.{name}.enabled"));
+                                }
                             }
                             Err(e) => return Response::error(&e),
                         }

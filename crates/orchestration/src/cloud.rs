@@ -201,6 +201,66 @@ impl Orchestrator {
         out
     }
 
+    /// 设置页「云端节点」管理的全量实例清单（**含已关机**）。
+    ///
+    /// 与 [`Self::cloud_instance_briefs`]（部署页复用选择，只列运行中）不同：
+    /// 管理页需要看到**所有**实例才能关机/开机/删除。`Destroyed` 仍然排除
+    /// （磁盘已没了，展示只会误导）。
+    pub fn cloud_instance_admin_briefs(&self) -> Vec<crate::deployment::CloudInstanceBrief> {
+        use mangosteen_core::cloud::InstanceState;
+
+        let cloud = self.cloud();
+        let Some(o) = cloud.as_ref() else {
+            return Vec::new();
+        };
+        let occupied = |provider: &str, instance_id: &str| -> Vec<String> {
+            self.state
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.status.is_active())
+                .filter(|r| match &r.plan.origin {
+                    ComputeOrigin::Cloud {
+                        provider: p,
+                        instance_id: i,
+                    } => p == provider && i == instance_id,
+                })
+                .map(|r| {
+                    mangosteen_core::model::ModelEntry::derive_id(
+                        &r.plan.model.name,
+                        r.plan.model.quant,
+                    )
+                })
+                .collect()
+        };
+
+        let mut out = Vec::new();
+        for (provider, result) in o.list_instances() {
+            let Ok(instances) = result else {
+                continue;
+            };
+            for inst in instances {
+                // 管理页展示全部非销毁实例（运行中 + 已关机）
+                if matches!(inst.state, InstanceState::Destroyed) {
+                    continue;
+                }
+                out.push(crate::deployment::CloudInstanceBrief {
+                    provider: provider.clone(),
+                    instance_id: inst.id.clone(),
+                    gpu_model: inst.spec.gpu.model.clone(),
+                    gpu_count: inst.spec.gpu.count,
+                    vram_bytes: inst.spec.gpu.vram_bytes,
+                    state: inst.state.as_str().to_string(),
+                    ssh_target: inst.network.ssh_target(),
+                    price_per_hour: inst.price.as_ref().map(|p| p.per_hour_cny),
+                    occupied_models: occupied(&provider, &inst.id),
+                    display_name: inst.display_name.clone(),
+                });
+            }
+        }
+        out
+    }
+
     /// 云端选点：查询规格 → 打分排序 → 返回排序结果（**不创建资源**）。
     ///
     /// 供 `mangosteen cloud pick` 使用，让用户在花钱前看清决策依据。
@@ -297,6 +357,34 @@ impl Orchestrator {
                 reason: "未配置任何可用的云服务商".to_string(),
             })?;
         Ok(o.destroy_instance(provider, instance_id))
+    }
+
+    /// 关机实例（设置页「云端节点」管理动作）。
+    ///
+    /// 与部署卸载（unload）不同：这里不做「其它模型还在跑」的保护判断——
+    /// 管理页的关机是用户**显式**的电源操作，确认弹窗已提示后果。
+    /// 若实例上仍有 llama-server 在跑，厂商关机后进程随之消失，
+    /// 台账里的部署会在下一轮探测中转为失败——这是预期行为。
+    pub fn cloud_power_off(&self, provider: &str, instance_id: &str) -> MnResult<()> {
+        let mut cloud = self.cloud();
+        let o = cloud
+            .as_mut()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
+        o.power_off(provider, instance_id)
+    }
+
+    /// 开机实例并等待进入运行状态（设置页「云端节点」管理动作）。
+    pub fn cloud_power_on(&self, provider: &str, instance_id: &str) -> MnResult<()> {
+        let mut cloud = self.cloud();
+        let o = cloud
+            .as_mut()
+            .ok_or_else(|| MnError::NoViableCandidate {
+                reason: "未配置任何可用的云服务商".to_string(),
+            })?;
+        // 管理动作没有部署上下文（无 CloudPlan）：走 provider 的管理入口。
+        o.power_on_managed(provider, instance_id)
     }
 }
 
