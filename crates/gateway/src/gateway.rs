@@ -139,52 +139,46 @@ impl GatewayBuilder {
             .with_engine_env(self.config.local.engine_env.clone())
             .with_auto_library_path(self.config.local.auto_library_path);
 
-        // 云端编排器：只有存在启用的服务商时才构造
-        let cloud = if self.config.has_cloud_capability() {
-            let build = mangosteen_provider::build_registry(&self.config);
-            if build.registry.is_empty() {
-                None
-            } else {
-                let mut pref = mangosteen_core::policy::default_gpu_preference();
-                for (k, v) in &self.config.scheduler.gpu_preference {
-                    pref.insert(k.clone(), *v);
-                }
-                let selector = mangosteen_core::policy::NodeSelector::new(
-                    self.config.scheduler.weights,
-                    pref,
-                )?
-                .with_strategy(self.config.scheduler.strategy);
-                let tunnels = mangosteen_provider::TunnelManager::new(
-                    self.config.local.port_range_start,
-                    self.config.local.port_range_end,
-                    "ssh",
-                    Some(log_dir.clone()),
-                )?;
-                Some(CloudOrchestrator::new(
-                    build.registry,
-                    selector,
-                    tunnels,
-                    mangosteen_provider::OrchestratorConfig {
-                        provision_timeout: Duration::from_secs(
-                            self.config.scheduler.provision_timeout_secs,
-                        ),
-                        start_timeout: Duration::from_secs(
-                            self.config.scheduler.provision_timeout_secs,
-                        ),
-                        ssh_password: self
-                            .config
-                            .cloud
-                            .resolved_password(mangosteen_platform::paths::real_env)
-                            .unwrap_or(None),
-                        remote_workdir: self.config.cloud.remote_workdir.clone(),
-                        llama_server_url: self.config.cloud.llama_server_url.clone(),
-                        ..Default::default()
-                    },
-                ))
-            }
-        } else {
-            None
-        };
+        // 云端编排器：始终构造（即使当前无启用的服务商），以便后续
+        // 通过 UI 配置密钥后能热重建驱动（reload_cloud_drivers 需要
+        // 一个非 None 的 CloudOrchestrator 才能 replace_registry）。
+        let build = mangosteen_provider::build_registry(&self.config);
+        let mut pref = mangosteen_core::policy::default_gpu_preference();
+        for (k, v) in &self.config.scheduler.gpu_preference {
+            pref.insert(k.clone(), *v);
+        }
+        let selector = mangosteen_core::policy::NodeSelector::new(
+            self.config.scheduler.weights,
+            pref,
+        )?
+        .with_strategy(self.config.scheduler.strategy);
+        let tunnels = mangosteen_provider::TunnelManager::new(
+            self.config.local.port_range_start,
+            self.config.local.port_range_end,
+            "ssh",
+            Some(log_dir.clone()),
+        )?;
+        let cloud = Some(CloudOrchestrator::new(
+            build.registry,
+            selector,
+            tunnels,
+            mangosteen_provider::OrchestratorConfig {
+                provision_timeout: Duration::from_secs(
+                    self.config.scheduler.provision_timeout_secs,
+                ),
+                start_timeout: Duration::from_secs(
+                    self.config.scheduler.provision_timeout_secs,
+                ),
+                ssh_password: self
+                    .config
+                    .cloud
+                    .resolved_password(mangosteen_platform::paths::real_env)
+                    .unwrap_or(None),
+                remote_workdir: self.config.cloud.remote_workdir.clone(),
+                llama_server_url: self.config.cloud.llama_server_url.clone(),
+                ..Default::default()
+            },
+        ));
 
         let guard = mangosteen_base::AccessGuard::from_config(&self.config.storage);
         let models = ModelStore::new(model_index_path, guard, self.config.storage.verify_hash);
