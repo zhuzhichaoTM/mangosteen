@@ -165,7 +165,7 @@ impl Scheduler {
     ///
     /// 区间耗尽时退回起点（此时部署会因端口占用失败并触发降级，
     /// 但仍返回一个合法端口，让错误发生在启动阶段而非分配阶段）。
-    fn allocate_local_port(&self) -> u16 {
+    pub(crate) fn allocate_local_port(&self) -> u16 {
         use std::sync::atomic::Ordering;
         let reserved = self.reserved.lock().map(|v| v.clone()).unwrap_or_default();
         let span = self.config_port_span().max(1);

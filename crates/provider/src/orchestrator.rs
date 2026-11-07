@@ -1255,12 +1255,17 @@ impl CloudOrchestrator {
     /// 启动留给 [`Self::start_engine`]，对应产品要求的两段式：
     /// 设备配置完成后再启动模型。
     ///
-    /// 失败时关闭厂商实例但不删除，保留实例和磁盘供后续复用。
+    /// ## 参数 `local_port`
+    ///
+    /// 若非 0，则使用指定的本地端口建立隧道（由编排层从调度器分配，
+    /// 避免网关重启后端口从错误起始值如 8080 开始分配）；
+    /// 若为 0，则由隧道管理器自动分配。
     pub fn provision_resources(
         &self,
         constraints: &SelectionConstraints,
         plan: &CloudPlan,
         _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+        local_port: u16,
     ) -> MnResult<ProvisionedResources> {
         // 先查询云端现有实例。这里是当前部署编排实际使用的入口（区别于
         // 旧的 provision_with_progress），因此复用逻辑必须在这里执行；否则
@@ -1288,7 +1293,8 @@ impl CloudOrchestrator {
             }
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
             let ssh = ensure_key_target(&instance, &self.config)?;
-            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(0));
+            let local_port = if local_port != 0 { local_port } else { 0 };
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
             let local_port = self
                 .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
@@ -1316,7 +1322,8 @@ impl CloudOrchestrator {
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
                 let ssh = ensure_key_target(&instance, &self.config)?;
-                let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(0));
+                let local_port = if local_port != 0 { local_port } else { 0 };
+                let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
                 let local_port = self
                     .tunnels()
                     .establish(&spec, self.config.tunnel_timeout)?
@@ -1355,8 +1362,8 @@ impl CloudOrchestrator {
             // 确认实例 Running 后立刻安装公钥：后续下载、启动、隧道全部走密钥，
             // 不再依赖密码 askpass（它对时序极敏感，是本模块最脆的一环）。
             let ssh = ensure_key_target(&instance, &self.config)?;
-            // 节点创建完成后只建立基础隧道；模型与引擎准备由编排层按阶段执行。
-            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(0));
+            let local_port = if local_port != 0 { local_port } else { 0 };
+            let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
             let local_port = self
                 .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?

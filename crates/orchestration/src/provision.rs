@@ -532,22 +532,21 @@ impl Orchestrator {
         );
         self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
 
-        // 15 秒：手动 ssh 登录实测 10 秒内完成，超时留 50% 余量。
-        // 隧道管理器内部的 6 次瞬时故障重试（退避 3/6/9/12/15s）只在
-        // 「连上即被关」这类网关冷启动窗口触发；认证失败等硬错误不会
-        // 重试，因此正常路径不会把这个超时拖满。
-        //
-        // 本地端口必须用 plan.local_port（调度器在 11435+ 区间全局唯一分配），
-        // 绝不能用远端 engine_port：两个不同节点上的模型 engine_port 可能
-        // 同为 8080，本地隧道端口若跟着远端走必然撞车（实测业务隧道混乱）。
+        // 本地端口必须从调度器的 11435-11999 区间分配（全局唯一），绝不能用远端
+        // engine_port（固定 8080）：两个不同节点上的模型 engine_port 可能同为 8080，
+        // 本地隧道端口若跟着远端走必然撞车（实测业务隧道混乱）。
         // 本地唯一 ↔ 远端唯一的映射关系由台账 (local_port, engine_port) 记录。
+        //
+        // 关键：必须先用 scheduler.allocate_local_port() 分配端口，再传给隧道规格，
+        // 避免隧道管理器内部自动分配时从错误起始值（如 8080）开始。
+        let local_port = self.scheduler().allocate_local_port();
         let spec =
-            mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true, Some(plan.cloud.as_ref().map(|c| c.local_port).unwrap_or(0)));
+            mangosteen_provider::orchestrator::tunnel_spec_for(&ssh, cloud_plan.engine_port, true, Some(local_port));
         sink(
             crate::progress::DeployStage::Selecting,
             crate::progress::StageOutcome::Running,
             format!(
-                "正在建立 SSH 隧道：{}@{}:{} → 本地端口映射（最长等待 15 秒）",
+                "正在建立 SSH 隧道：{}@{}:{} → 本地端口映射（本地端口 {local_port}，最长等待 15 秒）",
                 ssh.user, ssh.host, ssh.port
             ),
         );
@@ -625,7 +624,9 @@ impl Orchestrator {
         ));
         let mut cloud = self.cloud();
         let orchestrator = cloud.as_mut().expect("checked above");
-        let p = orchestrator.provision_resources(&constraints, &cloud_plan, Some(progress))?;
+        // 预分配本地端口，避免网关重启后从错误起始值（如 8080）开始分配
+        let local_port = self.scheduler().allocate_local_port();
+        let p = orchestrator.provision_resources(&constraints, &cloud_plan, Some(progress), local_port)?;
         let instance = p
             .instance
             .clone()
