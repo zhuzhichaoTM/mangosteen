@@ -22,7 +22,10 @@ pub struct CurlTransport {
 impl Default for CurlTransport {
     fn default() -> Self {
         Self {
-            timeout_secs: 30,
+            // 修复2：10 秒上限。厂商接口偶发慢/抖动时，30 秒的默认值会拖死
+            // 持锁路径（preview 评估、候选查询都要打厂商 API）；10 秒足够
+            // 覆盖正常延迟（实测 <2s），超时立即失败并由上层重试或降级。
+            timeout_secs: 10,
             curl_bin: "curl".to_string(),
         }
     }

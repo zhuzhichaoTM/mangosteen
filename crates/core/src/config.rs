@@ -1060,7 +1060,9 @@ impl Config {
             "ucloud".to_string(),
             ProviderConfig {
                 driver: "ucloud".into(),
-                enabled: true,
+                // 默认不启用：密钥必须由用户在 UI「设置 → 云平台密钥」里
+                // 输入（公钥 + 私钥两项），否则该厂商不可用但不影响其它厂商。
+                enabled: false,
                 display_name: Some("优云智算".into()),
                 secret: SecretRef::Env("UCLOUD_API_KEY".into()),
                 options: BTreeMap::new(),
@@ -1187,7 +1189,7 @@ cache_dir = "/c"
         let c = base_config();
         let enabled = c.enabled_providers();
         assert!(enabled.contains(&"autodl"));
-        assert!(enabled.contains(&"ucloud"));
+        assert!(!enabled.contains(&"ucloud")); // 优云智算默认关闭：密钥由 UI 设置页输入后才启用
         assert!(!enabled.contains(&"aliyun")); // 示例里默认关闭
     }
 
