@@ -138,7 +138,8 @@ code{font-family:var(--mono);font-size:.9em;background:var(--panel3);
 #se-cloud-instances .ci:last-child{border-bottom:none}
 #se-cloud-instances .ci button{flex:0 0 auto}
 #se-cloud-instances .ci-cell{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);border-radius:6px;padding:4px 8px;background:var(--panel2)}
+  display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line2);border-radius:6px;padding:4px 8px;background:var(--panel2);
+  font-size:12px;font-weight:400;color:var(--text);line-height:1.4}
 #se-cloud-instances .ci-name{overflow:hidden;text-overflow:ellipsis}
 #se-cloud-instances .ci-actions{display:inline-flex;gap:6px;justify-content:flex-end;flex:0 0 auto}
 
@@ -2393,10 +2394,10 @@ Tabs.register("setting", (() => {
         const access = x.ssh_target || "-";
         // Excel 风格数据行：六列与表头一一对齐（名称 | ID | 规格 | 厂商 | 状态 | 操作）
         row.innerHTML =
-          '<span class="ci-cell ci-name"><b>' + esc(x.display_name || x.model || "GPU 实例") + '</b>' +
+          '<span class="ci-cell ci-name">' + esc(x.display_name || x.model || "GPU 实例") +
           (x.price_per_hour != null ? '<span class="gi-sub"> ¥' + Number(x.price_per_hour).toFixed(2) + '/h</span>' : '') +
           '</span>' +
-          '<span class="ci-cell gi-sub" title="实例ID">' + esc(x.instance_id || "-") + '</span>' +
+          '<span class="ci-cell" title="实例ID">' + esc(x.instance_id || "-") + '</span>' +
           '<span class="ci-cell">' + esc(spec) + '</span>' +
           '<span class="ci-cell">' + esc(x.provider || "-") + '</span>' +
           '<span class="ci-cell"><span class="badge ' + stateCls + '">' + esc(state) + '</span></span>' +
