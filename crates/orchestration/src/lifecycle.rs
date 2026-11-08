@@ -73,12 +73,18 @@ impl Orchestrator {
                 eprintln!("[restore] {id}：云端实例正在运行，恢复隧道和推理进程");
 
                 // 恢复隧道
+                // 优先使用台账中已保存的 local_port，如果为 0 则分配新端口
+                let local_port = if cloud_plan.local_port == 0 {
+                    self.scheduler().allocate_local_port()
+                } else {
+                    cloud_plan.local_port
+                };
                 let tunnel_result = if let Some(target) = self.device_target_for(&cloud_plan) {
                     let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
                         &target,
                         cloud_plan.engine_port,
                         false,
-                        Some(cloud_plan.engine_port),
+                        Some(local_port),
                     );
                     self.tunnels()
                         .establish(&spec, Duration::from_secs(30))
@@ -1033,7 +1039,11 @@ impl Orchestrator {
                         &target,
                         cloud_plan.engine_port,
                         false,
-                        Some(cloud_plan.engine_port),
+                        Some(if cloud_plan.local_port == 0 {
+                            self.scheduler().allocate_local_port()
+                        } else {
+                            cloud_plan.local_port
+                        }),
                     );
                     let _ = self.tunnels().close(&spec);
                     let local_port = match self
