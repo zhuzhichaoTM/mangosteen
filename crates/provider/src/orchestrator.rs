@@ -1341,14 +1341,43 @@ impl CloudOrchestrator {
         }
 
         let (_best, ranked, _all) = self.pick(constraints)?;
+        // 用户指定了 GPU 型号时（CLI `--gpu-model 3080Ti` / UI 选定卡型）：
+        // **只在该型号的规格里创建**，且不受库存字段影响——优云的库存查询
+        // 是模拟调度（对能开出来的机器也返回 false），「先过滤库存再创建」
+        // 会把明明能开的型号直接判死。正确顺序：型号匹配 → 按价格顺序真开。
+        //
+        // 型号匹配大小写不敏感：`3080Ti` 需命中规格 ID `3080Ti/1x12c/32g`。
+        let wanted_gpu = requested_gpu_owned
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase());
         let mut ordered: Vec<CreateCandidate> = ranked
             .iter()
+            .filter(|c| {
+                wanted_gpu
+                    .as_deref()
+                    .map(|w| c.gpu_model.to_lowercase().contains(w))
+                    .unwrap_or(true)
+            })
             .map(|c| CreateCandidate {
                 provider: c.provider.clone(),
                 spec_id: c.spec_id.clone(),
                 price: c.price_per_hour,
             })
             .collect();
+        // 指定了型号却没有任何匹配规格：明确报错，而不是退回全量候选——
+        // 退回会创建一台用户没选过的卡型（实测 3080Ti 无货时默默开出 P40），
+        // 违背「用户选了什么就用什么」的原则。
+        if let Some(w) = wanted_gpu.as_deref() {
+            if ordered.is_empty() {
+                return Err(MnError::NoViableCandidate {
+                    reason: format!(
+                        "当前云厂商没有 GPU 型号匹配 `{w}` 的可用规格，请换其它型号或稍后重试"
+                    ),
+                });
+            }
+        }
         prefer_requested_spec(&mut ordered, plan.requested_spec_id.as_deref());
 
         let (provider, instance) = self.create_first_running(
