@@ -1458,19 +1458,24 @@ impl CloudOrchestrator {
                     instance = fresh;
                 }
             }
-            // 无需关心实例当前状态：容器实例支持运行中重置，停机虚机直接
-            // 重置成功；运行中虚机重置会被厂商拒绝，仅告警降级（不为此
-            // 特意关机，简化流程）。已有密码的实例在函数内去重直接返回。
-            restore_login_credential(driver, &mut instance, &self.config);
-            if !instance.state.is_serving() {
-                self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
-            }
-            // ## SSH 快速探活：伪 Running 在此现形，立即强制重启
+            // ## 直接开机 + 秒级探活兜底（伪 Running 防线）
             //
-            // 厂商标 Running ≠ 机器真活着（上轮回滚关机后状态同步滞后）。
-            // 探活失败（连接层错误）直接 stop+start 强制重启，而不是等
-            // ensure_key_target 的 5 轮 ssh 重试 + 90s confirm 窗口耗尽。
+            // 匹配到可复用实例 → 立即发开机指令（Stopped/Created 真开机）→
+            // 等待 Running → 恢复凭证 → 装公钥免密。
+            //
+            // 但「厂商标 Running」≠「机器真活着」：上轮回滚关机后厂商状态
+            // 同步滞后时，start 对 Running **幂等跳过**——什么都不做，机器
+            // 依然是关机的，SSH 每条命令 5 轮×15s 超时，表现为永久卡死
+            // （实测 dep 卡「设备选择」10 分钟）。因此开机后必须做一次
+            // **秒级探活**（ssh_probe：单次连接、无重试、判定与凭据无关）：
+            // 不可达 → stop → 等真实 Stopped → start 强制重启，这是伪
+            // Running 唯一有效的处置。
+            let _ = driver.start(&instance.id);
+            self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
             force_reboot_if_unreachable(driver, &mut instance, &self.config)?;
+            // 开机后恢复登录凭证：容器实例可运行中重置；停机虚机的密码
+            // 重置已在 start 前（仍处停机态）生效。已有密码直接返回（去重）。
+            restore_login_credential(driver, &mut instance, &self.config);
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
             let ssh = ensure_key_target(&instance, &self.config)?;
             confirm_remote_reachable(&ssh)?;
@@ -1514,14 +1519,11 @@ impl CloudOrchestrator {
                         instance = fresh;
                     }
                 }
-                // 同上：不限状态直接尝试恢复凭证（函数内去重），再按需开机。
-                restore_login_credential(driver, &mut instance, &self.config);
-                if !instance.state.is_serving() {
-                    self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
-                }
-                // ## SSH 快速探活：伪 Running 在此现形，立即强制重启
-                // （与 reuse_instance_id 分支一致，探活失败立即 stop+start）
+                // ## 直接开机 + 秒级探活兜底（与 reuse_instance_id 分支一致）
+                let _ = driver.start(&instance.id);
+                self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 force_reboot_if_unreachable(driver, &mut instance, &self.config)?;
+                restore_login_credential(driver, &mut instance, &self.config);
                 let ssh = ensure_key_target(&instance, &self.config)?;
                 // 冷启动兜底：实例真在开机途中时 sshd 可能还没就绪，
                 // 90s 窗口跨过去（此时机器可达，探活已通过，只是慢）。
