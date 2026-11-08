@@ -1177,21 +1177,21 @@ pub fn configure_existing_ssh_access(
 /// * 每次建隧道都要铺一遍临时文件，并发/端口复用时还会互相踩。
 ///
 /// 所以正确做法是：**密码只用于「第一次把本机公钥装进远端 authorized_keys」**，
-/// 复用**停机实例**时恢复登录凭证（停机态调用，开机前执行）。
+/// 复用实例时恢复登录凭证（不限实例状态，函数内去重）。
 ///
-/// ## 为什么必须重置密码
+/// ## 为什么需要重置密码
 ///
 /// 进程重启后，创建实例时的原始密码随内存一起丢失；而厂商的 Describe
-/// 接口不回传密码（优云实测）。此时唯一的凭证恢复途径就是在**停机态**
-/// 调用 `ResetCompShareInstancePassword` 把密码重置为本进程已知的值。
-/// 开机后 [`ensure_key_target`] 用该密码完成最后一次公钥安装，随后
+/// 接口不回传密码（优云实测）。此时唯一的凭证恢复途径就是调用
+/// `ResetCompShareInstancePassword` 把密码重置为本进程已知的值。
+/// 之后 [`ensure_key_target`] 用该密码完成最后一次公钥安装，随后
 /// 一切连接自动切换为免密——用户全程无需手动输入密码。
 ///
 /// ## 去重与降级
 ///
 /// * 实例已带密码（本轮创建、或 describe 返回了密码）→ 直接返回，不重置；
 /// * 密码来源：优先配置统一密码（`secrets/ssh_password`），缺失时生成随机强密码；
-/// * 厂商不支持重置接口 / 校验失败 → 仅告警不阻断，交由后续流程尝试
+/// * 厂商不支持重置接口 / 状态校验失败 → 仅告警不阻断，交由后续流程尝试
 ///   现有认证方式（可能已装过公钥，`install_ssh_copy_id` 的免密探测会命中）。
 fn restore_login_credential(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
@@ -1201,11 +1201,14 @@ fn restore_login_credential(
     if instance.network.ssh_password.is_some() {
         return;
     }
-    let password = config.ssh_password.clone().unwrap_or_else(generate_recovery_password);
+    let password = config
+        .ssh_password
+        .clone()
+        .unwrap_or_else(generate_recovery_password);
     match driver.set_password(&instance.id, &password) {
         Ok(()) => {
             eprintln!(
-                "[cloud] ✓ 实例 {} 已重置登录密码（停机复用恢复凭证，装完公钥即切免密）",
+                "[cloud] ✓ 实例 {} 已重置登录密码（复用恢复凭证，装完公钥即切免密）",
                 instance.id
             );
             instance.network.ssh_password = Some(password);
@@ -1219,15 +1222,116 @@ fn restore_login_credential(
     }
 }
 
-/// 生成一次性恢复密码（大小写字母 + 数字 + 符号，16 位）。
+/// 生成一次性恢复密码。
 ///
-/// 只用于「停机复用 → 装公钥」这一次认证，公钥装好后即被免密取代。
+/// 只用于「复用 → 装公钥」这一次认证，公钥装好后即被免密取代。
+/// 时间戳 + 进程 ID 混合扰动，固定前缀满足厂商密码复杂度要求
+/// （≥8 位、含大小写/数字/符号）。
 fn generate_recovery_password() -> String {
-    // 时间戳 + 进程 ID 混合扰动，配合固定前缀满足厂商的密码复杂度要求
-    // （≥8 位、含大小写/数字/符号）。
-    let seed = mangosteen_core::time::now_unix_millis() as u64
-        ^ (std::process::id() as u64) << 32;
+    let seed =
+        mangosteen_core::time::now_unix_millis() as u64 ^ (std::process::id() as u64) << 32;
     format!("Mn#{seed:x}Aa1!")
+}
+
+/// SSH 快速探活失败时**强制重启实例**（伪 Running 的唯一有效处置）。
+///
+/// ## 为什么 start 不够
+///
+/// 厂商状态滞后时（上轮回滚关机后 describe_instances 仍报 Running），
+/// `driver.start()` 对 Running 幂等返回——**什么都不做**，实例依然是
+/// 关机的，后续 SSH 永远超时。唯一有效的处置是先 stop（等到真实
+/// Stopped）再 start 重新开机。
+///
+/// ## 探活方式
+///
+/// 用厂商密码构造临时 target 发一条 `true`（短超时一次，不做多轮重试）：
+/// 密码认证失败（Permission denied）说明机器活着、只是公钥没装——
+/// 不算「不可达」，返回 false 交由正常装公钥流程；只有**连接层失败**
+/// （超时/拒绝/重置）才判实例实际不可用，触发强制重启。
+fn force_reboot_if_unreachable(
+    driver: &dyn mangosteen_core::cloud::ProviderDriver,
+    instance: &mut Instance,
+    config: &OrchestratorConfig,
+) -> MnResult<()> {
+    let Ok(probe) = vendor_password_target(instance, config) else {
+        return Ok(()); // 无密码构造不了探活 target，交由后续流程处理
+    };
+    let reachable = match mangosteen_device::remote::ssh_exec(&probe, "true", 10) {
+        Ok(_) => true,
+        Err(e) => {
+            // 认证失败 ≠ 不可达：机器活着，公钥流程能处理。
+            let msg = e.to_string();
+            !(msg.contains("Permission denied")
+                || msg.contains("publickey")
+                || msg.contains("密码"))
+        }
+    };
+    if reachable {
+        return Ok(());
+    }
+    eprintln!(
+        "[cloud] ⚠ 实例 {} 标记为 {} 但 SSH 不可达，强制重启实例（stop → 等 Stopped → start）",
+        instance.id, instance.state
+    );
+    // 1. 关机（幂等：已停机直接成功）
+    let _ = driver.stop(&instance.id);
+    // 2. 等待真实 Stopped（厂商关机是异步的，最多 120s）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(MnError::Provider {
+                provider: instance.provider.clone(),
+                code: "stop_timeout".to_string(),
+                message: format!(
+                    "实例 {} 强制重启时 {}s 内未进入 Stopped，放弃开机重试",
+                    instance.id,
+                    deadline.elapsed().as_secs() + 120
+                ),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let cur = driver.describe(&instance.id)?;
+        let done = matches!(
+            cur.state,
+            InstanceState::Stopped | InstanceState::Created
+        );
+        *instance = cur;
+        if done {
+            break;
+        }
+    }
+    // 3. 重新开机并等待 Running
+    *instance = driver.start(&instance.id)?;
+    wait_until_running_on(driver, instance)?;
+    // 4. 重置密码可能被重启清掉时效（部分厂商重启后密码需重新下发），
+    //    这里再恢复一次凭证供装公钥使用（函数内去重）。
+    restore_login_credential(driver, instance, config);
+    Ok(())
+}
+
+/// 等待实例进入 Running（供强制重启后复用的轮询循环）。
+fn wait_until_running_on(
+    driver: &dyn mangosteen_core::cloud::ProviderDriver,
+    instance: &mut Instance,
+) -> MnResult<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if instance.state == InstanceState::Running {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(MnError::Provider {
+                provider: instance.provider.clone(),
+                code: "start_timeout".to_string(),
+                message: format!(
+                    "实例 {} 强制重启后 300s 内未进入 Running（当前 {}）",
+                    instance.id, instance.state
+                ),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        *instance = driver.describe(&instance.id)?;
+    }
 }
 
 /// 之后所有连接（探测、下载、启动、隧道）一律用密钥 + `BatchMode=yes`。
@@ -1341,6 +1445,17 @@ impl CloudOrchestrator {
                 instance.id, instance.state
             );
             let driver = self.registry.get(&provider)?;
+            // ## 状态滞后防御：find_instance_by_id 的状态可能是厂商缓存
+            // （详见下方 GPU 型号匹配分支的注释）。
+            if let Ok(fresh) = driver.describe(&instance.id) {
+                if fresh.state != instance.state {
+                    eprintln!(
+                        "[cloud] ⚠ 实例 {} 状态已刷新：{} → {}（厂商状态滞后）",
+                        instance.id, instance.state, fresh.state
+                    );
+                    instance = fresh;
+                }
+            }
             // 无需关心实例当前状态：容器实例支持运行中重置，停机虚机直接
             // 重置成功；运行中虚机重置会被厂商拒绝，仅告警降级（不为此
             // 特意关机，简化流程）。已有密码的实例在函数内去重直接返回。
@@ -1348,8 +1463,15 @@ impl CloudOrchestrator {
             if !instance.state.is_serving() {
                 self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
             }
+            // ## SSH 快速探活：伪 Running 在此现形，立即强制重启
+            //
+            // 厂商标 Running ≠ 机器真活着（上轮回滚关机后状态同步滞后）。
+            // 探活失败（连接层错误）直接 stop+start 强制重启，而不是等
+            // ensure_key_target 的 5 轮 ssh 重试 + 90s confirm 窗口耗尽。
+            force_reboot_if_unreachable(driver, &mut instance, &self.config)?;
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
             let ssh = ensure_key_target(&instance, &self.config)?;
+            confirm_remote_reachable(&ssh)?;
             let local_port = if local_port != 0 { local_port } else { 0 };
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
             let local_port = self
@@ -1375,12 +1497,55 @@ impl CloudOrchestrator {
                     provider, instance.id, instance.state
                 );
                 let driver = self.registry.get(&provider)?;
+                // ## 状态滞后防御：list() 的状态可能是厂商缓存
+                //
+                // 上次部署失败回滚关机后，厂商 describe_instances 可能仍返回
+                // 滞后的 Running——按它判断 is_serving 会**跳过开机**，后续
+                // SSH 探测直接 Operation timed out（实测 uhost-1xg7sng57lst）。
+                // 复用前必须用单实例 describe 刷新实时状态。
+                if let Ok(fresh) = driver.describe(&instance.id) {
+                    if fresh.state != instance.state {
+                        eprintln!(
+                            "[cloud] ⚠ 实例 {} 状态已刷新：{} → {}（厂商状态滞后）",
+                            instance.id, instance.state, fresh.state
+                        );
+                        instance = fresh;
+                    }
+                }
                 // 同上：不限状态直接尝试恢复凭证（函数内去重），再按需开机。
                 restore_login_credential(driver, &mut instance, &self.config);
                 if !instance.state.is_serving() {
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
                 let ssh = ensure_key_target(&instance, &self.config)?;
+                // ## SSH 可达性确认（状态滞后/冷启动兜底）
+                //
+                // 厂商标 Running ≠ sshd 真能登录：冷启动窗口可达 90s，
+                // 状态滞后的「伪 Running」更是连不上。confirm 失败时重新
+                // describe → 非 Running 则强制开机再确认一次，仍失败才报错。
+                if confirm_remote_reachable(&ssh).is_err() {
+                    eprintln!(
+                        "[cloud] ⚠ 复用实例 {} SSH 不可达，重新确认实例状态并强制开机",
+                        instance.id
+                    );
+                    let fresh = driver.describe(&instance.id)?;
+                    if !fresh.state.is_serving() {
+                        restore_login_credential(driver, &mut instance, &self.config);
+                        self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
+                        let ssh2 = ensure_key_target(&instance, &self.config)?;
+                        confirm_remote_reachable(&ssh2)?;
+                    } else {
+                        return Err(MnError::Network {
+                            stage: "复用实例 SSH 可达性确认".to_string(),
+                            reason: format!(
+                                "实例 {} 厂商标记为 {} 但 SSH 无法登录，\
+                                 可能 sshd 异常或安全组拦截，请到厂商控制台检查后重试",
+                                instance.id,
+                                fresh.state
+                            ),
+                        });
+                    }
+                }
                 let local_port = if local_port != 0 { local_port } else { 0 };
                 let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
                 let local_port = self
