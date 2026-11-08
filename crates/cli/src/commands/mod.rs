@@ -15,7 +15,6 @@ pub mod cloud;
 pub mod config;
 pub mod deploy;
 pub mod doctor;
-pub mod models;
 pub mod status;
 pub mod stop;
 pub mod ui;
@@ -39,19 +38,6 @@ pub fn load_config(args: &Args) -> MnResult<(Config, String)> {
 pub fn build_gateway(args: &Args) -> MnResult<Gateway> {
     let (config, _src) = load_config(args)?;
     GatewayBuilder::new(config).build()
-}
-
-/// 读取模型台账（不启动网关，用于只读命令）。
-pub fn model_store(args: &Args) -> MnResult<mangosteen_base::ModelStore> {
-    let (config, _) = load_config(args)?;
-    let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
-    let index = mangosteen_platform::paths::model_index_file(env);
-    let guard = mangosteen_base::AccessGuard::from_config(&config.storage);
-    Ok(mangosteen_base::ModelStore::new(
-        index,
-        guard,
-        config.storage.verify_hash,
-    ))
 }
 
 /// 读取部署台账（不启动网关）。

@@ -128,7 +128,7 @@ fn provider_reference_file_is_marked_as_reference() {
 fn readme_documents_all_commands() {
     let readme = read("README.md");
     for cmd in [
-        "deploy", "stop", "status", "models", "cloud", "config", "ui", "doctor",
+        "deploy", "stop", "status", "cloud", "config", "ui", "doctor",
     ] {
         assert!(
             readme.contains(cmd),

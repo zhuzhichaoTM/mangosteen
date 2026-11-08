@@ -10,6 +10,7 @@
 //! | `specs` | 查询各服务商当前可创建规格与报价 |
 //! | `pick` | 按约束打分排序并解释选择依据（**不创建资源**） |
 //! | `cheapest` | 查当前可用的**最低价**节点；`--create` 直接创建 |
+//! | `instances` | 列出所有云厂商托管的实例（含已关机），与 UI "云端节点" 对应 |
 //! | `destroy` | 销毁指定实例（部署 ID，或 `--instance 服务商/实例ID`） |
 //!
 //! `pick --explain` 是本命令最有价值的部分：让用户在花钱前看清
@@ -19,7 +20,7 @@ use mangosteen_core::policy::SelectionConstraints;
 use mangosteen_core::MnResult;
 
 use crate::cli::Args;
-use crate::commands::{load_config, reject_unknown_options};
+use crate::commands::{build_gateway, load_config, reject_unknown_options};
 use crate::output;
 
 /// 允许的选项。
@@ -37,6 +38,8 @@ const ALLOWED: &[&str] = &[
     "create",
     "name",
     "instance",
+    "running",
+    "stopped",
 ];
 
 /// 入口。
@@ -557,46 +560,42 @@ fn gpu_label(sp: &mangosteen_core::cloud::AvailableSpec) -> String {
 
 /// `cloud instances`
 fn instances(args: Args) -> MnResult<i32> {
-    let (cfg, _) = load_config(&args)?;
-    let (registered, skipped) = mangosteen_gateway::probe_providers(&cfg);
-    if registered.is_empty() {
-        for (name, reason) in &skipped {
-            output::print_warning(&format!("{name}：{reason}"));
-        }
-        return Err(mangosteen_core::MnError::NoViableCandidate {
-            reason: "没有已就绪的云服务商".to_string(),
-        });
-    }
-    // 实例列表来自部署台账中的云端部署（网关唯一收口：不直连厂商查询）
-    let store = crate::commands::state_store(&args)?;
-    let cloud_deployments: Vec<_> = store
-        .list()?
+    let gw = build_gateway(&args)?;
+    
+    // 查询所有云厂商托管的实例（含已关机），与 UI "云端节点" 对应
+    let list = gw.cloud_instance_admin_briefs();
+    
+    // 状态过滤
+    let filter_running = args.has("running");
+    let filter_stopped = args.has("stopped");
+    let filtered: Vec<_> = list
         .into_iter()
-        .filter(|r| {
-            matches!(
-                r.plan.origin,
-                mangosteen_core::plan::ComputeOrigin::Cloud { .. }
-            )
+        .filter(|x| {
+            if filter_running {
+                x.state == "running"
+            } else if filter_stopped {
+                x.state == "stopped"
+            } else {
+                true
+            }
         })
         .collect();
 
     if args.has("json") {
-        let arr: Vec<serde_json::Value> = cloud_deployments
+        let arr: Vec<serde_json::Value> = filtered
             .iter()
-            .map(|r| {
-                let (provider, instance_id) = match &r.plan.origin {
-                    mangosteen_core::plan::ComputeOrigin::Cloud {
-                        provider,
-                        instance_id,
-                    } => (provider.clone(), instance_id.clone()),
-                };
+            .map(|x| {
                 serde_json::json!({
-                    "deployment_id": r.plan.id,
-                    "provider": provider,
-                    "instance_id": instance_id,
-                    "model": r.plan.model.name,
-                    "status": r.status.as_str(),
-                    "port": r.plan.local_access_port(),
+                    "provider": x.provider,
+                    "instance_id": x.instance_id,
+                    "gpu_model": x.gpu_model,
+                    "gpu_count": x.gpu_count,
+                    "vram_bytes": x.vram_bytes,
+                    "status": x.state,
+                    "ssh_target": x.ssh_target,
+                    "price_per_hour": x.price_per_hour,
+                    "occupied_models": x.occupied_models,
+                    "display_name": x.display_name,
                 })
             })
             .collect();
@@ -608,41 +607,39 @@ fn instances(args: Args) -> MnResult<i32> {
         return Ok(0);
     }
 
-    if cloud_deployments.is_empty() {
-        println!("  {}", output::dim("（没有由 Mangosteen 创建的云端实例）"));
+    if filtered.is_empty() {
+        if filter_running {
+            println!("  {}", output::dim("（没有运行中的云端实例）"));
+        } else if filter_stopped {
+            println!("  {}", output::dim("（没有已停机的云端实例）"));
+        } else {
+            println!("  {}", output::dim("（当前云厂商下没有 GPU 实例）"));
+        }
         return Ok(0);
     }
 
-    let rows: Vec<Vec<String>> = cloud_deployments
+    let rows: Vec<Vec<String>> = filtered
         .iter()
-        .map(|r| {
-            let (provider, instance_id) = match &r.plan.origin {
-                mangosteen_core::plan::ComputeOrigin::Cloud {
-                    provider,
-                    instance_id,
-                } => (provider.clone(), instance_id.clone()),
-            };
+        .map(|x| {
             vec![
-                r.plan.id.clone(),
-                provider,
-                instance_id,
-                r.plan.model.name.clone(),
-                r.status.as_str().to_string(),
-                r.plan
-                    .local_access_port()
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "-".into()),
+                x.display_name.clone().unwrap_or_default(),
+                x.instance_id.clone(),
+                x.provider.clone(),
+                format!("{} × {}", x.gpu_model, x.gpu_count),
+                x.state.clone(),
+                x.ssh_target.clone().unwrap_or_default(),
+                x.price_per_hour.map(|p| format!("¥{:.2}/h", p)).unwrap_or_default(),
             ]
         })
         .collect();
     output::print_table(
-        &["部署 ID", "服务商", "实例 ID", "模型", "状态", "本地端口"],
+        &["实例名称", "实例ID", "云厂商", "规格", "运行状态", "SSH目标", "价格"],
         &rows,
     );
     println!();
     println!(
         "  {}",
-        output::dim("用 `mangosteen stop <部署ID>` 停止（会销毁云端实例并停止计费）")
+        output::dim("用 `mangosteen cloud destroy --instance <服务商>/<实例ID> --yes` 销毁裸实例")
     );
     Ok(0)
 }
@@ -772,6 +769,7 @@ mod tests {
         let e = run(a).unwrap_err();
         assert!(e.to_string().contains("cloud xyz"));
         assert!(e.to_string().contains("providers"));
+        assert!(e.to_string().contains("devices"), "should list devices in error");
     }
 
     #[test]
@@ -805,9 +803,9 @@ mod tests {
         let a = crate::cli::parse_args(&["cloud".to_string(), "pick".to_string()]).unwrap();
         let c = constraints(&a, true).unwrap();
         assert_eq!(c.min_vram_bytes, 0);
-        assert!(c.max_price_per_hour.is_none());
-        assert!(c.allowed_providers.is_empty());
-        assert!(c.require_stock, "默认要求有库存");
+        assert_eq!(c.max_price_per_hour.is_none(), true);
+        assert_eq!(c.allowed_providers.is_empty(), true);
+        assert_eq!(c.require_stock, true, "默认要求有库存");
     }
     #[test]
     fn destroy_instance_requires_provider_slash_id() {
@@ -838,10 +836,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_subcommand_lists_cheapest() {
+    fn unknown_subcommand_lists_devices() {
         let a = crate::cli::parse_args(&["cloud".to_string(), "xyz".to_string()]).unwrap();
         let e = run(a).unwrap_err();
-        assert!(e.to_string().contains("cheapest"), "{}", e);
+        assert!(e.to_string().contains("devices"), "{}", e);
     }
     /// `--create` 必须是开关，不能吃下一个参数。
     ///

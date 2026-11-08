@@ -166,12 +166,8 @@ fn commands() -> &'static [(&'static str, &'static str)] {
         ("stop", "停止部署并释放资源"),
         ("status", "查看网关与部署状态"),
         (
-            "models",
-            "模型管理：pull / search / add / list / show / verify / remove / sources",
-        ),
-        (
             "cloud",
-            "云端算力：providers / specs / pick / instances / destroy",
+            "云端算力：providers / specs / pick / instances / devices / destroy",
         ),
         (
             "config",
@@ -214,7 +210,6 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
         "deploy" => crate::commands::deploy::run(args),
         "stop" => crate::commands::stop::run(args),
         "status" => crate::commands::status::run(args),
-        "models" => crate::commands::models::run(args),
         "cloud" => crate::commands::cloud::run(args),
         "config" => crate::commands::config::run(args),
         "ui" => {
@@ -274,11 +269,13 @@ fn print_help() {
     }
     println!();
     println!("{}", output::bold("常用示例"));
-    println!("  mangosteen models pull <owner>/<仓库>/<文件.gguf>  # 下载模型并登记");
-    println!("  mangosteen models add ./qwen2.5-7b-q4_k_m.gguf   # 登记已有文件");
-    println!("  mangosteen deploy qwen2.5-7b --context 8192     # 部署到云端");
+    println!("  mangosteen deploy qwen2.5-7b --context 8192     # 自动选择节点部署");
+    println!("  mangosteen deploy qwen2.5-7b --device dev-001     # 使用自定义节点");
+    println!("  mangosteen deploy qwen2.5-7b --gpu-model P40     # 指定 GPU 型号");
     println!("  mangosteen status                               # 看状态");
     println!("  mangosteen stop --all                           # 全部停止");
+    println!("  mangosteen cloud instances --running             # 查看运行中实例");
+    println!("  mangosteen cloud devices                        # 查看自定义节点");
     println!("  mangosteen ui start                             # 后台稳定启动 UI/API 网关");
     println!("  mangosteen ui restart                           # 重启 UI/API 网关");
     println!("  mangosteen ui stop                              # 关闭 UI/API 网关");
@@ -392,7 +389,7 @@ mod tests {
     fn command_table_covers_help_listing() {
         let names: Vec<&str> = commands().iter().map(|(n, _)| *n).collect();
         for expected in [
-            "deploy", "stop", "status", "models", "cloud", "config", "doctor",
+            "deploy", "stop", "status", "cloud", "config", "doctor",
         ] {
             assert!(names.contains(&expected), "缺少命令 {expected}");
         }
