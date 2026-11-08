@@ -28,6 +28,13 @@ const ALLOWED: &[&str] = &[
     "max-price",
     "json",
     "quiet",
+    // 节点选择参数
+    "reuse-instance",
+    "reuse-provider",
+    "device",
+    "cloud-spec",
+    "gpu-model",
+    "interactive",
 ];
 
 /// `deploy` 入口。
@@ -66,6 +73,23 @@ fn execute(args: Args) -> MnResult<i32> {
     }
     if args.has("require-full-gpu") {
         req.allow_partial_offload = false;
+    }
+
+    // 节点选择参数
+    if let Some(device_id) = args.get("device") {
+        req.device_id = Some(device_id.to_string());
+    }
+    if let Some(instance_id) = args.get("reuse-instance") {
+        req.reuse_instance_id = Some(instance_id.to_string());
+    }
+    if let Some(provider) = args.get("reuse-provider") {
+        req.reuse_provider = Some(provider.to_string());
+    }
+    if let Some(spec) = args.get("cloud-spec") {
+        req.cloud_spec = Some(spec.to_string());
+    }
+    if let Some(gpu_model) = args.get("gpu-model") {
+        req.gpu_model = Some(gpu_model.to_string());
     }
 
     let gw = build_gateway(&args)?;

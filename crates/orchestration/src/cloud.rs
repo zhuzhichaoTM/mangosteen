@@ -179,9 +179,8 @@ impl Orchestrator {
                 continue;
             };
             for inst in instances {
-                // 节点选择只展示「正在使用」的实例；停机实例由后端在
-                // 部署时按 GPU 型号后台自动开机复用，不出现在列表里。
-                if !matches!(inst.state, InstanceState::Running) {
+                // 管理页展示全部非销毁实例（运行中 + 已关机）
+                if matches!(inst.state, InstanceState::Destroyed) {
                     continue;
                 }
                 out.push(crate::deployment::CloudInstanceBrief {

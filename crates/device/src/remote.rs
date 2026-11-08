@@ -837,8 +837,11 @@ fn ssh_exec_once(target: &SshTarget, cmd: &str) -> Result<String, SshFailure> {
     c.args(&args).stdin(Stdio::null());
     if let Some(ap) = &askpass {
         c.env("SSH_ASKPASS", ap.script_arg())
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("DISPLAY", ":0");
+            .env("SSH_ASKPASS_REQUIRE", "force");
+        #[cfg(not(target_os = "windows"))]
+        {
+            c.env("DISPLAY", ":0");
+        }
     }
     let out = c.output();
     if let Some(ap) = &askpass {
@@ -966,8 +969,11 @@ pub fn scp_upload(target: &SshTarget, local: &std::path::Path, remote: &str) -> 
     c.args(&args).stdin(Stdio::null());
     if let Some(ap) = &askpass {
         c.env("SSH_ASKPASS", ap.script_arg())
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("DISPLAY", ":0");
+            .env("SSH_ASKPASS_REQUIRE", "force");
+        #[cfg(not(target_os = "windows"))]
+        {
+            c.env("DISPLAY", ":0");
+        }
     }
     let out = c.output();
     if let Some(ap) = &askpass {

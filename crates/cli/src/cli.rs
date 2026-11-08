@@ -93,6 +93,10 @@ const BOOLEAN_FLAGS: &[&str] = &[
     // 不加进这里的话 `--create --yes` 会把 `--yes` 吃成 create 的值，
     // 表现是「明明加了 --create 却只查询不创建」，且不报错——很难查。
     "create",
+    // 节点选择相关的布尔开关
+    "interactive",
+    "running",
+    "stopped",
 ];
 
 /// 解析参数列表（不含程序名）。

@@ -370,19 +370,43 @@ fn send_graceful(child: &Child, pid: u32) {
 /// 用途：PID 文件丢失或陈旧时，仍能确认「是谁占着这个端口」，
 /// 让停止/重启操作真正生效，而不是对着一个不存在的 PID 反复「成功」。
 pub fn find_listener_pid(port: u16) -> Option<u32> {
-    let out = Command::new("lsof")
-        .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    #[cfg(target_os = "windows")]
+    {
+        // Windows：netstat -ano 列出所有连接和监听端口，最后一列是 PID
+        // 示例输出：
+        //   TCP    0.0.0.0:11516          0.0.0.0:0              LISTENING       12345
+        let out = Command::new("netstat")
+            .args(["-ano"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains(&format!(":{port} ")) && trimmed.contains("LISTENING") {
+                let pid = trimmed.split_whitespace().last()?.parse::<u32>().ok()?;
+                return Some(pid);
+            }
+        }
+        None
     }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .find_map(|l| l.parse::<u32>().ok())
+    #[cfg(not(target_os = "windows"))]
+    {
+        let out = Command::new("lsof")
+            .args(["-nP", &format!("-tiTCP:{port}"), "-sTCP:LISTEN"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .find_map(|l| l.parse::<u32>().ok())
+    }
 }
 
 /// 一次性探测 HTTP 端点是否返回 200。

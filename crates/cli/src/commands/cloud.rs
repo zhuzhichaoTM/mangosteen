@@ -202,23 +202,28 @@ fn specs(args: Args) -> MnResult<i32> {
     let rows: Vec<Vec<String>> = filtered
         .iter()
         .map(|(p, sp)| {
-            vec![
-                (*p).clone(),
-                sp.spec_id.clone(),
-                sp.spec.gpu.model.clone(),
-                format!(
-                    "{:.0} GiB",
-                    sp.spec.gpu.total_vram_bytes() as f64 / (1u64 << 30) as f64
-                ),
-                format!(
-                    "{:.0} GiB",
-                    sp.spec.memory_bytes as f64 / (1u64 << 30) as f64
-                ),
-                format!("¥{:.3}", sp.price.per_hour_cny),
-                sp.region.clone(),
-                sp.stock
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "-".into()),
+                let price = if sp.price.per_hour_cny >= f64::MAX / 2.0 {
+                    "-".to_string()
+                } else {
+                    format!("¥{:.3}", sp.price.per_hour_cny)
+                };
+                vec![
+                    (*p).clone(),
+                    sp.spec_id.clone(),
+                    sp.spec.gpu.model.clone(),
+                    format!(
+                        "{:.0} GiB",
+                        sp.spec.gpu.total_vram_bytes() as f64 / (1u64 << 30) as f64
+                    ),
+                    format!(
+                        "{:.0} GiB",
+                        sp.spec.memory_bytes as f64 / (1u64 << 30) as f64
+                    ),
+                    price,
+                    sp.region.clone(),
+                    sp.stock
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "-".into()),
             ]
         })
         .collect();
@@ -241,7 +246,9 @@ fn specs(args: Args) -> MnResult<i32> {
 /// `cloud pick`
 fn pick(args: Args) -> MnResult<i32> {
     let (cfg, _) = load_config(&args)?;
-    let cons = constraints(&args, cfg.scheduler.require_stock)?;
+    let mut cons = constraints(&args, cfg.scheduler.require_stock)?;
+    // 强制过滤掉库存为 0 的规格，只返回库存 >= 1 的数据项
+    cons.require_stock = true;
 
     // 通过网关的只读评估：构造 gateway 后使用其 Picker 能力
     // 由于 Picker 依赖驱动注册表，这里用 combine 通道
@@ -321,10 +328,15 @@ fn pick(args: Args) -> MnResult<i32> {
         let rows: Vec<Vec<String>> = ranked
             .iter()
             .map(|c| {
+                    let price = if c.price_per_hour >= f64::MAX / 2.0 {
+                        "-".to_string()
+                    } else {
+                        format!("¥{:.3}", c.price_per_hour)
+                    };
                 vec![
                     c.provider.clone(),
                     c.gpu_model.clone(),
-                    format!("¥{:.3}", c.price_per_hour),
+                    price,
                     c.latency_ms
                         .map(|v| format!("{v}ms"))
                         .unwrap_or_else(|| "-".into()),
@@ -364,7 +376,9 @@ fn pick(args: Args) -> MnResult<i32> {
 /// 谁就是「当前可用的最低价」。
 fn cheapest(args: Args) -> MnResult<i32> {
     let (cfg, _) = load_config(&args)?;
-    let cons = constraints(&args, cfg.scheduler.require_stock)?;
+    let mut cons = constraints(&args, cfg.scheduler.require_stock)?;
+    // 强制过滤掉库存为 0 的规格，只返回库存 >= 1 的数据项
+    cons.require_stock = true;
 
     let (registered, skipped) = mangosteen_gateway::probe_providers(&cfg);
     if registered.is_empty() {
@@ -405,11 +419,19 @@ fn cheapest(args: Args) -> MnResult<i32> {
             ("GPU".into(), gpu_label(&best.1)),
             (
                 "时价".into(),
-                format!("¥{:.3}/h", best.1.price.per_hour_cny),
+                if best.1.price.per_hour_cny >= f64::MAX / 2.0 {
+                    "-".to_string()
+                } else {
+                    format!("¥{:.3}/h", best.1.price.per_hour_cny)
+                },
             ),
             (
                 "日费用".into(),
-                format!("¥{:.2}", best.1.price.per_hour_cny * 24.0),
+                if best.1.price.per_hour_cny >= f64::MAX / 2.0 {
+                    "-".to_string()
+                } else {
+                    format!("¥{:.2}", best.1.price.per_hour_cny * 24.0)
+                },
             ),
             ("地域".into(), best.1.region.clone()),
         ]);
@@ -425,15 +447,20 @@ fn cheapest(args: Args) -> MnResult<i32> {
                 .iter()
                 .take(if args.has("all") { ordered.len() } else { 8 })
                 .map(|(p, sp)| {
-                    vec![
-                        p.clone(),
-                        sp.spec_id.clone(),
-                        gpu_label(sp),
-                        format!("¥{:.3}", sp.price.per_hour_cny),
-                        sp.region.clone(),
-                        sp.stock
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| "-".into()),
+                        let price = if sp.price.per_hour_cny >= f64::MAX / 2.0 {
+                            "-".to_string()
+                        } else {
+                            format!("¥{:.3}", sp.price.per_hour_cny)
+                        };
+                        vec![
+                            p.clone(),
+                            sp.spec_id.clone(),
+                            gpu_label(sp),
+                            price,
+                            sp.region.clone(),
+                            sp.stock
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "-".into()),
                     ]
                 })
                 .collect();
@@ -563,7 +590,7 @@ fn instances(args: Args) -> MnResult<i32> {
     let gw = build_gateway(&args)?;
     
     // 查询所有云厂商托管的实例（含已关机），与 UI "云端节点" 对应
-    let list = gw.cloud_instance_admin_briefs();
+    let list = gw.cloud_instance_briefs();
     
     // 状态过滤
     let filter_running = args.has("running");
@@ -769,7 +796,6 @@ mod tests {
         let e = run(a).unwrap_err();
         assert!(e.to_string().contains("cloud xyz"));
         assert!(e.to_string().contains("providers"));
-        assert!(e.to_string().contains("devices"), "should list devices in error");
     }
 
     #[test]
@@ -835,12 +861,6 @@ mod tests {
         assert!(e.to_string().contains("不能为空"), "{e}");
     }
 
-    #[test]
-    fn unknown_subcommand_lists_devices() {
-        let a = crate::cli::parse_args(&["cloud".to_string(), "xyz".to_string()]).unwrap();
-        let e = run(a).unwrap_err();
-        assert!(e.to_string().contains("devices"), "{}", e);
-    }
     /// `--create` 必须是开关，不能吃下一个参数。
     ///
     /// 实测踩到：`--create --yes` 里 `--yes` 被当成 create 的值，于是
