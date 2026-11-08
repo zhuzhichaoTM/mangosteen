@@ -48,6 +48,15 @@ impl Orchestrator {
     /// 3. 设备列表非空 → 默认第一台（用户「添加了机器就希望用它」）；
     /// 4. 否则走云厂商。
     pub(crate) fn resolve_device(&self, req: &DeploymentRequest) -> Option<DeviceTarget> {
+        // ## 选择优先级（用户明确要求的原则，三者严格互斥）
+        //
+        // 1. `cloud_spec` 有值 → 用户选了 GPU 规格，**按规格创建新实例**
+        //    （停机同型号实例由后端按型号自动开机复用）。此时绝不能落回
+        //    自定义节点或运行中实例——历史上正是 device_id 检查在前、
+        //    cloud_spec 在后，导致「选了 P40 规格却连到自定义节点」。
+        // 2. `reuse_instance_id` 有值 → 复用指定的运行中实例。
+        // 3. `device_id` 有值 → 用这台自定义节点，绝不创建实例。
+        // 4. 都没有 → 按 target 决定是否兜底到第一台已登记设备。
         let find = |id: &str| -> Option<DeviceTarget> {
             let cfg = self.config();
             cfg.remote_devices
@@ -55,24 +64,11 @@ impl Orchestrator {
                 .find(|d| d.id == id)
                 .map(|d| DeviceTarget::from_config(d, &cfg.cloud.remote_workdir))
         };
-        if let Some(id) = req
-            .device_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return find(id);
-        }
+        // 1. GPU 规格优先：走云厂商创建（复用由 provision_resources 内部处理）
         if req.cloud_spec.is_some() {
             return None;
         }
-        // ## 复用指定实例时绝不能落到「第一个已保存设备」
-        //
-        // 兜底逻辑本意是「用户只配了一台机器，那就用它」，但它会把
-        // **云厂商实例的复用**（`reuse_instance_id`）劫持成「自建设备」：
-        // 台账因此写出 `cloud.provider="ssh"`、`origin.provider=""`，
-        // 后续 `stop_service` 找不到厂商驱动（报「云端驱动 `` 未注册」），
-        // 而实例实际在厂商那边，关机/开机全都做不了。
+        // 2. 复用指定实例：与设备列表无关（详见下方历史注释）
         //
         // 复用语义已经指明「挂到哪台厂商实例」，与设备列表无关。
         if req
@@ -82,6 +78,15 @@ impl Orchestrator {
             .is_some_and(|s| !s.is_empty())
         {
             return None;
+        }
+        // 3. 显式指定自定义节点
+        if let Some(id) = req
+            .device_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return find(id);
         }
         // ## 明确要云厂商时同样不能兜底到「第一个已保存设备」
         //

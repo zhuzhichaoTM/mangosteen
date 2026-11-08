@@ -103,6 +103,17 @@ impl Orchestrator {
 
         Ok(ranked
             .into_iter()
+            // 库存为 0 的规格不进入候选列表：后端直接过滤，减轻前端
+            // 处理负担，也避免用户选中一个注定创建失败的规格。
+            // stock == None（厂商未返回库存）照常放行——优云的库存查询
+            // 经常超时返回 None，严格过滤会把全部候选清空。
+            .filter(|c| {
+                all.iter()
+                    .find(|(p, s)| s.spec_id == c.spec_id && *p == c.provider)
+                    .and_then(|(_, s)| s.stock)
+                    .map(|s| s > 0)
+                    .unwrap_or(true)
+            })
             .map(|c| {
                 let spec = all
                     .iter()
@@ -179,8 +190,13 @@ impl Orchestrator {
                 continue;
             };
             for inst in instances {
-                // 管理页展示全部非销毁实例（运行中 + 已关机）
-                if matches!(inst.state, InstanceState::Destroyed) {
+                // 只返回**运行中**实例：节点选择弹窗把它们作为「可复用节点」。
+                // 已停机（Stopped/Created）与已销毁（Destroyed）一律不返回——
+                // 注释早就写明「只返回 Running」，历史实现漏掉了 Stopped，
+                // 导致用户选了一台已关机的实例、部署时 SSH 连接失败。
+                // 停机实例由部署后端按 GPU 型号在后台自动开机复用，
+                // 不需要（也不应该）出现在选择列表里。
+                if !matches!(inst.state, InstanceState::Running) {
                     continue;
                 }
                 out.push(crate::deployment::CloudInstanceBrief {
@@ -239,7 +255,8 @@ impl Orchestrator {
                 continue;
             };
             for inst in instances {
-                // 管理页展示全部非销毁实例（运行中 + 已关机）
+                // 管理页展示全部非销毁实例（运行中 + 已关机）：
+                // 需要对已关机实例做「开机」操作，不能只列 Running。
                 if matches!(inst.state, InstanceState::Destroyed) {
                     continue;
                 }

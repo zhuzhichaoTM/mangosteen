@@ -86,12 +86,14 @@ impl Orchestrator {
             .iter()
             .map(DeviceBrief::from_config)
             .collect();
-        // 用户显式指定 → 用它；否则默认第一台（与 resolve_device 的规则一致）
+        // 默认设备**必须为空**：部署页的候选列表是云端候选（云规格 + 运行中
+        // 实例），历史上默认取第一台自定义节点会误导前端，且某些路径会让
+        // 「选了 GPU 规格」的请求被劫持到自定义节点。只有用户显式指定
+        // device_id 时才回传，否则保持 None。
         let default_device_id = req
             .device_id
             .clone()
-            .filter(|id| devices.iter().any(|d| &d.id == id))
-            .or_else(|| devices.first().map(|d| d.id.clone()));
+            .filter(|id| devices.iter().any(|d| &d.id == id));
 
         // 云端显存需求与本地同一套公式（推理引擎唯一性 → 参数体系一致）
         let required_vram = self.assessor.cloud_vram_requirement(
