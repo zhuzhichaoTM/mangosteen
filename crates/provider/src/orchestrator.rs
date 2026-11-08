@@ -1341,12 +1341,11 @@ impl CloudOrchestrator {
                 instance.id, instance.state
             );
             let driver = self.registry.get(&provider)?;
+            // 无需关心实例当前状态：容器实例支持运行中重置，停机虚机直接
+            // 重置成功；运行中虚机重置会被厂商拒绝，仅告警降级（不为此
+            // 特意关机，简化流程）。已有密码的实例在函数内去重直接返回。
+            restore_login_credential(driver, &mut instance, &self.config);
             if !instance.state.is_serving() {
-                // 复用停机实例：进程重启后原创建密码已丢失、Describe 不回传密码。
-                // 必须趁**停机态**先把密码重置为本进程已知的值（厂商要求
-                // 虚机停机才能重置），开机后 ensure_key_target 才有凭证装公钥，
-                // 用户全程无需手动输入密码。
-                restore_login_credential(driver, &mut instance, &self.config);
                 self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
             }
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
@@ -1376,9 +1375,9 @@ impl CloudOrchestrator {
                     provider, instance.id, instance.state
                 );
                 let driver = self.registry.get(&provider)?;
+                // 同上：不限状态直接尝试恢复凭证（函数内去重），再按需开机。
+                restore_login_credential(driver, &mut instance, &self.config);
                 if !instance.state.is_serving() {
-                    // 同上：停机态先恢复登录凭证，再开机。
-                    restore_login_credential(driver, &mut instance, &self.config);
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
                 let ssh = ensure_key_target(&instance, &self.config)?;
