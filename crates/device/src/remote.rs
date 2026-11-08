@@ -766,10 +766,41 @@ pub fn has_gpu_processes(target: &SshTarget) -> MnResult<bool> {
     Ok(count > 0)
 }
 
+/// SSH 快速探活：**单次连接、无应用层重试**。
+///
+/// ## 为什么不用 `ssh_exec`
+///
+/// `ssh_exec` 内置 5 轮重试（每轮 ConnectTimeout 15s × ConnectionAttempts 5），
+/// 探活一次要耗 80 秒以上才返回失败——「不可达 → 强制重启」的决策被
+/// 拖到重试窗口耗尽之后，用户看到的就是「SSH 失败但迟迟不重启」。
+///
+/// 探活的判定与**凭据无关**：连接层失败（超时/拒绝/重置）说明 TCP 都
+/// 连不上，机器必然不可用；认证失败（Permission denied）说明 TCP 通了、
+/// 机器活着——返回 `Err` 但调用方应把认证失败与连接失败区分开。
+pub fn ssh_probe(target: &SshTarget, timeout_secs: u64) -> MnResult<bool> {
+    let _ = timeout_secs; // 实际超时由 base_opts 的 ConnectTimeout 约束
+    match ssh_exec_once(target, "true") {
+        Ok(_) => Ok(true),
+        Err(SshFailure::Transient(reason)) => {
+            // 连接层失败：真不可达
+            let _ = reason;
+            Ok(false)
+        }
+        Err(SshFailure::Fatal(reason)) => {
+            // 认证失败：机器活着，但当前凭据进不去——对探活而言也算「通」
+            if reason.contains("Permission denied")
+                || reason.contains("publickey")
+                || reason.contains("password")
+            {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
 pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<String> {
-    // 超时参数当前由 `ConnectTimeout` 与各调用方的轮询/预算逻辑共同约束，
-    // 保留在签名里是为了让调用方表达意图；此处显式消费避免未用告警。
-    let _ = timeout_secs;
     const MAX_ATTEMPTS: u32 = 5;
     let mut last: Option<SshFailure> = None;
     for attempt in 1..=MAX_ATTEMPTS {

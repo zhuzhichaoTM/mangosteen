@@ -1253,19 +1253,21 @@ fn force_reboot_if_unreachable(
     instance: &mut Instance,
     config: &OrchestratorConfig,
 ) -> MnResult<()> {
-    let Ok(probe) = vendor_password_target(instance, config) else {
-        return Ok(()); // 无密码构造不了探活 target，交由后续流程处理
+    // 探活与凭据无关：连接层失败（超时/拒绝）时 TCP 都连不上，机器必然
+    // 不可用——不需要密码就能判定。认证失败说明机器活着，交由公钥流程。
+    let host = match instance.network.ssh_host.clone() {
+        Some(h) if !h.trim().is_empty() => h,
+        _ => return Ok(()), // 没有 SSH 地址，交由后续流程报错
     };
-    let reachable = match mangosteen_device::remote::ssh_exec(&probe, "true", 10) {
-        Ok(_) => true,
-        Err(e) => {
-            // 认证失败 ≠ 不可达：机器活着，公钥流程能处理。
-            let msg = e.to_string();
-            !(msg.contains("Permission denied")
-                || msg.contains("publickey")
-                || msg.contains("密码"))
-        }
+    let probe = mangosteen_device::remote::SshTarget {
+        host,
+        port: instance.network.ssh_port.unwrap_or(22),
+        user: "root".to_string(),
+        password: None,
+        identity_file: None,
     };
+    let reachable =
+        mangosteen_device::remote::ssh_probe(&probe, 10).unwrap_or(false);
     if reachable {
         return Ok(());
     }
@@ -1517,35 +1519,13 @@ impl CloudOrchestrator {
                 if !instance.state.is_serving() {
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
+                // ## SSH 快速探活：伪 Running 在此现形，立即强制重启
+                // （与 reuse_instance_id 分支一致，探活失败立即 stop+start）
+                force_reboot_if_unreachable(driver, &mut instance, &self.config)?;
                 let ssh = ensure_key_target(&instance, &self.config)?;
-                // ## SSH 可达性确认（状态滞后/冷启动兜底）
-                //
-                // 厂商标 Running ≠ sshd 真能登录：冷启动窗口可达 90s，
-                // 状态滞后的「伪 Running」更是连不上。confirm 失败时重新
-                // describe → 非 Running 则强制开机再确认一次，仍失败才报错。
-                if confirm_remote_reachable(&ssh).is_err() {
-                    eprintln!(
-                        "[cloud] ⚠ 复用实例 {} SSH 不可达，重新确认实例状态并强制开机",
-                        instance.id
-                    );
-                    let fresh = driver.describe(&instance.id)?;
-                    if !fresh.state.is_serving() {
-                        restore_login_credential(driver, &mut instance, &self.config);
-                        self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
-                        let ssh2 = ensure_key_target(&instance, &self.config)?;
-                        confirm_remote_reachable(&ssh2)?;
-                    } else {
-                        return Err(MnError::Network {
-                            stage: "复用实例 SSH 可达性确认".to_string(),
-                            reason: format!(
-                                "实例 {} 厂商标记为 {} 但 SSH 无法登录，\
-                                 可能 sshd 异常或安全组拦截，请到厂商控制台检查后重试",
-                                instance.id,
-                                fresh.state
-                            ),
-                        });
-                    }
-                }
+                // 冷启动兜底：实例真在开机途中时 sshd 可能还没就绪，
+                // 90s 窗口跨过去（此时机器可达，探活已通过，只是慢）。
+                confirm_remote_reachable(&ssh)?;
                 let local_port = if local_port != 0 { local_port } else { 0 };
                 let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
                 let local_port = self
