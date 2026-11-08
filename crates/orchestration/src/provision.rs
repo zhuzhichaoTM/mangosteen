@@ -65,7 +65,19 @@ impl Orchestrator {
                 .map(|d| DeviceTarget::from_config(d, &cfg.cloud.remote_workdir))
         };
         // 1. GPU 规格优先：走云厂商创建（复用由 provision_resources 内部处理）
-        if req.cloud_spec.is_some() {
+        //
+        // `cloud_spec`（完整规格 ID）与 `gpu_model`（仅 GPU 型号）都表示
+        // 「用户明确要按 GPU 选点创建」——CLI 的 `--gpu-model 3080Ti` 只设置
+        // gpu_model 而不设置 cloud_spec，历史上漏查 gpu_model 导致
+        // `deploy --gpu-model X` 被兜底到第一台自定义节点（实测报
+        // `Could not resolve hostname 1.1.1.1.1`）。
+        if req.cloud_spec.is_some()
+            || req
+                .gpu_model
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+        {
             return None;
         }
         // 2. 复用指定实例：与设备列表无关（详见下方历史注释）
