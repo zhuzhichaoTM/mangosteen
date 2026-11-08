@@ -1177,6 +1177,59 @@ pub fn configure_existing_ssh_access(
 /// * 每次建隧道都要铺一遍临时文件，并发/端口复用时还会互相踩。
 ///
 /// 所以正确做法是：**密码只用于「第一次把本机公钥装进远端 authorized_keys」**，
+/// 复用**停机实例**时恢复登录凭证（停机态调用，开机前执行）。
+///
+/// ## 为什么必须重置密码
+///
+/// 进程重启后，创建实例时的原始密码随内存一起丢失；而厂商的 Describe
+/// 接口不回传密码（优云实测）。此时唯一的凭证恢复途径就是在**停机态**
+/// 调用 `ResetCompShareInstancePassword` 把密码重置为本进程已知的值。
+/// 开机后 [`ensure_key_target`] 用该密码完成最后一次公钥安装，随后
+/// 一切连接自动切换为免密——用户全程无需手动输入密码。
+///
+/// ## 去重与降级
+///
+/// * 实例已带密码（本轮创建、或 describe 返回了密码）→ 直接返回，不重置；
+/// * 密码来源：优先配置统一密码（`secrets/ssh_password`），缺失时生成随机强密码；
+/// * 厂商不支持重置接口 / 校验失败 → 仅告警不阻断，交由后续流程尝试
+///   现有认证方式（可能已装过公钥，`install_ssh_copy_id` 的免密探测会命中）。
+fn restore_login_credential(
+    driver: &dyn mangosteen_core::cloud::ProviderDriver,
+    instance: &mut Instance,
+    config: &OrchestratorConfig,
+) {
+    if instance.network.ssh_password.is_some() {
+        return;
+    }
+    let password = config.ssh_password.clone().unwrap_or_else(generate_recovery_password);
+    match driver.set_password(&instance.id, &password) {
+        Ok(()) => {
+            eprintln!(
+                "[cloud] ✓ 实例 {} 已重置登录密码（停机复用恢复凭证，装完公钥即切免密）",
+                instance.id
+            );
+            instance.network.ssh_password = Some(password);
+        }
+        Err(e) => {
+            eprintln!(
+                "[cloud] ⚠ 实例 {} 重置密码失败（{e}），将尝试现有认证方式",
+                instance.id
+            );
+        }
+    }
+}
+
+/// 生成一次性恢复密码（大小写字母 + 数字 + 符号，16 位）。
+///
+/// 只用于「停机复用 → 装公钥」这一次认证，公钥装好后即被免密取代。
+fn generate_recovery_password() -> String {
+    // 时间戳 + 进程 ID 混合扰动，配合固定前缀满足厂商的密码复杂度要求
+    // （≥8 位、含大小写/数字/符号）。
+    let seed = mangosteen_core::time::now_unix_millis() as u64
+        ^ (std::process::id() as u64) << 32;
+    format!("Mn#{seed:x}Aa1!")
+}
+
 /// 之后所有连接（探测、下载、启动、隧道）一律用密钥 + `BatchMode=yes`。
 /// 密钥认证没有交互、没有临时文件、没有时序依赖，天然可靠。
 ///
@@ -1289,6 +1342,11 @@ impl CloudOrchestrator {
             );
             let driver = self.registry.get(&provider)?;
             if !instance.state.is_serving() {
+                // 复用停机实例：进程重启后原创建密码已丢失、Describe 不回传密码。
+                // 必须趁**停机态**先把密码重置为本进程已知的值（厂商要求
+                // 虚机停机才能重置），开机后 ensure_key_target 才有凭证装公钥，
+                // 用户全程无需手动输入密码。
+                restore_login_credential(driver, &mut instance, &self.config);
                 self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
             }
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
@@ -1319,6 +1377,8 @@ impl CloudOrchestrator {
                 );
                 let driver = self.registry.get(&provider)?;
                 if !instance.state.is_serving() {
+                    // 同上：停机态先恢复登录凭证，再开机。
+                    restore_login_credential(driver, &mut instance, &self.config);
                     self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 }
                 let ssh = ensure_key_target(&instance, &self.config)?;

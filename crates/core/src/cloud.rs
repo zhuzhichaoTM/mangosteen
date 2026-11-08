@@ -478,6 +478,20 @@ pub trait ProviderDriver: Send + Sync {
     /// ## 为什么需要这个能力
     ///
     /// 建立 SSH 隧道总得有个认证方式。允许创建时注入 SSH key 的厂商不需要
+    /// 它；但**复用已停止实例**的场景必须依赖它：进程重启后原创建密码已
+    /// 丢失、Describe 接口不回传密码，唯一恢复凭证的途径就是把密码重置为
+    /// 本进程已知的值（厂商通常要求实例处于停机态，调用方需保证时序：
+    /// 停机 → set_password → 开机）。
+    ///
+    /// 默认实现返回不支持错误：只有实现了密码重置接口的厂商需要覆盖。
+    fn set_password(&self, instance_id: &str, password: &str) -> MnResult<()> {
+        let _ = (instance_id, password);
+        Err(MnError::Provider {
+            provider: self.name().to_string(),
+            code: "password_reset_unsupported".to_string(),
+            message: "该服务商不支持通过 API 重置实例密码".to_string(),
+        })
+    }
 
     /// 查询实例实时监控（CPU / 内存 / GPU / 磁盘使用率）。
     ///

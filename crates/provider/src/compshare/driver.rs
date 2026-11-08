@@ -382,6 +382,10 @@ impl<T: Transport> CompshareDriver<T> {
     ///
     /// 虚机要求 `Stopped`，容器实例可运行中重置——按实例类型分别校验，
     /// 一刀切要求关机会让容器实例的合法调用被误拒。
+    /// 重置实例登录密码。
+    ///
+    /// 虚机要求 `Stopped`，容器实例可运行中重置——按实例类型分别校验，
+    /// 一刀切要求关机会让容器实例的合法调用被误拒。
     pub fn reset_password(&self, id: &str, password: &str) -> MnResult<()> {
         let raw = self.describe_raw_any_scope(id)?;
         if !Self::is_container(&raw) && !raw.state.eq_ignore_ascii_case(state::STOPPED) {
@@ -797,6 +801,21 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
             }
         }
     }
+
+    /// 设置实例的 root 登录密码（trait 能力）。
+    ///
+    /// 直接转发到固有的 [`Self::reset_password`]：虚机要求 `Stopped`、
+    /// 容器可运行中重置，停机校验由后者负责。
+    /// 复用停机实例时编排层会先调它恢复已知凭证（进程重启后原密码丢失、
+    /// Describe 不回传密码，这是唯一恢复途径）。
+    fn set_password(&self, instance_id: &str, password: &str) -> MnResult<()> {
+        self.reset_password(instance_id, password)
+    }
+
+    /// 销毁实例。
+    ///
+    /// 厂商要求「仅 `Stopped` 可删除」，所以这里自动完成
+    /// 关机 → 等待 Stopped → 删除 的完整流程。
 
     /// 销毁实例。
     ///
