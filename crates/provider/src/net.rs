@@ -274,11 +274,18 @@ impl TunnelManager {
     /// `Connection refused` / `Connection timed out` 才重试。
     fn is_transient_connect_failure(e: &MnError) -> bool {
         let text = e.to_string();
-        const TRANSIENT: [&str; 5] = [
+        const TRANSIENT: [&str; 7] = [
             "Connection closed by remote host",
             "Connection reset by peer",
             "Connection refused",
             "Connection timed out",
+            // ssh_dispatch_run_fatal + Broken pipe：TCP 已建立但 SSH 握手
+            // 阶段对端把连接拆了——厂商 SSH 网关（共享转发入口）滚动更新/
+            // 转发映射重建期间的典型瞬断。实测 dep-uhost-1xijwz8py4vf：
+            // 探活通过后建隧道仍撞上，不加进瞬时列表会让 6 次重试全部
+            // 失效、第一次失败即回滚部署。
+            "Broken pipe",
+            "ssh_dispatch_run_fatal",
             // 进程在观察窗内提前退出且没给出任何说明：多半是网关刚把
             // 连接拆掉，ssh 还没写出原因就退出了。
             "stderr：（空）",
