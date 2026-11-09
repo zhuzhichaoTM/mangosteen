@@ -275,15 +275,18 @@ impl TunnelManager {
     fn is_transient_connect_failure(e: &MnError) -> bool {
         let text = e.to_string();
         const TRANSIENT: [&str; 7] = [
-            "Connection closed by remote host",
+            // ssh 输出两种格式都会出现：
+            //   「Connection closed by remote host」（无 IP）
+            //   「Connection closed by 117.50.x.x port 23」（实测
+            //    dep-1a1c22b5400000，厂商网关按来源打印）
+            // 用 "Connection closed by" 前缀统一覆盖。
+            "Connection closed by",
             "Connection reset by peer",
             "Connection refused",
             "Connection timed out",
             // ssh_dispatch_run_fatal + Broken pipe：TCP 已建立但 SSH 握手
             // 阶段对端把连接拆了——厂商 SSH 网关（共享转发入口）滚动更新/
-            // 转发映射重建期间的典型瞬断。实测 dep-uhost-1xijwz8py4vf：
-            // 探活通过后建隧道仍撞上，不加进瞬时列表会让 6 次重试全部
-            // 失效、第一次失败即回滚部署。
+            // 转发映射重建期间的典型瞬断。
             "Broken pipe",
             "ssh_dispatch_run_fatal",
             // 进程在观察窗内提前退出且没给出任何说明：多半是网关刚把

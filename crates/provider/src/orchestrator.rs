@@ -965,6 +965,14 @@ impl CloudOrchestrator {
         if wanted.is_empty() || wanted == "unknown" {
             return Ok(None);
         }
+        // ## 匹配语义必须与创建路径一致（实测 dep-1a1c22b5400000）
+        //
+        // 厂商实例的型号是 "RTX 3080TI"，用户输入 "3080TI"。归一化后
+        // `normalize("3080TI")` == "3080TI"（无 RTX 前缀时原样返回），
+        // 精确相等永远失败 → 已保留的同型号实例被无视 → 反复新建。
+        // 创建路径（型号过滤）用的是 contains，这里必须对齐：
+        // 大小写不敏感的包含匹配。
+        let wanted_lc = wanted.to_lowercase();
         // ## 列实例失败绝不能静默跳过（实测 dep-1a1c213635a000）
         //
         // 厂商限流（[226619] 接口调用过于频繁）时 driver.list() 返回 Err。
@@ -1019,7 +1027,7 @@ impl CloudOrchestrator {
             };
             if let Some(instance) = instances.into_iter().find(|instance| {
                 let model = mangosteen_core::policy::normalize_gpu_model(&instance.spec.gpu.model);
-                model == wanted
+                model.to_lowercase().contains(&wanted_lc)
                     && matches!(
                         instance.state,
                         InstanceState::Created
