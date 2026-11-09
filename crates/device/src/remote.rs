@@ -710,11 +710,11 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
 
     // ---- 步骤 3：确认免密真的可用 ----
     //
-    // 刚写入时 sshd 可能需要瞬间才生效，给一个小重试窗口；
-    // 仍不通就明确失败，绝不把「命令执行完」当成「公钥可用」。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    // 刚写入时 sshd 可能需要几秒才重新读取 authorized_keys，
+    // 给足够的重试窗口；仍不通就明确失败。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
-        match ssh_exec(&probe, "true", 8) {
+        match ssh_exec(&probe, "true", 5) {
             Ok(_) => return Ok(key),
             Err(e) => {
                 if std::time::Instant::now() >= deadline {
@@ -730,7 +730,7 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
                         ),
                     });
                 }
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(std::time::Duration::from_millis(300));
             }
         }
     }
@@ -1612,6 +1612,23 @@ pub fn download_model_remote_with_progress(
             reason: format!("下载地址不是 HTTP(S)：{url}"),
         });
     }
+
+    // 从本地环境读取代理配置，传给远端下载命令。
+    // 云端 GPU 实例在国内网络环境下访问 hf-mirror.com 等源站可能被限流或掐断，
+    // 需要通过代理转发。若本地未配置代理，则不设置（直连）。
+    let http_proxy = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("http_proxy")).ok();
+    let https_proxy = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")).ok();
+    let no_proxy = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).ok();
+    let proxy_env = match (&http_proxy, &https_proxy, &no_proxy) {
+        (Some(hp), Some(sp), Some(np)) => format!(
+            "HTTP_PROXY={hp} HTTPS_PROXY={sp} NO_PROXY={np} "
+        ),
+        (Some(hp), Some(sp), None) => format!("HTTP_PROXY={hp} HTTPS_PROXY={sp} "),
+        (Some(hp), None, _) => format!("HTTP_PROXY={hp} "),
+        (None, Some(sp), _) => format!("HTTPS_PROXY={sp} "),
+        (None, None, _) => String::new(),
+    };
+
     let workdir = dest
         .rsplit_once('/')
         .map(|(d, _)| d.to_string())
@@ -1651,8 +1668,9 @@ pub fn download_model_remote_with_progress(
     let ok_file = format!("{dest}.download.ok");
     let q_ok = shell_quote(&ok_file);
     let downloader = format!(
-        "if command -v aria2c >/dev/null 2>&1 && aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url}; then status=0; else curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 --speed-limit 1024 -o {q_dest} {q_url}; status=$?; fi; \
-         if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\""
+        "{proxy_env}if command -v aria2c >/dev/null 2>&1 && aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url}; then status=0; else curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 -o {q_dest} {q_url}; status=$?; fi; \
+         if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\"",
+        proxy_env = proxy_env
     );
     // ## 为什么先把下载器写成脚本文件，再用一条短命令启动
     //

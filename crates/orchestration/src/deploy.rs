@@ -47,6 +47,9 @@ impl Orchestrator {
         req: &DeploymentRequest,
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<PreparedDeployment> {
+        // 部署前清理非活跃记录，避免复用不可达的旧实例
+        let _ = self.state.prune_inactive();
+
         let result = self.prepare_inner(evaluated, req, sink);
         if let Err(e) = &result {
             sink(
@@ -90,6 +93,9 @@ impl Orchestrator {
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<DeploymentPlan> {
         use crate::progress::{DeployStage, StageOutcome};
+
+        // 部署前清理非活跃记录，避免复用不可达的旧实例
+        let _ = self.state.prune_inactive();
 
         let evaluated = self.evaluate(req)?;
         sink(

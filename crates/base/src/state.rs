@@ -384,6 +384,25 @@ impl StateStore {
         }
         Ok(removed)
     }
+
+    /// 清理非活跃记录：只保留 `ready` 和 `provisioning`（正在运行的）。
+    ///
+    /// 每次部署前调用，删除旧的非活跃记录（planned/stopped/failed/destroyed），
+    /// 避免复用不可达的旧实例。
+    ///
+    /// 返回清理掉的记录数。
+    pub fn prune_inactive(&self) -> MnResult<usize> {
+        let mut state = self.load()?;
+        let before = state.deployments.len();
+        state
+            .deployments
+            .retain(|r| matches!(r.status, DeploymentStatus::Ready | DeploymentStatus::Provisioning));
+        let removed = before - state.deployments.len();
+        if removed > 0 {
+            self.save(&state)?;
+        }
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
