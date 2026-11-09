@@ -965,9 +965,57 @@ impl CloudOrchestrator {
         if wanted.is_empty() || wanted == "unknown" {
             return Ok(None);
         }
+        // ## 列实例失败绝不能静默跳过（实测 dep-1a1c213635a000）
+        //
+        // 厂商限流（[226619] 接口调用过于频繁）时 driver.list() 返回 Err。
+        // 旧实现 `let Ok(instances) = result else { continue }` 会把失败
+        // 当成「没有实例」→ 复用查找返回 None → **默默新建一台**（多花钱），
+        // 而同一时刻 UI 部署恰好限流间隙通过——表现为「UI 成功 CLI 失败」
+        // 的假象，实际只是限流时序随机。修复：失败先退避重试，全失败则
+        // 报错终止部署——宁可让用户稍后重试，也不能静默多开机器。
+        const LIST_ATTEMPTS: u32 = 3;
+        const LIST_WAIT_SECS: u64 = 4;
+        let mut all_failed = true;
+        let mut last_err = String::new();
         for (provider, result) in self.list_instances() {
-            let Ok(instances) = result else {
-                continue;
+            let mut instances = match result {
+                Ok(v) => {
+                    all_failed = false;
+                    v
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    let mut retried = None;
+                    for attempt in 1..=LIST_ATTEMPTS {
+                        eprintln!(
+                            "[cloud] ⚠ 服务商 {provider} 列实例失败（第 {attempt}/{LIST_ATTEMPTS} 次重试）：{last_err}"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(
+                            LIST_WAIT_SECS * attempt as u64,
+                        ));
+                        // 重查该服务商：list_instances 遍历注册表，取回目标 provider 的结果
+                        let again = self
+                            .list_instances()
+                            .into_iter()
+                            .find(|(name, r)| *name == provider)
+                            .map(|(_, r)| r);
+                        match again {
+                            Some(Ok(v)) => {
+                                retried = Some(v);
+                                break;
+                            }
+                            Some(Err(e)) => last_err = e.to_string(),
+                            None => break,
+                        }
+                    }
+                    match retried {
+                        Some(v) => {
+                            all_failed = false;
+                            v
+                        }
+                        None => continue,
+                    }
+                }
             };
             if let Some(instance) = instances.into_iter().find(|instance| {
                 let model = mangosteen_core::policy::normalize_gpu_model(&instance.spec.gpu.model);
@@ -982,6 +1030,16 @@ impl CloudOrchestrator {
             }) {
                 return Ok(Some((provider, instance)));
             }
+        }
+        if all_failed {
+            return Err(MnError::Network {
+                stage: "查找可复用实例".to_string(),
+                reason: format!(
+                    "列取云端实例失败（含重试），无法确认是否已有可复用的 \
+                     {wanted} 实例。为避免重复创建实例计费，本次部署终止。\
+                     最后错误：{last_err}。请稍后重试"
+                ),
+            });
         }
         Ok(None)
     }
