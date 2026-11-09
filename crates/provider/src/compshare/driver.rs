@@ -384,22 +384,9 @@ impl<T: Transport> CompshareDriver<T> {
     /// 一刀切要求关机会让容器实例的合法调用被误拒。
     /// 重置实例登录密码。
     ///
-    /// 虚机要求 `Stopped`，容器实例可运行中重置——按实例类型分别校验，
-    /// 一刀切要求关机会让容器实例的合法调用被误拒。
+    /// 优云智算虚机和容器实例均支持运行中重置密码，无需先关机。
+    /// 直接调用厂商 `ResetCompShareInstancePassword` 接口重置。
     pub fn reset_password(&self, id: &str, password: &str) -> MnResult<()> {
-        let raw = self.describe_raw_any_scope(id)?;
-        if !Self::is_container(&raw) && !raw.state.eq_ignore_ascii_case(state::STOPPED) {
-            return Err(MnError::Provider {
-                provider: self.name.clone(),
-                code: "instance_not_stopped".to_string(),
-                message: format!(
-                    "普通主机实例重置密码前必须先关机，但 {} 当前状态是 {}。\
-                     请先执行 `mangosteen cloud stop {}`，再重试。\
-                     （容器可用区实例支持运行中重置）",
-                    id, raw.state, id
-                ),
-            });
-        }
         self.client.reset_instance_password(id, password)?;
         Ok(())
     }

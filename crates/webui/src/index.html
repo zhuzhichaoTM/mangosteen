@@ -1683,7 +1683,7 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
       const baseName = (x) => String(x.model_id || x.model || "").toLowerCase().split(":")[0];
       const isLive = (x) => !!x.running || x.status === "provisioning";
       const sel = $("dp-template-sel");
-      const tmplKey = mdef.id + "|" + (sel ? sel.value : "default");
+      const currentTmpl = sel ? sel.value : "default";
       const pool = all.filter((x) => {
         const b = baseName(x);
         return b === mdef.id || b.startsWith(mdef.id + "-");
@@ -1693,8 +1693,17 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
       if (!cands.length) cands = pool.filter((x) => baseName(x) === mdef.id);
       if (!cands.length) cands = pool;
       cands.sort(byNew);
-      cands.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
-      liveMap[tmplKey] = cands[0] || null;
+      const live = cands[0] || null;
+
+      // 为当前模型的**所有**模板槽位都构建 liveMap 条目，避免切换模板时
+      // 节点信息/实例ID/登录方式丢失。台账记录不携带模板字段，同一模型
+      // 的所有模板共享同一条部署记录的节点信息。
+      const modelTemplates = templates[mdef.id] || templates["qwen2.5-0.5b"] || {};
+      Object.keys(modelTemplates).forEach((slot) => {
+        liveMap[mdef.id + "|" + slot] = live;
+      });
+      // 同时保留当前选中槽位的显式条目
+      liveMap[mdef.id + "|" + currentTmpl] = live;
     });
     renderTemplateOptions();
     refreshStatus();

@@ -708,11 +708,15 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
     let remote_cmd = authorized_keys_append_cmd(pub_text);
     ssh_exec(target, &remote_cmd, 30)?;
 
+    // 写入后给 sshd 一点时间重新读取 authorized_keys 与 sshd_config，
+    // 避免立即探测时还未生效。
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
     // ---- 步骤 3：确认免密真的可用 ----
     //
     // 刚写入时 sshd 可能需要几秒才重新读取 authorized_keys，
     // 给足够的重试窗口；仍不通就明确失败。
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match ssh_exec(&probe, "true", 5) {
             Ok(_) => return Ok(key),
@@ -730,7 +734,7 @@ pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {
                         ),
                     });
                 }
-                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         }
     }
@@ -1597,6 +1601,9 @@ pub fn download_model_remote(
 ///
 /// 回调参数为已下载字节与期望总字节；只在上报点调用，不做格式化——
 /// 进度如何展示由调用方决定。
+///
+/// 支持镜像源降级：若主源（如 hf-mirror.com）返回错误，自动尝试备用源
+///（如 huggingface.co），避免单点故障导致部署失败。
 pub fn download_model_remote_with_progress(
     target: &SshTarget,
     url: &str,
@@ -1629,6 +1636,55 @@ pub fn download_model_remote_with_progress(
         (None, None, _) => String::new(),
     };
 
+    // 构建候选 URL 列表：主源优先，失败后尝试备用源（将 hf-mirror.com 替换为 huggingface.co）
+    let alt_url = url.replace("hf-mirror.com", "huggingface.co");
+    let urls: Vec<&str> = if alt_url != url {
+        vec![url, &alt_url]
+    } else {
+        vec![url]
+    };
+
+    let mut last_err: Option<MnError> = None;
+    for candidate_url in &urls {
+        match download_single_url(
+            target,
+            candidate_url,
+            dest,
+            expected_bytes,
+            hf_token,
+            on_progress,
+            should_cancel,
+            &proxy_env,
+        ) {
+            Ok(size) => return Ok(size),
+            Err(e) => {
+                eprintln!(
+                    "[download] 源站 {candidate_url} 下载失败：{e}，尝试下一个源站"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        MnError::Network {
+            stage: "云端下载模型".to_string(),
+            reason: "所有源站均下载失败".to_string(),
+        }
+    }))
+}
+
+/// 下载单个 URL 的内部实现。
+fn download_single_url(
+    target: &SshTarget,
+    url: &str,
+    dest: &str,
+    expected_bytes: Option<u64>,
+    hf_token: Option<&str>,
+    on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
+    should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    proxy_env: &str,
+) -> MnResult<u64> {
     let workdir = dest
         .rsplit_once('/')
         .map(|(d, _)| d.to_string())
@@ -1667,10 +1723,10 @@ pub fn download_model_remote_with_progress(
     // 期望字节数退化为参考值。
     let ok_file = format!("{dest}.download.ok");
     let q_ok = shell_quote(&ok_file);
+
+    // 构建下载器脚本：保持简单，避免复杂 shell 语法导致语法错误
     let downloader = format!(
-        "{proxy_env}if command -v aria2c >/dev/null 2>&1 && aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url}; then status=0; else curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 -o {q_dest} {q_url}; status=$?; fi; \
-         if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\"",
-        proxy_env = proxy_env
+        "{proxy_env}aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url} 2>/dev/null; status=$?; if [ \"$status\" -ne 0 ]; then curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 -o {q_dest} {q_url}; status=$?; fi; if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\"",
     );
     // ## 为什么先把下载器写成脚本文件，再用一条短命令启动
     //

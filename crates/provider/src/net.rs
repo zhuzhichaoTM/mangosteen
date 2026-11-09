@@ -407,8 +407,11 @@ impl TunnelManager {
         if let Some(ap) = &askpass {
             opts = opts
                 .with_env("SSH_ASKPASS", ap.script_arg())
-                .with_env("SSH_ASKPASS_REQUIRE", "force")
-                .with_env("DISPLAY", ":0");
+                .with_env("SSH_ASKPASS_REQUIRE", "force");
+            // 在 macOS 等非图形环境下，SSH_ASKPASS_REQUIRE=force 配合 -T -N 模式
+            // 可能导致 ssh 不调用 askpass 脚本。保留 DISPLAY 可让 ssh 知道
+            // 存在图形环境，从而回退到交互式密码提示或 askpass。
+            opts = opts.with_env("DISPLAY", ":0");
         }
         if let Some(dir) = &self.log_dir {
             let log = dir.join(format!("tunnel-{local_port}.log"));
@@ -452,10 +455,9 @@ impl TunnelManager {
         // 因此只确认 ssh 进程在观察窗内活着；真正可用性由启动阶段探 /health 判定。
         if effective.allow_unready_remote {
             // 观察窗必须覆盖 ssh 的完整认证过程：TCP 握手 + 密钥交换 +
-            // askpass 取密码，跨公网常需 1~3 秒。窗口太短会在认证完成前
-            // 就判定「隧道就绪」，掩盖真实失败；这里的目的是尽早发现
-            // 「密码错 / 实例未就绪」这类立刻退出的失败。
-            let settle = Duration::from_secs(3);
+            // askpass 脚本执行（读取密码），跨公网常需 5~10 秒。
+            // 窗口太短会在认证完成前就判定「隧道就绪」，掩盖真实失败。
+            let settle = Duration::from_secs(10);
             let deadline = Instant::now() + connect_timeout.min(settle);
             loop {
                 if let Some(code) = child.exit_code() {

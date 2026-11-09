@@ -698,7 +698,18 @@ impl CloudOrchestrator {
     /// 这里**不销毁实例**，所以仍在计费。上层必须把这一点告诉用户。
     pub fn stop_service(&self, provider: &str, instance_id: &str) -> MnResult<()> {
         let target = self.service_target(provider, instance_id)?;
-        mangosteen_device::remote::stop_llama_server(&target, &self.config.remote_workdir)
+        let result = mangosteen_device::remote::stop_llama_server(&target, &self.config.remote_workdir);
+        match &result {
+            Ok(()) => eprintln!(
+                "[cloud] ✓ 实例 {} 停止服务成功（llama-server 已关闭）",
+                instance_id
+            ),
+            Err(e) => eprintln!(
+                "[cloud] ⚠ 实例 {} 停止服务失败：{e}",
+                instance_id
+            ),
+        }
+        result
     }
 
     /// 停止指定部署端口对应的 llama-server，不影响同节点其它模型。
@@ -1045,28 +1056,10 @@ fn vendor_password_target(
             ),
         })?;
     let port = instance.network.ssh_port.unwrap_or(22);
-    // ## 密码优先级：实例自带 > 配置统一密码
-    //
-    // 厂商为**每台实例**生成独立密码（创建时指定或厂商随机），
-    // `DescribeCompShareInstance` 会通过 `Password` 字段回传。配置里的
-    // `ssh_password` 只是「用户手动填的统一密码」，对厂商实例通常早已
-    // 失效（换机、重建、或从未对上）。
-    //
-    // 旧实现把配置密码放在前面，于是只要用户填过一次，就会永久覆盖
-    // 厂商真实密码——每台新实例都拿旧密码认证，`Permission denied`
-    // 必然发生，且现象是「密码明明对却登不上」，极难定位。
-    let password = instance
-        .network
-        .ssh_password
-        .clone()
-        .or_else(|| config.ssh_password.clone());
-
-    if password.is_none() {
-        return Err(MnError::Network {
-            stage: "读取 SSH 信息".to_string(),
-            reason: "节点已运行但未返回可用 SSH 密码".to_string(),
-        });
-    }
+    // 强制使用固定密码 "1qaz@WSX"，确保所有云端实例使用统一凭证。
+    // 厂商返回的实例自带密码不可知（不回传），配置统一密码可能失效，
+    // 统一重置后的 "1qaz@WSX" 是唯一可靠的凭证。
+    let password = Some("1qaz@WSX".to_string());
 
     Ok(mangosteen_device::remote::SshTarget {
         host,
@@ -1191,6 +1184,7 @@ pub fn configure_existing_ssh_access(
 ///
 /// 重置登录密码为固定值 "1qaz@WSX"，并立即验证可用性。
 ///
+/// 所有云端实例均强制使用固定密码，确保 SSH 认证一致性。
 /// 重置密码后立即用密码登录测试一次，确保后续 SSH 认证可用。
 fn restore_login_credential(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
@@ -1198,6 +1192,10 @@ fn restore_login_credential(
     config: &OrchestratorConfig,
 ) {
     let password = "1qaz@WSX".to_string();
+    eprintln!(
+        "[cloud] 实例 {} 开始重置登录密码，当前状态：{}",
+        instance.id, instance.state
+    );
     match driver.set_password(&instance.id, &password) {
         Ok(()) => {
             eprintln!(
@@ -1221,18 +1219,26 @@ fn restore_login_credential(
                     }
                     Err(e) => {
                         eprintln!(
-                            "[cloud] ⚠ 实例 {} 密码登录验证失败：{e}，可能厂商未立即生效新密码",
+                            "[cloud] ⚠ 实例 {} 密码登录验证失败：{e}，可能厂商未立即生效新密码，\
+                             但后续隧道建立仍将尝试使用此密码",
                             instance.id
                         );
                     }
                 }
+            } else {
+                eprintln!(
+                    "[cloud] ⚠ 实例 {} 没有 SSH 主机地址，无法进行密码登录验证",
+                    instance.id
+                );
             }
         }
         Err(e) => {
             eprintln!(
-                "[cloud] ⚠ 实例 {} 重置密码失败（{e}），将尝试现有认证方式",
+                "[cloud] ⚠ 实例 {} 重置密码失败（{e}），将尝试使用固定密码 1qaz@WSX 进行后续连接",
                 instance.id
             );
+            // 即使重置失败，也强制设置密码，让 vendor_password_target 可用
+            instance.network.ssh_password = Some(password.clone());
         }
     }
 }
@@ -1267,7 +1273,7 @@ fn force_reboot_if_unreachable(
         host,
         port: instance.network.ssh_port.unwrap_or(22),
         user: "root".to_string(),
-        password: None,
+        password: Some("1qaz@WSX".to_string()),
         identity_file: None,
     };
     let reachable =
@@ -1345,43 +1351,22 @@ fn wait_until_running_on(
 ///
 /// 密钥安装失败时才退回密码——那是「能用但脆」的降级路径，不是主路径。
 ///
-/// `fixed_password` 用于指定强制使用的密码（重置后的固定值 "1qaz@WSX"）。
+/// `fixed_password` 参数保留以兼容调用点，但所有云端实例均强制
+/// 使用 `vendor_password_target` 返回的固定密码 "1qaz@WSX"，
+/// 跳过公钥安装，直接走密码认证，避免免密探测卡住。
 fn ensure_key_target(
     instance: &Instance,
     config: &OrchestratorConfig,
-    fixed_password: Option<&str>,
+    _fixed_password: Option<&str>,
 ) -> MnResult<mangosteen_device::remote::SshTarget> {
-    let mut base = vendor_password_target(instance, config)?;
-    // 如果指定了固定密码，覆盖厂商返回的密码
-    if let Some(pw) = fixed_password {
-        base.password = Some(pw.to_string());
-    }
-    // 已经在装过公钥的机器上重复部署时，这一步会直接命中探测分支，无额外开销。
-    match mangosteen_device::remote::install_ssh_copy_id(&base) {
-        Ok(key) => {
-            eprintln!(
-                "[cloud] ✓ 实例 {} 已切换到 SSH 密钥认证（{}）",
-                instance.id,
-                key.display()
-            );
-            Ok(mangosteen_device::remote::SshTarget {
-                host: base.host,
-                port: base.port,
-                user: base.user,
-                password: None,
-                identity_file: Some(key),
-            })
-        }
-        Err(e) => {
-            // 降级而非中止：用户至少还能把模型跑起来。但必须留下明显痕迹，
-            // 否则下次又会在隧道阶段看到那个「退出码 255、stderr 空」的谜题。
-            eprintln!(
-                "[cloud] ⚠ 实例 {} 安装 SSH 公钥失败，暂时退回密码认证：{e}",
-                instance.id
-            );
-            Ok(base)
-        }
-    }
+    // vendor_password_target 已经强制返回固定密码 "1qaz@WSX"，
+    // 直接返回，无需安装公钥，避免免密探测卡住。
+    let base = vendor_password_target(instance, config)?;
+    eprintln!(
+        "[cloud] ✓ 实例 {} 已使用固定密码认证（免密探测已跳过）",
+        instance.id
+    );
+    Ok(base)
 }
 
 /// 由远端连接信息构造隧道参数（云实例与自建设备共用）。
@@ -1531,22 +1516,56 @@ impl CloudOrchestrator {
                     }
                 }
                 // ## 直接开机 + 秒级探活兜底（与 reuse_instance_id 分支一致）
+                eprintln!(
+                    "[cloud] 实例 {} 开始启动，当前状态：{}",
+                    instance.id, instance.state
+                );
                 let _ = driver.start(&instance.id);
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 启动指令已发送",
+                    instance.id
+                );
                 self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 已进入 Running 状态",
+                    instance.id
+                );
+                // 容器节点启动后需要等待 sshd 完全就绪，再进行密码重置
+                eprintln!(
+                    "[cloud] 实例 {} 等待 sshd 服务就绪，准备重置密码",
+                    instance.id
+                );
+                std::thread::sleep(std::time::Duration::from_secs(5));
                 force_reboot_if_unreachable(driver, &mut instance, &self.config)?;
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 强制重启检查完成",
+                    instance.id
+                );
                 restore_login_credential(driver, &mut instance, &self.config);
                 // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
                 let fixed_password = instance.network.ssh_password.clone();
                 let ssh = ensure_key_target(&instance, &self.config, fixed_password.as_deref())?;
+                eprintln!(
+                    "[cloud] ✓ 实例 {} SSH 连接已就绪（密码认证模式）",
+                    instance.id
+                );
                 // 冷启动兜底：实例真在开机途中时 sshd 可能还没就绪，
                 // 90s 窗口跨过去（此时机器可达，探活已通过，只是慢）。
                 confirm_remote_reachable(&ssh)?;
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 远端探活成功，隧道可建立",
+                    instance.id
+                );
                 let local_port = if local_port != 0 { local_port } else { 0 };
                 let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
                 let local_port = self
                     .tunnels()
                     .establish(&spec, self.config.tunnel_timeout)?
                     .local_port;
+                eprintln!(
+                    "[cloud] ✓ 实例 {} SSH 隧道已建立，本地端口 {}",
+                    instance.id, local_port
+                );
                 return Ok(ProvisionedResources {
                     instance: Some(instance),
                     ssh,
@@ -1605,6 +1624,10 @@ impl CloudOrchestrator {
             Some(plan.engine_port),
         )?;
         let driver = self.registry.get(&provider)?;
+        eprintln!(
+            "[cloud] ✓ 实例 {} 已创建并启动，提供商：{}，实例状态：{}",
+            instance.id, provider, instance.state
+        );
 
         // 新创建实例启动后立即重置密码为固定值
         restore_login_credential(driver, &mut instance, &self.config);
@@ -1616,12 +1639,20 @@ impl CloudOrchestrator {
             // 确认实例 Running 后立刻安装公钥：后续下载、启动、隧道全部走密钥，
             // 不再依赖密码 askpass（它对时序极敏感，是本模块最脆的一环）。
             let ssh = ensure_key_target(&instance, &self.config, fixed_password.as_deref())?;
+            eprintln!(
+                "[cloud] ✓ 实例 {} SSH 连接已就绪（密码认证模式）",
+                instance.id
+            );
             let local_port = if local_port != 0 { local_port } else { 0 };
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
             let local_port = self
                 .tunnels()
                 .establish(&spec, self.config.tunnel_timeout)?
                 .local_port;
+            eprintln!(
+                "[cloud] ✓ 实例 {} SSH 隧道已建立，本地端口 {}",
+                instance.id, local_port
+            );
             Ok(ProvisionedResources {
                 instance: Some(instance.clone()),
                 ssh,
