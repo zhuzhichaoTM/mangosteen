@@ -2384,7 +2384,10 @@ Tabs.register("setting", (() => {
     const box = $("se-cloud-instances");
     if (!box) return;
     try {
-      const r = await api("/api/cloud/instances", { timeoutMs: 30000 });
+      // 90s：服务端要同步调厂商 API 列实例；厂商限流时会内部退避重试，
+      // 30s 窗口实测不够（表现为「云端实例读取失败：请求超时」，而服务端
+      // 其实还在正常重试）。
+      const r = await api("/api/cloud/instances", { timeoutMs: 90000 });
       box.innerHTML = "";
       const list = r.instances || [];
       if (!list.length) { box.innerHTML = '<div class="empty">当前云厂商下没有 GPU 实例（部署模型后会出现在这里）</div>'; return; }
