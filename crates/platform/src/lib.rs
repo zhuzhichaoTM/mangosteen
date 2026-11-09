@@ -18,12 +18,10 @@
 //! | [`hardware`] | CPU / 内存 / GPU 采集（`nvidia-smi`、`system_profiler`、`/proc`、`WMI`） |
 //! | [`process`] | 子进程拉起、健康探测、优雅终止 |
 //! | [`fs`] | 文件权限、符号链接、原子写 |
-//! | [`dlpath`] | 动态库搜索路径探测（解决 llama-server 找不到 .dylib/.so） |
 //! | [`resmon`] | 实时资源采样（CPU 占用率、可用内存、进程 RSS） |
 //! | [`docconv`] | 富文档转换命令选择（各平台工具差异收敛点） |
 //! | [`ssh`] | SSH 客户端适配：askpass 脚本、可执行名、`/dev/null` 等价物 |
 
-pub mod dlpath;
 pub mod docconv;
 pub mod fs;
 pub mod hardware;

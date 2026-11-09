@@ -832,9 +832,17 @@ fn c6_five_layer_architecture_is_complete() {
         "量化模块缺少任务描述（QuantizeRequest）"
     );
     // 模块 3：加载执行
+    //
+    // 本地进程启动（EngineHandle / launch）已撤销：Mangosteen 只部署到
+    // 云端/远端节点，编排层消费 EnginePlugin::launch_config 生成远端
+    // SSH 拉起参数。守护对象改为「引擎插件化」本体。
     assert!(
-        crate_has("mangosteen-device", "pub struct EngineHandle"),
-        "第四层缺少「加载执行」句柄（EngineHandle）"
+        crate_has("mangosteen-device", "pub struct LlamaCppEngine"),
+        "第四层缺少 llama.cpp 引擎插件（LlamaCppEngine）"
+    );
+    assert!(
+        crate_has("mangosteen-device", "pub struct EngineRegistry"),
+        "第四层缺少引擎插件注册表（EngineRegistry）"
     );
 
     // ---------- 第五层：基础支撑层 ----------
