@@ -667,16 +667,38 @@ impl Orchestrator {
 
         match &record.plan.origin {
             ComputeOrigin::Cloud {
-                provider,
+                provider: origin_provider,
                 instance_id,
             } => {
-                if let Some(o) = self.cloud().as_mut() {
-                    let errors = o.teardown(provider, instance_id);
-                    if !errors.is_empty() {
-                        return Err(MnError::Network {
-                            stage: "销毁云端资源".to_string(),
-                            reason: errors.join("；"),
-                        });
+                // ## provider 必须能回退到 cloud.provider（与 stop_service 同一规则）
+                //
+                // 部署在「实例创建」阶段失败时，台账已落（provisioning），
+                // 但 `origin.provider` 还没被编排层回填——仍是空串。
+                // 直接拿空串去查驱动会报「云端驱动 `` 未注册或未启用」，
+                // 用户卡在一条永远停不掉的失败部署上。回退顺序：
+                // origin.provider → cloud.provider（self-consistent 部署
+                // 方案里两个字段都会写）。
+                let provider = if !origin_provider.trim().is_empty() {
+                    origin_provider.clone()
+                } else {
+                    record
+                        .plan
+                        .cloud
+                        .as_ref()
+                        .map(|c| c.provider.clone())
+                        .unwrap_or_default()
+                };
+                // 仍然为空（自建设备/无远端）：没有厂商资源可销毁，
+                // 直接销毁台账即可。
+                if !provider.trim().is_empty() {
+                    if let Some(o) = self.cloud().as_mut() {
+                        let errors = o.teardown(&provider, instance_id);
+                        if !errors.is_empty() {
+                            return Err(MnError::Network {
+                                stage: "销毁云端资源".to_string(),
+                                reason: errors.join("；"),
+                            });
+                        }
                     }
                 }
             }
