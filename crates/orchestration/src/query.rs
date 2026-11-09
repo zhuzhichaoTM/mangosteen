@@ -348,12 +348,6 @@ impl Orchestrator {
     }
     /// 状态快照。
     pub fn status(&self) -> MnResult<GatewayStatus> {
-        let engine_path = self.local_engine.locate().ok();
-        // 只读缓存：`--version` 在部分安装上要 20~30 秒，绝不能在请求路径上跑
-        let engine_version = engine_path
-            .as_ref()
-            .and_then(|p| self.cached_engine_version(p));
-
         Ok(GatewayStatus {
             version: mangosteen_core::identity::VERSION.to_string(),
             hardware: self.assessor.hardware().describe(),
@@ -366,8 +360,6 @@ impl Orchestrator {
                 .map(|s| s.to_string())
                 .collect(),
             active: self.refresh()?,
-            engine_path,
-            engine_version,
         })
     }
 }

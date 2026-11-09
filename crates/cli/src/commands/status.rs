@@ -25,8 +25,6 @@ pub fn run(args: Args) -> MnResult<i32> {
             "version": st.version,
             "hardware": st.hardware,
             "providers": st.providers,
-            "engine_path": st.engine_path.map(|p| p.display().to_string()),
-            "engine_version": st.engine_version,
             "active": st.active.iter().map(|a| serde_json::json!({
                 "id": a.id,
                 "model": a.model,
@@ -49,17 +47,9 @@ pub fn run(args: Args) -> MnResult<i32> {
         ("版本".into(), st.version.clone()),
         ("硬件".into(), st.hardware.clone()),
         (
-            "本地推理引擎".into(),
-            match (&st.engine_path, &st.engine_version) {
-                (Some(p), Some(v)) => format!("{} ({})", p.display(), v),
-                (Some(p), None) => format!("{} （版本未知）", p.display()),
-                (None, _) => output::paint("未找到（无法本地部署）", output::Color::Yellow),
-            },
-        ),
-        (
             "云服务商".into(),
             if st.providers.is_empty() {
-                output::dim("未配置（本地不足时无法降级）").to_string()
+                output::dim("未配置（无法部署云端算力）").to_string()
             } else {
                 st.providers.join(", ")
             },

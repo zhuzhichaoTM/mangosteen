@@ -1723,28 +1723,27 @@ mod tests {
         assert!(!body.contains("Abc123"), "明文密码不得出现在请求体：{body}");
     }
 
-    /// 虚机重置密码必须先关机；容器实例允许运行中。
+    /// 虚机与容器实例均支持**运行中**重置密码（厂商已放开）。
+    ///
+    /// 旧实现按实例类型分别校验「虚机必须 Stopped」，与厂商实际能力
+    /// 脱节（实测优云虚机运行中重置密码完全可用），反而让复用部署的
+    /// 密码恢复流程被误拒。现已移除状态检查，此测试守护「任意状态
+    /// 都直接发出重置请求」。
     #[test]
-    fn reset_password_requires_stopped_for_vm_only() {
-        // 虚机 + Running → 拒绝，且不发出重置请求
-        let v = FakeVendor::new(vec![(
-            "DescribeCompShareInstance",
-            instance_json("uhost-1", "Running"),
-        )]);
+    fn reset_password_allowed_in_any_state() {
+        // 虚机 + Running → 直接重置
+        let v = FakeVendor::new(vec![
+            ("DescribeCompShareInstance", instance_json("uhost-1", "Running")),
+            ("ResetCompShareInstancePassword", OK_ACTION.into()),
+        ]);
         let d = driver(v);
-        let e = d.reset_password("uhost-1", "Abc123!").unwrap_err();
-        assert!(e.to_string().contains("必须先关机"), "{e}");
-        assert!(
-            !d.client()
-                .transport()
-                .called("ResetCompShareInstancePassword"),
-            "状态不符时绝不能发出重置请求"
-        );
+        d.reset_password("uhost-1", "Abc123!").unwrap();
+        assert!(d
+            .client()
+            .transport()
+            .called("ResetCompShareInstancePassword"));
 
-        // 容器 + Running → 允许
-        //
-        // `instance_json` 默认不含 `InstanceType`（虚机场景），
-        // 这里显式注入 `Container` 以验证「容器可运行中重置」这条分支。
+        // 容器 + Running → 同样直接重置
         let container = instance_json("uhost-1", "Running").replace(
             r#""GpuType":"4090","#,
             r#""GpuType":"4090","InstanceType":"Container","#,

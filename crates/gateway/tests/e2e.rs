@@ -216,14 +216,12 @@ impl TestEnv {
     /// 并行跑，CPU 被抢占，连假引擎脚本的进程启动都可能超 2 秒。凡是断言
     /// `local_viable == true` 的用例都该先调本方法，让 `preview` 只读缓存。
     ///
-    /// 刻意不做成 `gateway()` 的默认行为：有一条测试专门守护「缓存为空时
-    /// 接口不阻塞」（`e2e_preview_and_doctor_do_not_probe_engine_synchronously`），
-    /// 全局预热会改变它的前提。
+    /// 本地 llama-server 启动/版本探测路径已撤销（本地推理交由 Ollama
+    /// 承担），预热不再存在；保留方法名以免改动所有调用点，语义等同
+    /// 直接构造网关。
     #[allow(dead_code)]
     fn warmed_gateway(&self, cfg: Config) -> Gateway {
-        let gw = self.gateway(cfg);
-        let _ = gw.warm_up_engine();
-        gw
+        self.gateway(cfg)
     }
 }
 
@@ -898,7 +896,9 @@ fn e2e_doctor_api_reports_checks() {
     assert_eq!(status, 200, "body={body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let checks = v["checks"].as_array().expect("必须有 checks 数组");
-    assert!(checks.len() >= 3, "至少应报告引擎/策略/云服务商");
+    // 本地引擎检查已撤销（本地推理交由 Ollama 承担），自检聚焦
+    // 云端能力：至少应报告云服务商与模型库两项。
+    assert!(checks.len() >= 2, "至少应报告云服务商/模型库");
 
     // 每项必须有 name 与 status，UI 靠这两个字段上色
     for c in checks {
@@ -932,9 +932,6 @@ fn e2e_warm_up_does_not_block_api() {
     let cfg = env.config(&slow);
     let gw = env.gateway(cfg);
     let shared = std::sync::Arc::new(gw);
-
-    // 启动预热（会在后台 sleep 3 秒）
-    mangosteen_gateway::spawn_warm_up(std::sync::Arc::clone(&shared));
 
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1178,7 +1175,7 @@ fn e2e_preview_and_doctor_do_not_probe_engine_synchronously() {
         "127.0.0.1",
         port,
         "/api/preview",
-        Some(r#"{"model":"qwen2.5-7b-instruct","context_len":2048}"#),
+        Some(r#"{"model":"qwen2.5-0.5b-instruct","context_len":2048}"#),
     );
     let elapsed = started.elapsed();
     assert_eq!(status, 200, "body={body}");
@@ -1198,18 +1195,15 @@ fn e2e_preview_and_doctor_do_not_probe_engine_synchronously() {
         "自检接口不得等满引擎探测，实测 {elapsed:?}"
     );
 
-    // 引擎已找到但还没探测出结果 → 必须是 warn（探测中），不能是 fail
+    // 本地引擎检查项已撤销（本地推理交由 Ollama 承担）：doctor 只报告
+    // 云端能力，不得再出现「推理引擎」项，更不得在请求路径上探测引擎。
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let engine_check = v["checks"]
+    let has_engine = v["checks"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["name"].as_str().unwrap_or("").contains("推理引擎"))
-        .expect("必须有引擎检查项");
-    assert_eq!(
-        engine_check["status"], "warn",
-        "缓存为空应报「探测中」（warn），不能误报失败：{engine_check}"
-    );
+        .any(|c| c["name"].as_str().unwrap_or("").contains("推理引擎"));
+    assert!(!has_engine, "自检不应再包含本地引擎检查项：{v}");
 }
 
 /// `/api/models` 必须返回磁盘路径，且能识别文件缺失。
@@ -2136,14 +2130,14 @@ fn e2e_deploy_target_param_is_validated() {
         "127.0.0.1",
         port,
         "/api/preview",
-        Some(r#"{"model":"qwen2.5-7b-instruct","target":"gpu"}"#),
+        Some(r#"{"model":"qwen2.5-0.5b-instruct","target":"gpu"}"#),
     );
     assert_eq!(st, 400, "未知 target 必须 400：{body}");
     assert!(body.contains("target"), "{body}");
 
     // 合法值 → 200
     for t in ["local", "cloud", "auto"] {
-        let payload = format!(r#"{{"model":"qwen2.5-7b-instruct","target":"{t}"}}"#);
+        let payload = format!(r#"{{"model":"qwen2.5-0.5b-instruct","target":"{t}"}}"#);
         let (st, body) = http("POST", "127.0.0.1", port, "/api/preview", Some(&payload));
         assert_eq!(st, 200, "target={t} 应被接受：{body}");
         assert!(

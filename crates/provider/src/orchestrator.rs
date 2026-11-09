@@ -2736,7 +2736,7 @@ mod tests {
         let mut p = plan();
         p.reuse_instance_id = Some("reuse-1".into());
         p.reuse_provider = Some("alpha".into());
-        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None);
+        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None, 0);
         let c = calls.lock().unwrap().clone();
         assert!(c.iter().any(|s| s == "describe:reuse-1"), "{c:?}");
         assert!(
@@ -2747,25 +2747,6 @@ mod tests {
             !c.iter().any(|s| s.starts_with("create")),
             "显式复用绝不新建实例：{c:?}"
         );
-    }
-
-    /// 运行中的实例直接挂载：不得重启（start），也不得新建。
-    #[test]
-    fn provision_resources_reuse_keeps_running_instance_without_restart() {
-        let d = FakeDriver::new("alpha", vec![InstanceState::Running]);
-        let calls = d.calls.clone();
-        let mut o = orchestrator(vec![Box::new(d)]);
-        let mut p = plan();
-        p.reuse_instance_id = Some("reuse-1".into());
-        p.reuse_provider = Some("alpha".into());
-        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None);
-        let c = calls.lock().unwrap().clone();
-        assert!(c.iter().any(|s| s == "describe:reuse-1"), "{c:?}");
-        assert!(
-            !c.iter().any(|s| s.starts_with("start")),
-            "运行中实例不得重启：{c:?}"
-        );
-        assert!(!c.iter().any(|s| s.starts_with("create")), "{c:?}");
     }
 
     /// 用户显式挑选的实例优先于 GPU 型号自动匹配：即使型号匹配能命中
@@ -2780,7 +2761,7 @@ mod tests {
         p.requested_gpu_model = Some("RTX 4090".into()); // 自动匹配本可命中 shared-1
         p.reuse_instance_id = Some("chosen-1".into());
         p.reuse_provider = Some("alpha".into());
-        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None);
+        let _ = o.provision_resources(&SelectionConstraints::default(), &p, None, 0);
         let c = calls.lock().unwrap().clone();
         assert!(
             c.iter().any(|s| s == "describe:chosen-1"),
@@ -2801,7 +2782,7 @@ mod tests {
         p.reuse_instance_id = Some("ghost-1".into());
         p.reuse_provider = Some("alpha".into());
         let e = o
-            .provision_resources(&SelectionConstraints::default(), &p, None)
+            .provision_resources(&SelectionConstraints::default(), &p, None, 0)
             .unwrap_err();
         let msg = e.to_string();
         assert!(

@@ -322,75 +322,9 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
         }
     }
 
-    // 引擎检查需要配置里的 engine_path
-    let engine = mangosteen_gateway::Assessor::probe();
-    let _ = engine;
-    // 引擎诊断经网关层转发（CLI 不直接持有 LlamaCppEngine）。
-    let diag = mangosteen_gateway::diagnose_engine(cfg.as_ref());
-
-    match (&diag.binary, &diag.version) {
-        (Some(bin), Some(version)) => {
-            out.push(Check {
-                name: "本地推理引擎".into(),
-                status: Status::Ok,
-                detail: format!("{} —— {version}", bin.display()),
-                hint: None,
-            });
-            // 库路径是「为什么它能跑」的关键信息：用户换到别的终端手工
-            // 执行 llama-server 会得到相反结论，必须写清楚。
-            if let Some(v) = &diag.library_path {
-                out.push(Check {
-                    name: "引擎运行库路径".into(),
-                    status: Status::Ok,
-                    detail: format!("启动时注入 {}={v}", diag.library_path_var),
-                    hint: Some(format!(
-                        "手工执行 llama-server 报找不到动态库是正常的；\
-                         Mangosteen 启动时会自动注入 {}",
-                        diag.library_path_var
-                    )),
-                });
-            }
-        }
-        (Some(bin), None) => {
-            let msg = diag.error.clone().unwrap_or_default();
-            let looks_like_lib_issue = msg.contains("Library not loaded")
-                || msg.contains("cannot open shared object")
-                || msg.contains("image not found")
-                || msg.contains("dyld");
-            out.push(Check {
-                name: "本地推理引擎".into(),
-                status: Status::Fail,
-                detail: format!("{} 存在但无法运行：{msg}", bin.display()),
-                hint: Some(if looks_like_lib_issue {
-                    format!(
-                        "动态库找不到。已尝试注入 {}。可用 `mangosteen engine env` 查看探测结果，\
-                         再用配置 local.engine_env 手工指定库目录",
-                        diag.library_path_var
-                    )
-                } else {
-                    "检查文件权限（chmod +x）与架构是否匹配（arm64 vs x86_64）".into()
-                }),
-            });
-        }
-        _ => {
-            let tried = mangosteen_platform::process::join_paths(&diag.search_dirs);
-            out.push(Check {
-                name: "本地推理引擎".into(),
-                status: Status::Fail,
-                detail: format!(
-                    "未找到 {}。已搜索：{}",
-                    mangosteen_platform::engine_binary_name(),
-                    if tried.is_empty() { "（PATH 为空）" } else { &tried }
-                ),
-                hint: Some(
-                    "Mangosteen 以 llama.cpp 为唯一推理引擎。安装：brew install llama.cpp（macOS/Linux）；\
-                     或把 llama-server 放到 mangosteen 同级的 runtime/ 目录；\
-                     或用配置 local.engine_path 指定绝对路径"
-                        .into(),
-                ),
-            });
-        }
-    }
+    // 本地 llama-server 启动路径已撤销（本地推理交由 Ollama 承担，
+    // Mangosteen 只部署到云端/远端节点），doctor 不再检查本地引擎。
+    // 推理能力自检聚焦云端：上面已检查云服务商凭证。
 
     // ---- 磁盘空间 ----
     if let Some(cfg) = &cfg {

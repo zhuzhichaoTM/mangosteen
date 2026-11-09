@@ -308,10 +308,6 @@ pub fn run(args: Args) -> MnResult<i32> {
         let _ = fs::write(path, std::process::id().to_string());
     }
 
-    // 后台预热引擎版本：`llama-server --version` 在部分安装上要 20~30 秒，
-    // 若用户在首个请求里承担这段等待，页面会白屏半分钟。
-    mangosteen_gateway::spawn_warm_up(std::sync::Arc::clone(&shared));
-
     let server = mangosteen_gateway::GatewayServer::new(
         shared,
         require_key,

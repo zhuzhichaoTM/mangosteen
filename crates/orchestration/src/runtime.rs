@@ -30,8 +30,6 @@ mod cloud_ops;
 pub use cloud_ops::InstanceSshInfo;
 #[path = "deploy.rs"]
 mod deploy;
-#[path = "engine.rs"]
-mod engine_admin;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 #[path = "preview.rs"]
@@ -50,10 +48,6 @@ pub struct GatewayStatus {
     pub providers: Vec<String>,
     /// 活跃部署
     pub active: Vec<ActiveDeployment>,
-    /// 本地引擎二进制路径（`None` 表示未找到）
-    pub engine_path: Option<PathBuf>,
-    /// 引擎版本
-    pub engine_version: Option<String>,
 }
 
 /// 活跃云端部署的定位信息（不含任何厂商调用）。
@@ -121,7 +115,6 @@ pub struct Orchestrator {
     ///
     /// 内部锁：设置页保存时整体重建，读侧只短暂持读锁。
     scheduler: std::sync::RwLock<Scheduler>,
-    local_engine: LlamaCppEngine,
     /// 引擎插件注册表。
     ///
     /// 编排核心层·引擎管理的落地形态：编排层只按 `config.local.engine`
@@ -158,20 +151,6 @@ pub struct Orchestrator {
     models: ModelStore,
     /// 请求 ID 序号
     req_seq: std::sync::atomic::AtomicU64,
-    /// 引擎版本缓存：`(路径, 版本)`。
-    ///
-    /// ## 为什么必须缓存
-    ///
-    /// `llama-server --version` 会加载全部动态库与后端，在部分安装
-    /// （如 Homebrew 版）上要 **20~30 秒**。状态查询是高频调用
-    /// （UI 每几秒轮询一次），每次都探测会让界面像卡死一样。
-    ///
-    /// 缓存键含路径：用户改了 `local.engine_path` 后会重新探测，
-    /// 不会一直返回旧引擎的版本。
-    ///
-    /// 值区分成功与失败：`Err(原因)` 记录「探测过且失败」，这样预估接口
-    /// 不必再跑一次 27 秒的命令就能说出「引擎坏了」。
-    engine_version_cache: std::sync::Mutex<Option<(PathBuf, Result<String, String>)>>,
     /// 配置文件存储（设置页写盘用）。
     config_store: Option<ConfigStore>,
     /// SSH 登录信息缓存：`(provider:instance_id) → (时间, 信息)`。
@@ -250,19 +229,19 @@ impl Orchestrator {
             assessor,
             scheduler: std::sync::RwLock::new(scheduler),
             // 注册表在此构造：内置插件清单只在 device crate 里维护一份，
-            // 编排层不关心有哪些引擎、各自怎么启动。
+            // 编排层不关心有哪些引擎、各自怎么启动。本地 llama-server
+            // 启动路径已撤销（本地推理交由 Ollama 承担），编排层只保留
+            // 插件化的 launch_config 能力供云端远端拉起使用。
             engines_registry: mangosteen_device::EngineRegistry::with_builtin(
-                local_engine.clone(),
+                local_engine,
                 mangosteen_device::OllamaEngine::new(),
             ),
-            local_engine,
             cloud: std::sync::Mutex::new(cloud),
             device_tunnels: std::sync::Mutex::new(device_tunnels),
             remote_inference_routes: std::sync::Mutex::new(remote_inference_routes),
             state,
             models,
             req_seq: std::sync::atomic::AtomicU64::new(0),
-            engine_version_cache: std::sync::Mutex::new(None),
             config_store: None,
             ssh_info_cache: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
@@ -304,11 +283,6 @@ impl Orchestrator {
     /// 评估器引用。
     pub fn assessor(&self) -> &Assessor {
         &self.assessor
-    }
-
-    /// 本地引擎引用（供诊断/版本探测）。
-    pub fn local_engine(&self) -> &LlamaCppEngine {
-        &self.local_engine
     }
 
     /// 下一个请求序号。

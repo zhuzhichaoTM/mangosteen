@@ -122,8 +122,6 @@ impl GatewayServer {
                     "version": s.version,
                     "hardware": s.hardware,
                     "providers": s.providers,
-                    "engine_path": s.engine_path.map(|p| p.display().to_string()),
-                    "engine_version": s.engine_version,
                     "active": active,
                 });
                 Response::json(200, &payload)
@@ -134,70 +132,17 @@ impl GatewayServer {
     /// 环境自检（供 UI 的「环境自检」按钮使用）。
     ///
     /// 与 `mangosteen doctor` 共用网关层的诊断能力，避免两处判断分叉。
+    /// 本地 llama-server 启动路径已撤销（本地推理交由 Ollama 承担），
+    /// 自检不再包含本地引擎项，聚焦云端部署能力。
     pub(crate) fn doctor(&self) -> Response {
-        // 取配置与缓存的引擎版本：两者都在锁内读一次，随后锁外使用
-        let (cfg, cached_version) = {
+        let cfg = {
             let gw = self.gateway.as_ref();
-            (gw.config().clone(), gw.engine_version())
+            gw.config().clone()
         };
 
         let mut checks: Vec<serde_json::Value> = Vec::new();
 
-        // 1. 引擎
-        //
-        // 注意：**不能**调 `diagnose_engine`——它会同步执行
-        // `llama-server --version`，在 Homebrew 版上要 27 秒，
-        // 直接把本接口拖到超时。这里改成用预热缓存回答，
-        // 缓存为空时如实说「仍在探测」，而不是让请求挂住。
-        let diag = crate::diagnose_engine_cached(Some(&cfg), cached_version);
-        // 三种状态必须分开，否则「还在探测」会被误报成「引擎坏了」：
-        //   有 binary + 有版本  → ok
-        //   有 binary + 无版本  → 探测中（预热还没跑完），不是失败
-        //   无 binary           → 确实没装
-        match (&diag.binary, &diag.version) {
-            (Some(b), Some(v)) => checks.push(serde_json::json!({
-                "name": "本地推理引擎",
-                "status": "ok",
-                "detail": format!("{} —— {v}", b.display()),
-            })),
-            (Some(b), None) => checks.push(serde_json::json!({
-                "name": "本地推理引擎",
-                "status": "warn",
-                "detail": format!("{} 已找到，正在后台探测版本…", b.display()),
-                "hint": "引擎版本探测需加载全部动态库，本机约需 20~30 秒；稍后刷新即可",
-            })),
-            _ => checks.push(serde_json::json!({
-                "name": "本地推理引擎",
-                "status": "fail",
-                "detail": "未找到 llama-server",
-                "hint": "brew install llama.cpp，或用 local.engine_path 指定路径",
-            })),
-        }
-
-        // 2. 引擎库路径（能跑起来的原因值得说清楚）
-        if let Some(v) = &diag.library_path {
-            checks.push(serde_json::json!({
-                "name": "引擎运行库路径",
-                "status": "ok",
-                "detail": format!("注入 {}={v}", diag.library_path_var),
-            }));
-        }
-
-        // 3. 本地优先策略
-        checks.push(serde_json::json!({
-            "name": "本地优先策略",
-            "status": if cfg.scheduler.local_first { "ok" } else { "warn" },
-            "detail": if cfg.scheduler.local_first {
-                "已启用（符合产品基线）".to_string()
-            } else {
-                "被配置关闭，将不再优先尝试本地部署".to_string()
-            },
-            "hint": if cfg.scheduler.local_first { serde_json::Value::Null } else {
-                serde_json::json!("把 scheduler.local_first 改回 true")
-            },
-        }));
-
-        // 4. 云服务商
+        // 1. 云服务商（云端部署是唯一部署路径，凭证缺失必须显眼提示）
         let (registered, skipped) = crate::probe_providers(&cfg);
         if registered.is_empty() {
             checks.push(serde_json::json!({
@@ -209,7 +154,7 @@ impl GatewayServer {
                     format!("{} 个已启用但均不可用：{}", skipped.len(),
                         skipped.iter().map(|(n, r)| format!("{n}（{r}）")).collect::<Vec<_>>().join("；"))
                 },
-                "hint": "本地资源不足时将无法降级。检查 config.providers 凭证",
+                "hint": "云端部署无法进行。检查 config.providers 凭证",
             }));
         } else {
             checks.push(serde_json::json!({
@@ -219,7 +164,7 @@ impl GatewayServer {
             }));
         }
 
-        // 5. 模型库
+        // 2. 模型库
         let model_count = {
             let gw = self.gateway.as_ref();
             gw.models().list().map(|l| l.len()).unwrap_or(0)
