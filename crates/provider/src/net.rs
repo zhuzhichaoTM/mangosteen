@@ -415,6 +415,16 @@ impl TunnelManager {
         }
         if let Some(dir) = &self.log_dir {
             let log = dir.join(format!("tunnel-{local_port}.log"));
+            // ## 每次建立前必须清空日志文件
+            //
+            // 本地端口在多次部署间会被复用（如固定 11436），而日志以
+            // `append` 打开——上一台实例（甚至上一次部署）的 ssh 输出
+            // 会留在文件里。失败排障时 `diagnose` 回读**尾部 6 行**，
+            // 读到的就是「旧实例的 Connection closed + 本次一两行」的
+            // 混合内容：错误消息里出现多个与本次无关的 IP，完全误导
+            // 定向（实测踩到：新实例 197.104 的报错里混着旧 91.106）。
+            // 每次建立都是全新进程，旧内容只属于已死连接，清空无损。
+            let _ = std::fs::write(&log, b"");
             opts = opts.with_log_file(&log)?;
         }
         // 记住本次隧道的日志文件路径。ssh 的 stderr 一旦重定向到文件，

@@ -1669,6 +1669,20 @@ impl CloudOrchestrator {
                 "[cloud] ✓ 实例 {} SSH 连接已就绪（密码认证模式）",
                 instance.id
             );
+            // ## 新建实例必须等厂商 SSH 网关转发就绪（与复用分支同一兜底）
+            //
+            // 新购实例刚开机时，厂商 SSH 入口的端口转发映射可能需要
+            // 30s 以上才稳定——期间 TCP 能连上但握手即被远端关闭
+            // （Connection closed by remote host）。密码验证那次往返
+            // 恰好挤过窗口不代表转发已稳定，直接建隧道仍会撞墙并触发
+            // 整个部署回滚（实测 dep-1a1c097da8f000：新实例建隧道失败，
+            // 实例被自动关机）。confirm_remote_reachable 以 90s 窗口
+            // 反复 ssh_exec，跨过冷启动期。
+            confirm_remote_reachable(&ssh)?;
+            eprintln!(
+                "[cloud] ✓ 实例 {} 远端探活成功，隧道可建立",
+                instance.id
+            );
             let local_port = if local_port != 0 { local_port } else { 0 };
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
             let local_port = self
