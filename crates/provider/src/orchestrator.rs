@@ -1530,12 +1530,38 @@ impl CloudOrchestrator {
                     "[cloud] ✓ 实例 {} 已进入 Running 状态",
                     instance.id
                 );
-                // 容器节点启动后需要等待 sshd 完全就绪，再进行密码重置
+                // ## 优化：用探活循环替代固定 sleep(5)
+                //
+                // 容器节点开机后 sshd 就绪时间不固定（5~30s）。固定 sleep(5)
+                // 是盲等：就绪快的白等 5 秒，就绪慢的 5 秒又不够。
+                // 改为「探活成功或到达上限」的短轮询：就绪即走，最坏也不比
+                // 原来慢（上限 20s，仍给密码重置留足生效窗口）。
+                {
+                    let host = instance.network.ssh_host.clone();
+                    if let Some(h) = host {
+                        let probe = mangosteen_device::remote::SshTarget {
+                            host: h,
+                            port: instance.network.ssh_port.unwrap_or(22),
+                            user: "root".to_string(),
+                            password: None, // 探活与凭据无关：TCP 通即算就绪
+                            identity_file: None,
+                        };
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(20);
+                        loop {
+                            let ok =
+                                mangosteen_device::remote::ssh_probe(&probe, 5).unwrap_or(false);
+                            if ok || std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    }
+                }
                 eprintln!(
-                    "[cloud] 实例 {} 等待 sshd 服务就绪，准备重置密码",
+                    "[cloud] ✓ 实例 {} sshd 探活完成，开始重置密码",
                     instance.id
                 );
-                std::thread::sleep(std::time::Duration::from_secs(5));
                 force_reboot_if_unreachable(driver, &mut instance, &self.config)?;
                 eprintln!(
                     "[cloud] ✓ 实例 {} 强制重启检查完成",

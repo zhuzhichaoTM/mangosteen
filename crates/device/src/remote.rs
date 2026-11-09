@@ -783,7 +783,9 @@ pub fn has_gpu_processes(target: &SshTarget) -> MnResult<bool> {
 /// 机器活着——返回 `Err` 但调用方应把认证失败与连接失败区分开。
 pub fn ssh_probe(target: &SshTarget, timeout_secs: u64) -> MnResult<bool> {
     let _ = timeout_secs; // 实际超时由 base_opts 的 ConnectTimeout 约束
-    match ssh_exec_once(target, "true") {
+    // BatchMode=yes：探活必须非交互。password 为 None 时若不加，
+    // sshd 要求密码认证会让前台 CLI 卡在 `root@host's password:` 提示。
+    match ssh_exec_once_opts(target, "true", &["-o", "BatchMode=yes"]) {
         Ok(_) => Ok(true),
         Err(SshFailure::Transient(reason)) => {
             // 连接层失败：真不可达
@@ -861,10 +863,29 @@ enum SshFailure {
 
 /// 执行一次（无重试）。
 fn ssh_exec_once(target: &SshTarget, cmd: &str) -> Result<String, SshFailure> {
+    ssh_exec_once_opts(target, cmd, &[])
+}
+
+/// [`ssh_exec_once`] 的可注入选项变体。
+///
+/// `extra_opts` 追加在 base_opts 之后（后写的 ssh 选项覆盖先写的），
+/// 供探活等**无凭据**场景注入 `BatchMode=yes`——没有它，password 为
+/// None 的探活在**前台 CLI**（有 /dev/tty）里会被 sshd 的密码认证
+/// 拦下并交互式提示密码，整个部署卡死在 `root@x.x.x.x's password:`。
+/// BatchMode 让认证失败立即返回 Permission denied（探活正确归类为
+/// 「机器活着，凭据进不去」）。
+fn ssh_exec_once_opts(
+    target: &SshTarget,
+    cmd: &str,
+    extra_opts: &[&str],
+) -> Result<String, SshFailure> {
     let askpass = target
         .write_askpass()
         .map_err(|e| SshFailure::Fatal(e.to_string()))?;
     let mut args = target.base_opts();
+    for o in extra_opts {
+        args.push(o.to_string());
+    }
     args.push(format!("{}@{}", target.user, target.host));
     args.push(cmd.to_string());
 
