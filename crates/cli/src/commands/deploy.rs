@@ -51,6 +51,8 @@ const ALLOWED: &[&str] = &[
     // 异步/轮询参数
     "watch",
     "async",
+    // 配置模板槽位（与 UI 部署页下拉框一致：default / uncensored / mode1…）
+    "template",
 ];
 
 /// 轮询间隔（秒）。
@@ -114,7 +116,41 @@ fn execute(args: Args) -> MnResult<i32> {
         req.gpu_model = Some(gpu_model.to_string());
     }
 
+    // 配置模板槽位：与 UI 部署页下拉框一致。
+    //
+    // ## 为什么需要它
+    //
+    // 模板是部署的唯一真源（下哪个仓库的哪个文件、用什么参数启动）。
+    // UI 部署总是传模板正文；CLI 若不传，后端会回落到内置默认模板。
+    // `--template` 让 CLI 也能显式选择槽位（default / uncensored / mode1…），
+    // 与 UI 行为完全一致。
     let gw = build_gateway(&args)?;
+    let template_slot = args.get("template").map(str::to_string);
+    match template_slot.as_deref() {
+        Some(slot) if !slot.trim().is_empty() => {
+            let model_key = base_model_name(&model);
+            let text = gw
+                .config()
+                .model_whitelist
+                .get(&model_key)
+                .and_then(|wl| wl.templates.get(slot.trim()))
+                .cloned();
+            match text {
+                Some(t) => {
+                    req.config_template = Some(slot.trim().to_string());
+                    req.config_template_text = Some(t);
+                }
+                None => {
+                    return Err(mangosteen_core::MnError::bad_request(format!(
+                        "模型 `{model_key}` 下不存在配置模板 `{slot}`。\
+                         可用模板见 `mangosteen config show` 或设置页；\
+                         未指定 --template 时将自动使用内置默认模板"
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
 
     let spinner = output::Spinner::new(format!("正在部署 {model}"));
     let mut spinner = spinner;
@@ -374,6 +410,11 @@ fn print_deploy_result(
             "云上实例正在计费，用完请执行 `mangosteen stop <部署ID>` 或 `mangosteen stop --all`",
         );
     }
+}
+
+/// 从模型名去掉量化后缀：`qwen3.8-27b-ud:q4_k_m` → `qwen3.8-27b-ud`。
+fn base_model_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase().split(':').next().unwrap_or("").to_string()
 }
 
 /// 解析 KV 精度参数。

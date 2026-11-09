@@ -636,6 +636,21 @@ pub fn resolve(model: &str, text: &str) -> MnResult<ModelDeploySpec> {
     schema.parse(&raw)
 }
 
+/// 按模型名取内置默认（`default` 槽位）模板正文。
+///
+/// CLI 等不携带模板正文的调用方用它回落到与 UI 相同的下载源——
+/// 内置模板里的 `source`/`repository` 是完整仓库路径，解析出的
+/// `download_url` 才是真实可下载的地址。旧兼容路径「裸域名 + 文件名」
+/// 拼接会产生 HuggingFace 上不存在的地址（缺少 `仓库/resolve/main/`），
+/// 表现为下载 0 字节、停滞、部署失败——而同一模型走 UI 部署却成功，
+/// 因为 UI 总是传模板正文。
+pub fn builtin_default_template(model: &str) -> Option<&'static str> {
+    BUILTIN_TEMPLATES
+        .iter()
+        .find(|(m, slot, _, _)| *m == model && *slot == "default")
+        .map(|(_, _, _, text)| *text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

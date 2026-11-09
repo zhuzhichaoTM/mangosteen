@@ -48,27 +48,73 @@ pub(crate) fn spec_from_template(
 ///
 /// 保留它是为了不破坏 CLI / e2e 等不发模板的调用方。**UI 主链路必须走
 /// [`spec_from_template`]**——那才是「模板驱动部署」的落点。
+///
+/// ## 下载地址的优先级（2026-11-09 修复）
+///
+/// 1. 请求显式带了下载地址（本地文件 / 台账回填）→ 原样使用；
+/// 2. 没有地址时**回落到内置默认模板**：内置模板的 `source`/`repository`
+///    是完整仓库路径，解析出的 URL 才真实可下载；
+/// 3. 模型不在内置模板里（自定义 GGUF）→ 才退回「裸域名 + 文件名」拼接。
+///
+/// 旧实现直接跳到第 3 级，拼出 `https://hf-mirror.com/<文件名>` 这种
+/// HuggingFace 上不存在的地址（缺 `仓库/resolve/main/`），源站返回错误、
+/// 下载 0 字节、停滞判死——同一模型走 UI 却成功，因为 UI 总是传模板
+/// 正文。CLI 部署失败而 UI 成功的根因即此。
 pub(crate) fn legacy_spec(
     evaluated: &Evaluated,
     req: &DeploymentRequest,
 ) -> MnResult<ModelDeploySpec> {
-    let remote_file = req
-        .model_download
-        .as_ref()
-        .and_then(|d| crate::scheduler::download_file_name(&d.url))
-        .unwrap_or_else(|| crate::scheduler::model_file_name(&evaluated.spec.name));
-    let download_url = req
-        .model_download
-        .as_ref()
-        .map(|d| d.url.clone())
-        .unwrap_or_else(|| format!("https://hf-mirror.com/{remote_file}"));
+    // 优先级 1：请求显式带了下载地址
+    if let Some(d) = req.model_download.as_ref() {
+        let remote_file = crate::scheduler::download_file_name(&d.url)
+            .unwrap_or_else(|| crate::scheduler::model_file_name(&evaluated.spec.name));
+        return Ok(ModelDeploySpec {
+            template_name: req
+                .config_template
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+            model_file: remote_file,
+            download_url: d.url.clone(),
+            aux_files: Vec::new(),
+            context: evaluated.assessment.context_len,
+            gpu_layers: evaluated.spec.n_layers,
+            batch: evaluated.assessment.batch_size,
+            ubatch: 128,
+            cache_k: "f16".to_string(),
+            cache_v: "f16".to_string(),
+            flash_attn: false,
+            mmproj: None,
+            draft_model: None,
+            draft_gpu_layers: None,
+            draft_n_max: None,
+            extra_args: Vec::new(),
+        });
+    }
+
+    // 优先级 2：回落到内置默认模板（与 UI 相同的完整仓库 URL）
+    let model = req
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| base_model_name(&evaluated.spec.name));
+    if let Some(text) = mangosteen_core::template::builtin_default_template(&model) {
+        eprintln!(
+            "[deploy] 未提供模板正文，按模型 `{model}` 回落到内置默认模板（获取完整下载地址）"
+        );
+        return mangosteen_core::template::resolve(&model, text);
+    }
+
+    // 优先级 3：自定义 GGUF（不在内置模板里）→ 旧的裸 URL 拼接
+    let remote_file = crate::scheduler::model_file_name(&evaluated.spec.name);
     Ok(ModelDeploySpec {
         template_name: req
             .config_template
             .clone()
             .unwrap_or_else(|| "default".to_string()),
-        model_file: remote_file,
-        download_url,
+        model_file: remote_file.clone(),
+        download_url: format!("https://hf-mirror.com/{remote_file}"),
         aux_files: Vec::new(),
         context: evaluated.assessment.context_len,
         gpu_layers: evaluated.spec.n_layers,

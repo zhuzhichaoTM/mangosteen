@@ -1645,31 +1645,49 @@ pub fn download_model_remote_with_progress(
     };
 
     let mut last_err: Option<MnError> = None;
-    for candidate_url in &urls {
-        match download_single_url(
-            target,
-            candidate_url,
-            dest,
-            expected_bytes,
-            hf_token,
-            on_progress,
-            should_cancel,
-            &proxy_env,
-        ) {
-            Ok(size) => return Ok(size),
-            Err(e) => {
-                eprintln!(
-                    "[download] 源站 {candidate_url} 下载失败：{e}，尝试下一个源站"
-                );
-                last_err = Some(e);
+    // 源站轮询：最多尝试 MAX_SOURCE_ROUNDS 轮，每轮遍历所有源站。
+    // 避免单个源站暂时不可用就直接放弃整个下载。
+    const MAX_SOURCE_ROUNDS: u32 = 3;
+    const SOURCE_ROUND_WAIT_SECS: u64 = 10;
+    for source_round in 1..=MAX_SOURCE_ROUNDS {
+        for candidate_url in &urls {
+            match download_single_url(
+                target,
+                candidate_url,
+                dest,
+                expected_bytes,
+                hf_token,
+                on_progress,
+                should_cancel,
+                &proxy_env,
+            ) {
+                Ok(size) => return Ok(size),
+                Err(e) => {
+                    eprintln!(
+                        "[download] 第 {source_round} 轮 源站 {candidate_url} 下载失败：{e}"
+                    );
+                    last_err = Some(e);
+                }
             }
+        }
+        // 源站轮次之间等待，给网络/源站恢复时间
+        if source_round < MAX_SOURCE_ROUNDS {
+            eprintln!(
+                "[download] 所有源站第 {source_round} 轮均失败，等待 {SOURCE_ROUND_WAIT_SECS} 秒后开始第 {} 轮",
+                source_round + 1
+            );
+            std::thread::sleep(std::time::Duration::from_secs(SOURCE_ROUND_WAIT_SECS));
         }
     }
 
     Err(last_err.unwrap_or_else(|| {
         MnError::Network {
             stage: "云端下载模型".to_string(),
-            reason: "所有源站均下载失败".to_string(),
+            reason: format!(
+                "所有源站均下载失败（共尝试 {} 轮，每轮 {} 个源站）",
+                MAX_SOURCE_ROUNDS,
+                urls.len()
+            ),
         }
     }))
 }
