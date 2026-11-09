@@ -6,8 +6,20 @@
 //!
 //! 1. 解析模型与参数；
 //! 2. 调网关 `deploy`（部署到云端，由云端调度器选择最优 GPU 节点）；
-//! 3. 打印结果：算力来源、端口、OpenAI base URL、降级轨迹（若有）。
+//! 3. 默认同步等待部署完成，打印结果；
+//! 4. 若指定 `--watch`，启动部署后周期性轮询查看下载/启动进度，直至完成或失败；
+//! 5. 若指定 `--async`，仅启动部署并立即返回部署 ID，不等待完成。
+//!
+//! ## 关键设计
+//!
+//! 云端模型下载和引擎启动都是耗时操作（数分钟至数十分钟）。
+//! `--watch` 模式下，CLI 会每 5 秒轮询一次部署状态，显示实时进度；
+//! 用户也可随时 Ctrl-C 中断，部署在云端继续运行，稍后用
+//! `mangosteen status <部署ID>` 查看进度。
 
+use std::time::Duration;
+
+use mangosteen_base::state::DeploymentStatus;
 use mangosteen_core::estimate::KvCacheType;
 use mangosteen_core::MnResult;
 use mangosteen_gateway::DeploymentRequest;
@@ -15,6 +27,7 @@ use mangosteen_gateway::DeploymentRequest;
 use crate::cli::Args;
 use crate::commands::{build_gateway, reject_unknown_options};
 use crate::output;
+use output::{Color, paint};
 
 /// 允许的选项。
 const ALLOWED: &[&str] = &[
@@ -35,7 +48,13 @@ const ALLOWED: &[&str] = &[
     "cloud-spec",
     "gpu-model",
     "interactive",
+    // 异步/轮询参数
+    "watch",
+    "async",
 ];
+
+/// 轮询间隔（秒）。
+const POLL_INTERVAL_SECS: u64 = 5;
 
 /// `deploy` 入口。
 pub fn run(args: Args) -> MnResult<i32> {
@@ -51,6 +70,9 @@ fn execute(args: Args) -> MnResult<i32> {
             "缺少模型参数。用法：mangosteen deploy <模型ID或GGUF路径> [--context 8192]",
         )
     })?;
+
+    let watch = args.has("watch");
+    let async_mode = args.has("async");
 
     let mut req = DeploymentRequest::for_model(model.clone());
     if let Some(ctx) = args.get_num::<u32>("context")? {
@@ -98,11 +120,40 @@ fn execute(args: Args) -> MnResult<i32> {
     let mut spinner = spinner;
     spinner.tick("评估资源并调度…");
 
+    // 启动部署（同步调用，会阻塞直到部署进入 provisioning 状态或完成）
     let result = gw.deploy(&req);
     spinner.finish();
 
-    let plan = result?;
+    let plan = match result {
+        Ok(p) => p,
+        Err(e) => {
+            output::print_error(&e);
+            return Err(e);
+        }
+    };
 
+    // 部署已进入 provisioning 或 ready 状态，获取部署 ID
+    let deploy_id = plan.id.clone();
+
+    if async_mode {
+        // 仅启动部署，立即返回
+        output::print_success(&format!(
+            "部署已启动（异步模式）：{}",
+            deploy_id
+        ));
+        output::print_info(&format!(
+            "使用 `mangosteen status {}` 查看进度",
+            deploy_id
+        ));
+        return Ok(0);
+    }
+
+    if watch {
+        // 周期性轮询查看进度
+        return poll_deploy_progress(&gw, &deploy_id, &model);
+    }
+
+    // 同步等待模式：deploy 已经阻塞直到完成
     if args.has("json") {
         let payload = serde_json::json!({
             "id": plan.id,
@@ -127,6 +178,154 @@ fn execute(args: Args) -> MnResult<i32> {
     }
 
     Ok(0)
+}
+
+/// 周期性轮询部署进度，直至完成或失败。
+fn poll_deploy_progress(
+    gw: &mangosteen_gateway::Gateway,
+    deploy_id: &str,
+    model: &str,
+) -> MnResult<i32> {
+    use std::io::Write;
+
+    output::print_info(&format!(
+        "部署 ID：{}，开始轮询进度（每 {} 秒刷新一次，Ctrl-C 可中断）",
+        deploy_id, POLL_INTERVAL_SECS
+    ));
+
+    let mut last_stage: Option<String> = None;
+
+    loop {
+        match gw.get_deployment(deploy_id) {
+            Ok(Some(record)) => {
+                let status = record.status;
+                let detail = match &record.error {
+                    Some(e) => format!("（错误：{e}）"),
+                    None => String::new(),
+                };
+
+                // 只有阶段或进度变化时才打印，避免刷屏
+                let stage_str = status.as_str().to_string();
+                if last_stage.as_ref() != Some(&stage_str) {
+                    let icon = match status {
+                        DeploymentStatus::Ready => Color::Green,
+                        DeploymentStatus::Failed => Color::Red,
+                        _ => Color::Cyan,
+                    };
+                    println!(
+                        "{} {} {} {}",
+                        paint_icon(icon),
+                        bold("进度："),
+                        paint(&stage_str, icon),
+                        detail
+                    );
+                    last_stage = Some(stage_str);
+                }
+
+                // 终态：退出循环
+                match status {
+                    DeploymentStatus::Ready => {
+                        output::print_success(&format!(
+                            "部署完成：{}",
+                            model
+                        ));
+                        // 重新获取完整计划打印详情
+                        if let Ok(Some(rec)) = gw.get_deployment(deploy_id) {
+                            print_deploy_result_full(&rec, &gw);
+                        }
+                        return Ok(0);
+                    }
+                    DeploymentStatus::Failed => {
+                        output::print_error(&mangosteen_core::MnError::bad_request(format!(
+                            "部署失败：{}",
+                            record.error.unwrap_or_else(|| "未知错误".to_string())
+                        )));
+                        return Err(mangosteen_core::MnError::bad_request("部署失败"));
+                    }
+                    _ => {}
+                }
+            }
+            Ok(None) => {
+                output::print_warning(&format!(
+                    "部署记录不存在：{}",
+                    deploy_id
+                ));
+                return Err(mangosteen_core::MnError::bad_request("部署记录不存在"));
+            }
+            Err(e) => {
+                output::print_warning(&format!(
+                    "查询部署状态失败：{e}，{} 秒后重试",
+                    POLL_INTERVAL_SECS
+                ));
+            }
+        }
+
+        // 等待下一次轮询
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(Duration::from_secs(POLL_INTERVAL_SECS));
+    }
+}
+
+/// 打印带颜色的图标。
+fn paint_icon(color: Color) -> String {
+    if output::color_enabled() {
+        paint("●", color)
+    } else {
+        "●".to_string()
+    }
+}
+
+/// 粗体文本。
+fn bold(text: &str) -> String {
+    output::bold(text)
+}
+
+/// 打印完整的部署结果（从台账记录）。
+fn print_deploy_result_full(
+    record: &mangosteen_base::state::DeploymentRecord,
+    gw: &mangosteen_gateway::Gateway,
+) {
+    let plan = &record.plan;
+    output::print_success(&format!(
+        "部署完成：{} ({})",
+        plan.model.name,
+        plan.origin.label()
+    ));
+    let port = plan
+        .local_access_port()
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "-".into());
+    output::print_kv(&[
+        ("部署 ID".into(), plan.id.clone()),
+        ("算力来源".into(), plan.origin.label()),
+        (
+            "落位形态".into(),
+            plan.assessment.placement.describe(plan.model.n_layers),
+        ),
+        ("上下文".into(), plan.assessment.context_len.to_string()),
+        (
+            "KV 精度".into(),
+            plan.assessment.kv_cache.as_cli_value().to_string(),
+        ),
+        ("量化".into(), plan.assessment.quant.to_string()),
+        ("后端端口".into(), port),
+        (
+            "OpenAI 入口".into(),
+            format!("http://127.0.0.1:{}/v1", gw.config().gateway.port),
+        ),
+        ("资源占用".into(), plan.assessment.requirement.describe()),
+    ]);
+
+    if !plan.fallback_trail.is_empty() {
+        println!();
+        output::print_warning(&format!(
+            "发生算力降级：{}",
+            plan.fallback_trail.join(" → ")
+        ));
+        output::print_info(
+            "云上实例正在计费，用完请执行 `mangosteen stop <部署ID>` 或 `mangosteen stop --all`",
+        );
+    }
 }
 
 /// 打印部署结果。

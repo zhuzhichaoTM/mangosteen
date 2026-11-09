@@ -97,6 +97,9 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "interactive",
     "running",
     "stopped",
+    // deploy 异步/轮询开关
+    "watch",
+    "async",
 ];
 
 /// 解析参数列表（不含程序名）。
