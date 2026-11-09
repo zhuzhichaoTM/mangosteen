@@ -279,6 +279,9 @@ fn print_help() {
     println!("  mangosteen deploy qwen2.5-7b --context 8192     # 自动选择节点部署");
     println!("  mangosteen deploy qwen2.5-7b --device dev-001     # 使用自定义节点");
     println!("  mangosteen deploy qwen2.5-7b --gpu-model P40     # 指定 GPU 型号");
+    println!("  mangosteen deploy qwen2.5-7b --template uncensored # 指定配置模板（默认 default）");
+    println!("  mangosteen deploy qwen2.5-7b --watch             # 轮询显示部署进度");
+    println!("  mangosteen deploy qwen2.5-7b --async             # 启动后立即返回部署 ID");
     println!("  mangosteen status                               # 看状态");
     println!("  mangosteen stop --all                           # 全部停止");
     println!("  mangosteen cloud instances --running             # 查看运行中实例");

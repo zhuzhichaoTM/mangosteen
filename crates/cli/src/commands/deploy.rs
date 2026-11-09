@@ -121,36 +121,71 @@ fn execute(args: Args) -> MnResult<i32> {
     // ## 为什么需要它
     //
     // 模板是部署的唯一真源（下哪个仓库的哪个文件、用什么参数启动）。
-    // UI 部署总是传模板正文；CLI 若不传，后端会回落到内置默认模板。
-    // `--template` 让 CLI 也能显式选择槽位（default / uncensored / mode1…），
-    // 与 UI 行为完全一致。
+    // UI 部署总是显式传模板正文；CLI 也必须明确「用哪个模板」：
+    // * `--template <槽位>` 显式选择（default / uncensored / mode1…）；
+    // * 未指定时**默认取 `default` 槽位**（与 UI 下拉框第一项一致），
+    //   优先读设置页维护的正文，配置里没有再回落内置模板；
+    // * 无论哪种来源，启动时都打印一行「配置模板」，让部署所用的
+    //   模板始终显式可见——避免「以为用的是 A，实际跑的是 B」。
     let gw = build_gateway(&args)?;
-    let template_slot = args.get("template").map(str::to_string);
-    match template_slot.as_deref() {
-        Some(slot) if !slot.trim().is_empty() => {
-            let model_key = base_model_name(&model);
-            let text = gw
-                .config()
-                .model_whitelist
-                .get(&model_key)
-                .and_then(|wl| wl.templates.get(slot.trim()))
-                .cloned();
-            match text {
-                Some(t) => {
-                    req.config_template = Some(slot.trim().to_string());
-                    req.config_template_text = Some(t);
-                }
-                None => {
-                    return Err(mangosteen_core::MnError::bad_request(format!(
-                        "模型 `{model_key}` 下不存在配置模板 `{slot}`。\
-                         可用模板见 `mangosteen config show` 或设置页；\
-                         未指定 --template 时将自动使用内置默认模板"
-                    )));
-                }
+    let model_key = base_model_name(&model);
+    let slot = args
+        .get("template")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default")
+        .to_string();
+
+    // 模板正文查找顺序：设置页维护的（用户改过的）→ 内置默认模板。
+    let cfg_text = gw
+        .config()
+        .model_whitelist
+        .get(&model_key)
+        .and_then(|wl| wl.templates.get(&slot))
+        .cloned();
+    let (template_source, template_text) = match cfg_text {
+        Some(t) => ("设置页配置", t),
+        None => match mangosteen_core::template::builtin_default_template(&model_key) {
+            Some(t) if slot == "default" => ("内置默认", t.to_string()),
+            _ => {
+                // 报错时列出该模型可用的模板槽位，用户不必再翻设置页
+                let available: Vec<String> = gw
+                    .config()
+                    .model_whitelist
+                    .get(&model_key)
+                    .map(|wl| wl.templates.keys().cloned().collect())
+                    .unwrap_or_default();
+                let builtin: Vec<&str> =
+                    mangosteen_core::template::BUILTIN_TEMPLATES
+                        .iter()
+                        .filter(|(m, _, _, _)| *m == model_key)
+                        .map(|(_, slot, _, _)| *slot)
+                        .collect();
+                let mut all: Vec<String> = available;
+                all.extend(builtin.iter().map(|s| s.to_string()));
+                all.sort();
+                all.dedup();
+                let hint = if all.is_empty() {
+                    "该模型暂无任何配置模板".to_string()
+                } else {
+                    format!("可用模板：{}", all.join("、"))
+                };
+                return Err(mangosteen_core::MnError::bad_request(format!(
+                    "模型 `{model_key}` 下不存在配置模板 `{slot}`。{hint}"
+                )));
             }
-        }
-        _ => {}
-    }
+        },
+    };
+    req.config_template = Some(slot.clone());
+    req.config_template_text = Some(template_text);
+    // 模板 schema 按 UI 下拉框的模型 id（如 qwen2.5-0.5b）注册；
+    // CLI 必须显式带上，否则后端会拿 GGUF 解析名（qwen2.5-0.5b-instruct）
+    // 去查 schema 而报「暂不支持」。同时交给 template::resolve 选对正文。
+    req.model_id = Some(model_key.clone());
+    output::print_info(&format!(
+        "配置模板：{}（来源：{template_source}；可用 --template <槽位> 切换）",
+        slot
+    ));
 
     let spinner = output::Spinner::new(format!("正在部署 {model}"));
     let mut spinner = spinner;
