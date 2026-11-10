@@ -52,6 +52,7 @@ const ALLOWED: &[&str] = &[
     "access-key",
     "secret-key",
     "set",
+    "unset",
     "enable",
     "disable",
 ];
@@ -922,6 +923,17 @@ fn cloud_key(args: Args) -> MnResult<i32> {
             changed = true;
         } else {
             return Err(MnError::bad_request("--set 格式应为 key=value"));
+        }
+    }
+
+    // 删除厂商专属选项（--unset key）
+    if let Some(unset_key) = args.options.get("unset") {
+        let unset_key = unset_key.trim();
+        if unset_key.is_empty() {
+            return Err(MnError::bad_request("--unset 不能为空"));
+        }
+        if slot.options.remove(unset_key).is_some() {
+            changed = true;
         }
     }
 
