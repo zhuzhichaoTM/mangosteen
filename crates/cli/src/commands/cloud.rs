@@ -10,11 +10,8 @@
 //! |--------|------|
 //! | `instances` | 列出云端实例（含已关机），支持 start/stop/destroy 子命令 |
 //! | `key` | 管理云厂商密钥 |
-//! | `pick` | 智能选点（四维打分） |
-//! | `cheapest` | 最便宜优先（纯价格序） |
 
 use mangosteen_core::MnResult;
-use mangosteen_core::policy::SelectionConstraints;
 
 use crate::cli::Args;
 use crate::commands::{build_gateway, reject_unknown_options};
@@ -27,6 +24,7 @@ const ALLOWED: &[&str] = &[
     "yes",
     "quiet",
     "secret",
+    "public-key",
     "enable",
     "disable",
     "min-vram",
@@ -34,6 +32,8 @@ const ALLOWED: &[&str] = &[
     "explain",
     "create",
     "name",
+    "require-stock",
+    "no-require-stock",
 ];
 
 /// 入口。
@@ -247,7 +247,7 @@ fn instances_destroy(args: Args) -> MnResult<i32> {
 fn key(args: Args) -> MnResult<i32> {
     let provider = args.pos(2).ok_or_else(|| {
         mangosteen_core::MnError::bad_request(
-            "缺少厂商名称。用法：mangosteen cloud key <厂商> [--secret <密钥>] [--enable|--disable]",
+            "缺少厂商名称。用法：mangosteen cloud key <厂商> [--secret <密钥>] [--public-key <公钥>] [--enable|--disable]",
         )
     })?;
 
@@ -276,7 +276,7 @@ fn key(args: Args) -> MnResult<i32> {
         provider_cfg.enabled = false;
     }
 
-    // 处理密钥更新
+    // 处理 secret 更新（私钥）
     if let Some(secret) = args.get("secret") {
         let secret = secret.trim();
         if secret.is_empty() {
@@ -288,6 +288,15 @@ fn key(args: Args) -> MnResult<i32> {
         let path = dir.join(format!("cloud-{}", provider));
         mangosteen_platform::fs::write_private_file(&path, secret)?;
         provider_cfg.secret = mangosteen_core::config::SecretRef::File(path);
+    }
+
+    // 处理 public_key 更新（AccessKey ID，存储在 options 中）
+    if let Some(public_key) = args.get("public-key") {
+        let public_key = public_key.trim();
+        if public_key.is_empty() {
+            return Err(mangosteen_core::MnError::bad_request("公钥不能为空"));
+        }
+        provider_cfg.options.insert("public_key".to_string(), public_key.to_string());
     }
 
     cfg.validate()?;
@@ -313,6 +322,9 @@ fn pick(args: Args) -> MnResult<i32> {
     }
     if let Some(max_price) = args.get_num::<f64>("max-price")? {
         constraints.max_price_per_hour = Some(max_price);
+    }
+    if args.has("no-require-stock") {
+        constraints.require_stock = false;
     }
 
     let ranked = gw.pick_cloud(&constraints)?;
@@ -397,6 +409,9 @@ fn cheapest(args: Args) -> MnResult<i32> {
     let mut constraints = SelectionConstraints::default();
     if let Some(min_vram_gb) = args.get_num::<u64>("min-vram")? {
         constraints.min_vram_bytes = min_vram_gb * 1024 * 1024 * 1024;
+    }
+    if args.has("no-require-stock") {
+        constraints.require_stock = false;
     }
 
     let ordered = gw.cheapest_cloud(&constraints)?;

@@ -98,6 +98,7 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "running",
     "stopped",
     "require-stock",
+    "no-require-stock",
     // deploy 异步/轮询开关
     "watch",
     "async",
@@ -305,7 +306,7 @@ fn print_help() {
     println!("    cloud instances start <厂商>/<实例ID>            # 启动实例");
     println!("    cloud instances stop <厂商>/<实例ID>             # 关闭实例");
     println!("    cloud instances destroy <厂商>/<实例ID> --yes    # 删除实例（销毁实例与磁盘）");
-    println!("  cloud key <厂商> [--secret <密钥>] [--enable|--disable]  # 管理云厂商密钥");
+    println!("  cloud key <厂商> [--secret <密钥>] [--public-key <公钥>] [--enable|--disable]  # 管理云厂商密钥");
     println!();
     println!("  device list                                   # 列出自定义节点");
     println!("  device add <主机> <端口> --user <用户> [--workdir <目录>] [--password <密码>] [--name <名称>]  # 新增自定义节点");

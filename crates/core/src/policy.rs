@@ -193,7 +193,7 @@ impl Default for SelectionConstraints {
             max_price_per_hour: None,
             allowed_providers: Vec::new(),
             allowed_regions: Vec::new(),
-            require_stock: false,
+            require_stock: true,
         }
     }
 }
@@ -758,11 +758,7 @@ mod tests {
             cand("a", "RTX 4090", 24, 1.0, Some(0)),
             cand("b", "RTX 4090", 24, 3.0, Some(2)),
         ];
-        let cons = SelectionConstraints {
-            require_stock: true,
-            ..Default::default()
-        };
-        let ranked = sel.rank(&cands, &HashMap::new(), &cons);
+        let ranked = sel.rank(&cands, &HashMap::new(), &SelectionConstraints::default());
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].provider, "b");
 
