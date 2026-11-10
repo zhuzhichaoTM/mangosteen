@@ -864,21 +864,24 @@ impl CloudOrchestrator {
     /// 与 [`Self::teardown`] 的区别：关机只是把机器停了，实例还在、数据还在，
     /// 按量付费下不再收计算费用（磁盘可能仍计少量）。这是「停止」的正确语义——
     /// 用户想暂停一下，不是想删机器。
+    ///
+    /// 直接调用厂商 API 关机，不检查 llama-server 进程——关机后进程自然终止。
     pub fn power_off(&self, provider: &str, instance_id: &str) -> MnResult<()> {
         let driver = self.registry.get(provider)?;
-        let target = self.service_target(provider, instance_id)?;
-        // 仅验证当前实例的指定引擎端口，不把同节点其它模型误判为当前模型。
-        // 关机前由上层按端口停止当前模型，再由这里做最终节点级 llama 检查。
-        if mangosteen_device::remote::llama_server_running(&target, &self.config.remote_workdir)? {
-            return Err(MnError::bad_request(format!(
-                "实例 {instance_id} 仍有 llama-server 进程运行，已阻止关机；请先停止推理进程后重试"
-            )));
+        let mut inst = driver.describe(instance_id)?;
+
+        // 如果实例已经是 stopped 状态，直接返回成功
+        if inst.state == InstanceState::Stopped {
+            return Ok(());
         }
+
+        // 直接调用厂商 API 关机，不检查进程
         driver.stop(instance_id)?;
+
         // 关机后立即验证实例状态（防止厂商 API 延迟导致状态还是 running）
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let inst = driver.describe(instance_id)?;
+            inst = driver.describe(instance_id)?;
             if inst.state == InstanceState::Stopped {
                 return Ok(());
             }

@@ -10,8 +10,11 @@
 //! |--------|------|
 //! | `instances` | 列出云端实例（含已关机），支持 start/stop/destroy 子命令 |
 //! | `key` | 管理云厂商密钥 |
+//! | `pick` | 智能选点（四维打分） |
+//! | `cheapest` | 最便宜优先（纯价格序） |
 
 use mangosteen_core::MnResult;
+use mangosteen_core::policy::SelectionConstraints;
 
 use crate::cli::Args;
 use crate::commands::{build_gateway, reject_unknown_options};
@@ -26,6 +29,11 @@ const ALLOWED: &[&str] = &[
     "secret",
     "enable",
     "disable",
+    "min-vram",
+    "max-price",
+    "explain",
+    "create",
+    "name",
 ];
 
 /// 入口。
@@ -36,8 +44,10 @@ pub fn run(args: Args) -> MnResult<i32> {
     match sub.as_str() {
         "instances" => instances(args),
         "key" => key(args),
+        "pick" => pick(args),
+        "cheapest" => cheapest(args),
         other => Err(mangosteen_core::MnError::bad_request(format!(
-            "未知子命令 `cloud {other}`。可用：instances / key"
+            "未知子命令 `cloud {other}`。可用：instances / key / pick / cheapest"
         ))),
     }
 }
@@ -286,5 +296,184 @@ fn key(args: Args) -> MnResult<i32> {
     gw.reload_cloud_drivers();
 
     output::print_success(&format!("厂商 {provider} 配置已更新 → {}", written.display()));
+    Ok(0)
+}
+
+/// `cloud pick` - 智能选点（四维打分）。
+///
+/// 查询可用规格，按配置的权重策略打分排序，显示最优候选。
+/// 不创建任何资源，不产生费用。
+fn pick(args: Args) -> MnResult<i32> {
+    let gw = build_gateway(&args)?;
+
+    // 解析约束
+    let mut constraints = SelectionConstraints::default();
+    if let Some(min_vram_gb) = args.get_num::<u64>("min-vram")? {
+        constraints.min_vram_bytes = min_vram_gb * 1024 * 1024 * 1024;
+    }
+    if let Some(max_price) = args.get_num::<f64>("max-price")? {
+        constraints.max_price_per_hour = Some(max_price);
+    }
+
+    let ranked = gw.pick_cloud(&constraints)?;
+
+    if args.has("json") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ranked).unwrap_or_default()
+        );
+        return Ok(0);
+    }
+
+    if ranked.is_empty() {
+        println!("{}", output::dim("（无可用候选）"));
+        println!();
+        println!(
+            "  {}",
+            output::dim("建议：放宽约束（提高价格上限 / 降低显存要求），或启用更多服务商")
+        );
+        return Ok(0);
+    }
+
+    let best = &ranked[0];
+
+    if args.has("explain") {
+        println!("{}", output::bold("智能选点结果（四维打分）："));
+        println!();
+        println!(
+            "  {}",
+            output::paint(&format!("最优：{}/{} [{}] ¥{:.3}/h · {:.1}GiB",
+                best.provider,
+                best.gpu_model,
+                best.region,
+                best.price_per_hour,
+                best.vram_bytes as f64 / (1u64 << 30) as f64
+            ), output::Color::Cyan)
+        );
+        println!();
+        println!("{}", output::dim("打分明细："));
+        println!(
+            "  价格 {:.2} · 延迟 {:.2} · 可用 {:.2} · 硬件 {:.2} → 总分 {:.4}",
+            best.score_price,
+            best.score_latency,
+            best.score_availability,
+            best.score_hardware,
+            best.score_total
+        );
+        println!();
+        println!("{}", output::dim("全部候选（按综合得分降序）："));
+        for (i, c) in ranked.iter().enumerate() {
+            println!(
+                "  {}. {}/{} [{}] ¥{:.3}/h · {:.1}GiB → {:.4}",
+                i + 1,
+                c.provider,
+                c.gpu_model,
+                c.region,
+                c.price_per_hour,
+                c.vram_bytes as f64 / (1u64 << 30) as f64,
+                c.score_total
+            );
+        }
+    } else {
+        println!("{}", output::bold("智能选点结果："));
+        println!();
+        println!(
+            "  {}/{} [{}] ¥{:.3}/h · {:.1}GiB",
+            best.provider,
+            best.gpu_model,
+            best.region,
+            best.price_per_hour,
+            best.vram_bytes as f64 / (1u64 << 30) as f64
+        );
+        println!();
+        let detail = format!("综合得分：{:.4}（价格 {:.2} 延迟 {:.2} 可用 {:.2} 硬件 {:.2}）",
+            best.score_total,
+            best.score_price,
+            best.score_latency,
+            best.score_availability,
+            best.score_hardware
+        );
+        println!("  {}", output::dim(&detail));
+        println!();
+        println!(
+            "  {}",
+            output::dim("使用 --explain 查看打分明细和全部候选")
+        );
+    }
+
+    Ok(0)
+}
+
+/// `cloud cheapest` - 最便宜优先（纯价格序）。
+///
+/// 查询可用规格，按价格升序排序，显示最便宜的候选。
+/// 不创建任何资源，不产生费用。
+fn cheapest(args: Args) -> MnResult<i32> {
+    let gw = build_gateway(&args)?;
+
+    // 解析约束
+    let mut constraints = SelectionConstraints::default();
+    if let Some(min_vram_gb) = args.get_num::<u64>("min-vram")? {
+        constraints.min_vram_bytes = min_vram_gb * 1024 * 1024 * 1024;
+    }
+
+    let ordered = gw.cheapest_cloud(&constraints)?;
+
+    if args.has("json") {
+        let arr: Vec<serde_json::Value> = ordered
+            .iter()
+            .map(|(provider, spec)| {
+                serde_json::json!({
+                    "provider": provider,
+                    "spec_id": spec.spec_id,
+                    "gpu_model": spec.spec.gpu.model,
+                    "gpu_count": spec.spec.gpu.count,
+                    "vram_bytes": spec.spec.gpu.total_vram_bytes(),
+                    "memory_bytes": spec.spec.memory_bytes,
+                    "price_per_hour": spec.price.per_hour_cny,
+                    "region": spec.region,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"candidates": arr}))
+                .unwrap_or_default()
+        );
+        return Ok(0);
+    }
+
+    if ordered.is_empty() {
+        println!("{}", output::dim("（无可用候选）"));
+        println!();
+        println!(
+            "  {}",
+            output::dim("建议：放宽约束（提高价格上限 / 降低显存要求），或启用更多服务商")
+        );
+        return Ok(0);
+    }
+
+    println!("{}", output::bold("最便宜候选（按价格升序）："));
+    println!();
+
+    let rows: Vec<Vec<String>> = ordered
+        .iter()
+        .map(|(provider, spec)| {
+            vec![
+                provider.clone(),
+                spec.spec.gpu.model.clone(),
+                format!("{}x", spec.spec.gpu.count),
+                format!("{:.1} GiB", spec.spec.gpu.total_vram_bytes() as f64 / (1u64 << 30) as f64),
+                format!("¥{:.3}/h", spec.price.per_hour_cny),
+                spec.region.clone(),
+            ]
+        })
+        .collect();
+
+    output::print_table(
+        &["服务商", "GPU型号", "数量", "显存", "价格", "地域"],
+        &rows,
+    );
+
     Ok(0)
 }
