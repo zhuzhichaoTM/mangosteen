@@ -304,7 +304,7 @@ fn print_help() {
     println!("  cloud pick [--min-vram 24] [--explain]       # 按约束打分排序推荐节点");
     println!("  cloud instances [--running|--stopped]        # 列出云端实例（含已关机）");
     println!("  cloud destroy <部署ID> | --instance <厂商>/<ID> --yes  # 销毁云端实例");
-    println!("  cloud key <厂商> [--password <值> | --env <ENV>] [--access-key <值>] [--secret-key <值>] [--set <k=v>] [--unset <key>] [--enable|--disable]  # 管理云厂商密钥");
+    println!("  cloud key <厂商> [--password <值> | --env <ENV>] [--access-key <值>] [--secret-key <值>] [--set <k=v>] [--unset <key>] [--enable|--disable]  # 管理云厂商密钥（仅保留 access_key_id/access_key_secret）");
     println!();
     println!("  device list                                   # 列出自定义节点");
     println!("  device add <主机> <端口> --user <用户> [--workdir <目录>] [--password <密码>] [--name <名称>]  # 新增自定义节点");
