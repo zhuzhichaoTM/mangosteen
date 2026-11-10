@@ -335,11 +335,12 @@ fn pick(args: Args) -> MnResult<i32> {
         return Ok(0);
     }
 
-    let best = &ranked[0];
+    // 默认显示全部候选的综合评分
+    println!("{}", output::bold("智能选点结果（四维打分）："));
+    println!();
 
     if args.has("explain") {
-        println!("{}", output::bold("智能选点结果（四维打分）："));
-        println!();
+        let best = &ranked[0];
         println!(
             "  {}",
             output::paint(&format!("最优：{}/{} [{}] ¥{:.3}/h · {:.1}GiB",
@@ -361,43 +362,24 @@ fn pick(args: Args) -> MnResult<i32> {
             best.score_total
         );
         println!();
-        println!("{}", output::dim("全部候选（按综合得分降序）："));
-        for (i, c) in ranked.iter().enumerate() {
-            println!(
-                "  {}. {}/{} [{}] ¥{:.3}/h · {:.1}GiB → {:.4}",
-                i + 1,
-                c.provider,
-                c.gpu_model,
-                c.region,
-                c.price_per_hour,
-                c.vram_bytes as f64 / (1u64 << 30) as f64,
-                c.score_total
-            );
-        }
-    } else {
-        println!("{}", output::bold("智能选点结果："));
-        println!();
+    }
+
+    println!("{}", output::dim("全部候选（按综合得分降序）："));
+    for (i, c) in ranked.iter().enumerate() {
+        let price_str = if c.price_per_hour >= f64::MAX {
+            "未知".to_string()
+        } else {
+            format!("¥{:.3}/h", c.price_per_hour)
+        };
         println!(
-            "  {}/{} [{}] ¥{:.3}/h · {:.1}GiB",
-            best.provider,
-            best.gpu_model,
-            best.region,
-            best.price_per_hour,
-            best.vram_bytes as f64 / (1u64 << 30) as f64
-        );
-        println!();
-        let detail = format!("综合得分：{:.4}（价格 {:.2} 延迟 {:.2} 可用 {:.2} 硬件 {:.2}）",
-            best.score_total,
-            best.score_price,
-            best.score_latency,
-            best.score_availability,
-            best.score_hardware
-        );
-        println!("  {}", output::dim(&detail));
-        println!();
-        println!(
-            "  {}",
-            output::dim("使用 --explain 查看打分明细和全部候选")
+            "  {}. {}/{} [{}] {} · {:.1}GiB → {:.4}",
+            i + 1,
+            c.provider,
+            c.gpu_model,
+            c.region,
+            price_str,
+            c.vram_bytes as f64 / (1u64 << 30) as f64,
+            c.score_total
         );
     }
 
@@ -459,12 +441,17 @@ fn cheapest(args: Args) -> MnResult<i32> {
     let rows: Vec<Vec<String>> = ordered
         .iter()
         .map(|(provider, spec)| {
+            let price_str = if spec.price.per_hour_cny >= f64::MAX {
+                "未知".to_string()
+            } else {
+                format!("¥{:.3}/h", spec.price.per_hour_cny)
+            };
             vec![
                 provider.clone(),
                 spec.spec.gpu.model.clone(),
                 format!("{}x", spec.spec.gpu.count),
                 format!("{:.1} GiB", spec.spec.gpu.total_vram_bytes() as f64 / (1u64 << 30) as f64),
-                format!("¥{:.3}/h", spec.price.per_hour_cny),
+                price_str,
                 spec.region.clone(),
             ]
         })

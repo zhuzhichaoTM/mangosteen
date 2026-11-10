@@ -280,7 +280,7 @@ impl SelectionConstraints {
 /// 「未知」后落成 `0.0`。若按 0 参与升序，最贵的卡会排到第一位——于是
 /// 「最便宜」先去开 A100（80G），余额不足直接 520 中止，而库里明明有 V100S。
 fn price_order_key(price: f64) -> f64 {
-    if price > 0.0 {
+    if price > 0.0 && price < f64::MAX {
         price
     } else {
         f64::INFINITY

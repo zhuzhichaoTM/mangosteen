@@ -97,6 +97,7 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "interactive",
     "running",
     "stopped",
+    "require-stock",
     // deploy 异步/轮询开关
     "watch",
     "async",
