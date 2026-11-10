@@ -285,6 +285,32 @@ impl Orchestrator {
         &self.assessor
     }
 
+    /// 测试指定自定义节点的 SSH 连通性（供 CLI / UI 设备页调用）。
+    pub fn test_device(&self, id: &str) -> MnResult<()> {
+        let device = self
+            .config()
+            .remote_devices
+            .iter()
+            .find(|d| {
+                let dev_id = if d.id.trim().is_empty() {
+                    mangosteen_core::config::RemoteDevice::derive_id(&d.host, d.port)
+                } else {
+                    d.id.clone()
+                };
+                dev_id == id
+            })
+            .cloned()
+            .ok_or_else(|| {
+                MnError::bad_request(format!(
+                    "未找到 ID 为 `{id}` 的自定义节点。用 `mangosteen device list` 查看可用 ID"
+                ))
+            })?;
+
+        let target = crate::deployment::DeviceTarget::from_config(&device, &self.config().cloud.remote_workdir);
+        mangosteen_device::remote::ssh_exec(&target.ssh, "true", 30)?;
+        Ok(())
+    }
+
     /// 下一个请求序号。
     pub fn next_seq(&self) -> u64 {
         self.req_seq

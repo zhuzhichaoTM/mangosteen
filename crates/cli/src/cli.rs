@@ -174,7 +174,11 @@ fn commands() -> &'static [(&'static str, &'static str)] {
         ("status", "查看网关与部署状态"),
         (
             "cloud",
-            "云端算力：providers / specs / pick / instances / devices / destroy",
+            "云端算力：providers / specs / pick / instances / devices / destroy / key",
+        ),
+        (
+            "device",
+            "自定义节点：list / add / remove / test",
         ),
         (
             "config",
@@ -218,6 +222,7 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
         "stop" => crate::commands::stop::run(args),
         "status" => crate::commands::status::run(args),
         "cloud" => crate::commands::cloud::run(args),
+        "device" => crate::commands::device::run(args),
         "config" => crate::commands::config::run(args),
         "ui" => {
             if args.pos(1).is_some() {
@@ -298,6 +303,10 @@ fn print_help() {
     println!("  status [--json]                              # 查看网关与部署状态");
     println!("  cloud providers | specs | pick | instances   # 云端算力：查厂商/规格/推荐/实例");
     println!("  cloud key <厂商> [--password <值> | --env <ENV>] [--enable|--disable]  # 管理云厂商密钥");
+    println!("  device list                                                    # 列出自定义节点");
+    println!("  device add <主机> <端口> --user <用户> [--workdir <目录>] [--password <密码>] [--name <名称>]  # 新增自定义节点");
+    println!("  device remove <ID>                                              # 删除自定义节点");
+    println!("  device test <ID>                                               # 测试节点 SSH 连通性");
     println!("  cloud destroy <部署ID> | --instance <厂商>/<ID> --yes  # 销毁云端实例");
     println!("  config show | init | path | validate | reset-templates  # 配置管理");
     println!("  ui [start|stop|restart|status]               # Web UI 控制台生命周期");
