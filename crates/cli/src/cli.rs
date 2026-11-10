@@ -285,7 +285,7 @@ fn print_help() {
     println!("  mangosteen cloud instances --running                          # 查看运行中云端实例");
     println!("  mangosteen device list                                        # 查看自定义节点");
     println!("  mangosteen ui start                                           # 后台启动 UI/API 网关");
-    println!("  mangosteen cloud key compshare --password <AK/SK>             # 配置优云智算密钥");
+    println!("  mangosteen cloud key compshare --access-key <AK> --secret-key <SK>  # 配置优云智算密钥");
     println!("  mangosteen doctor                                             # 环境自检");
     println!();
     println!("{}", output::bold("各命令用法"));
@@ -304,7 +304,7 @@ fn print_help() {
     println!("  cloud pick [--min-vram 24] [--explain]       # 按约束打分排序推荐节点");
     println!("  cloud instances [--running|--stopped]        # 列出云端实例（含已关机）");
     println!("  cloud destroy <部署ID> | --instance <厂商>/<ID> --yes  # 销毁云端实例");
-    println!("  cloud key <厂商> [--password <值> | --env <ENV>] [--access-key <值>] [--secret-key <值>] [--set <k=v>] [--unset <key>] [--enable|--disable]  # 管理云厂商密钥（仅保留 public_key）");
+    println!("  cloud key <厂商> [--password <值> | --env <ENV>] [--access-key <值>] [--secret-key <值>] [--set <k=v>] [--unset <key>] [--enable|--disable]  # 管理云厂商密钥（access-key 明文写入，secret 写入文件）");
     println!();
     println!("  device list                                   # 列出自定义节点");
     println!("  device add <主机> <端口> --user <用户> [--workdir <目录>] [--password <密码>] [--name <名称>]  # 新增自定义节点");

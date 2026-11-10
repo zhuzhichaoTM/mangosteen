@@ -804,18 +804,20 @@ fn destroy_bare_instance(args: &Args, target: &str) -> MnResult<i32> {
 
 /// `cloud key` - 管理云厂商访问凭证（与 UI 设置页同一套后端）
 ///
-/// ## 密钥存储方式（与 UI 完全一致）
+/// ## 密钥存储方式
 ///
-/// 密钥明文写入用户 secrets 目录（0700 目录 / 0600 文件），配置文件里
-/// 只存 `SecretRef::File(path)` 路径引用，**绝不落明文**。写入后自动
-/// 启用该厂商，并热重建云端驱动（无需重启网关）。
+/// * `--access-key`：直接写入明文到 `options.public_key`（用于 API 签名）
+/// * `--secret-key`：写入 secrets 文件（0600），配置存 `SecretRef::File(path)` 路径引用
+/// * `--password`/`--env`：写入 secret 字段（与 --secret-key 互斥）
+///
+/// 写入后自动启用该厂商，并热重建云端驱动（无需重启网关）。
 ///
 /// ## 用法
 ///
 /// * `mangosteen cloud key <厂商> --password <值>`  —— 写入通用密码/密钥（自动启用）
 /// * `mangosteen cloud key <厂商> --env <ENV_VAR>`     —— 引用环境变量
-/// * `mangosteen cloud key <厂商> --access-key <值>`   —— 写入 AccessKeyId（优云智算等）
-/// * `mangosteen cloud key <厂商> --secret-key <值>`   —— 写入 AccessKeySecret（优云智算等）
+/// * `mangosteen cloud key <厂商> --access-key <值>`   —— 写入 AccessKeyId 明文（优云智算等）
+/// * `mangosteen cloud key <厂商> --secret-key <值>`   —— 写入 AccessKeySecret 到文件（优云智算等）
 /// * `mangosteen cloud key <厂商> --set <k=v>`         —— 写入厂商专属选项（可重复）
 /// * `mangosteen cloud key <厂商> --enable`            —— 启用该厂商
 /// * `mangosteen cloud key <厂商> --disable`           —— 禁用该厂商
