@@ -193,7 +193,7 @@ impl Default for SelectionConstraints {
             max_price_per_hour: None,
             allowed_providers: Vec::new(),
             allowed_regions: Vec::new(),
-            require_stock: true,
+            require_stock: false,
         }
     }
 }
@@ -758,7 +758,11 @@ mod tests {
             cand("a", "RTX 4090", 24, 1.0, Some(0)),
             cand("b", "RTX 4090", 24, 3.0, Some(2)),
         ];
-        let ranked = sel.rank(&cands, &HashMap::new(), &SelectionConstraints::default());
+        let cons = SelectionConstraints {
+            require_stock: true,
+            ..Default::default()
+        };
+        let ranked = sel.rank(&cands, &HashMap::new(), &cons);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].provider, "b");
 
@@ -796,8 +800,12 @@ mod tests {
     fn no_candidate_yields_actionable_error() {
         let sel = NodeSelector::default();
         let cands = vec![cand("a", "RTX 4090", 24, 1.0, Some(0))];
+        let cons = SelectionConstraints {
+            min_vram_bytes: 32 << 30, // 要求 32G，但候选只有 24G
+            ..Default::default()
+        };
         let e = sel
-            .select_best(&cands, &HashMap::new(), &SelectionConstraints::default())
+            .select_best(&cands, &HashMap::new(), &cons)
             .unwrap_err();
         assert!(matches!(&e, MnError::NoViableCandidate { .. }));
         assert!(e.is_retryable());

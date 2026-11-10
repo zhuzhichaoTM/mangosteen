@@ -174,7 +174,7 @@ fn commands() -> &'static [(&'static str, &'static str)] {
         ("status", "查看网关与部署状态"),
         (
             "cloud",
-            "云端算力：providers / specs / pick / instances / destroy / key",
+            "云端算力：instances / key",
         ),
         ("device", "自定义节点：list / add / remove / test"),
         (
@@ -299,12 +299,12 @@ fn print_help() {
     println!("  status [--json]");
     println!("    查看网关与部署状态。--json 以 JSON 输出");
     println!();
-    println!("  cloud providers                          # 列出已配置/已加载的云服务商");
-    println!("  cloud specs [--min-vram 24] [--max-price 3]  # 查询可用规格与报价");
-    println!("  cloud pick [--min-vram 24] [--explain]       # 按约束打分排序推荐节点");
-    println!("  cloud instances [--running|--stopped]        # 列出云端实例（含已关机）");
-    println!("  cloud destroy <部署ID> | --instance <厂商>/<ID> --yes  # 销毁云端实例");
-    println!("  cloud key <厂商> [--password <值>] [--access-key <值>] [--secret-key <值>] [--enable|--disable]  # 管理云厂商密钥（access-key 明文写入，secret 写入文件）");
+    println!("  cloud instances [list|start|stop|destroy]        # 云端实例管理");
+    println!("    cloud instances list                           # 列出云端实例（含已关机）");
+    println!("    cloud instances start <厂商>/<实例ID>            # 启动实例");
+    println!("    cloud instances stop <厂商>/<实例ID>             # 关闭实例");
+    println!("    cloud instances destroy <厂商>/<实例ID> --yes    # 删除实例（销毁实例与磁盘）");
+    println!("  cloud key <厂商> [--secret <密钥>] [--enable|--disable]  # 管理云厂商密钥");
     println!();
     println!("  device list                                   # 列出自定义节点");
     println!("  device add <主机> <端口> --user <用户> [--workdir <目录>] [--password <密码>] [--name <名称>]  # 新增自定义节点");
