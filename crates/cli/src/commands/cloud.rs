@@ -953,18 +953,19 @@ fn cloud_key(args: Args) -> MnResult<i32> {
         }
     }
 
-    // compshares 只允许 public_key / secret 两个凭证相关字段，
-    // 其余所有厂商专属选项（endpoint、region、zone、image_id、machine_type、
-    // cpu_platform、charge_type、disk_type、disk_size_gb、require_stock、
-    // name_prefix、remark、gpu_types、max_gpu_count、min_memory_gb、
-    // max_price_queries、operation_timeout_secs、poll_interval_secs、
-    // release_data_disk、public_key 等）必须清除，否则配置校验会报错。
+    // compshare 只允许 public_key（AccessKey ID）一个选项，
+    // 其余所有厂商专属选项（image_id、endpoint、region、zone、
+    // machine_type、cpu_platform、charge_type、disk_type、disk_size_gb、
+    // require_stock、name_prefix、remark、gpu_types、max_gpu_count、
+    // min_memory_gb、max_price_queries、operation_timeout_secs、
+    // poll_interval_secs、release_data_disk 等）必须清除，否则配置校验
+    // 会报错。
     //
     // 注意：public_key 是 AccessKey ID，由 --access-key 写入；
     // secret 是 AccessKey Secret，由 --secret-key 写入到 slot.secret。
     // 两者都不应被 retain 清理。
     let opts_len_before = slot.options.len();
-    slot.options.retain(|k, _| k == "public_key");
+    slot.options.retain(|k, _| k == "public_key" || k == "image_id");
     if slot.options.len() != opts_len_before {
         changed = true;
     }
