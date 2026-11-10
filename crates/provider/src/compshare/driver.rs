@@ -82,7 +82,9 @@ impl<T: Transport> CompshareDriver<T> {
         credential: Credential,
         transport: T,
     ) -> MnResult<Self> {
-        config.validate()?;
+        // 注意：不在这里调用 config.validate()，因为 list() 查询实例
+        // 可能不需要 image_id/region/zone 等字段。这些字段只在
+        // 创建实例时才需要，由调用方（deploy）负责校验。
         let client = CompshareClient::new(
             config.endpoint.clone(),
             credential,
@@ -861,7 +863,10 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
         let mut out = Vec::new();
         let mut offset = 0u32;
         for _ in 0..MAX_PAGES {
-            let page = self.client.describe_instances(None, PAGE_LIMIT, offset)?;
+            // 使用 any_scope 查询：不注入 Region/Zone，避免因用户未配置
+            // region/zone 而漏掉其他地域的实例。厂商 API 支持不传这两个参数
+            // 时返回全部地域的实例。
+            let page = self.client.describe_instances_any_scope(None, PAGE_LIMIT, offset)?;
             let got = page.uhost_set.len() as u32;
             out.extend(
                 page.uhost_set

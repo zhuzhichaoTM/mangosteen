@@ -234,11 +234,12 @@ impl CompshareConfig {
             cfg.release_data_disk = parse_bool("release_data_disk", &v)?;
         }
 
-        cfg.validate()?;
         Ok(cfg)
     }
 
     /// 校验配置自洽性。
+    ///
+    /// 注意：只在创建实例时调用，list() 查询实例不需要 image_id/region/zone。
     pub fn validate(&self) -> MnResult<()> {
         if self.image_id.trim().is_empty() {
             return Err(MnError::config(

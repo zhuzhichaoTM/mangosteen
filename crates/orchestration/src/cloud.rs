@@ -186,31 +186,34 @@ impl Orchestrator {
 
         let mut out = Vec::new();
         for (provider, result) in o.list_instances() {
-            let Ok(instances) = result else {
-                continue;
-            };
-            for inst in instances {
-                // 只返回**运行中**实例：节点选择弹窗把它们作为「可复用节点」。
-                // 已停机（Stopped/Created）与已销毁（Destroyed）一律不返回——
-                // 注释早就写明「只返回 Running」，历史实现漏掉了 Stopped，
-                // 导致用户选了一台已关机的实例、部署时 SSH 连接失败。
-                // 停机实例由部署后端按 GPU 型号在后台自动开机复用，
-                // 不需要（也不应该）出现在选择列表里。
-                if !matches!(inst.state, InstanceState::Running) {
-                    continue;
+            match result {
+                Ok(instances) => {
+                    for inst in instances {
+                        // 返回全部非销毁实例（运行中 + 已关机），与
+                        // cloud_instance_admin_briefs 保持一致。已销毁（Destroyed）
+                        // 实例磁盘已没了，展示只会误导，一律排除。
+                        if matches!(inst.state, InstanceState::Destroyed) {
+                            continue;
+                        }
+                        out.push(crate::deployment::CloudInstanceBrief {
+                            provider: provider.clone(),
+                            instance_id: inst.id.clone(),
+                            gpu_model: inst.spec.gpu.model.clone(),
+                            gpu_count: inst.spec.gpu.count,
+                            vram_bytes: inst.spec.gpu.vram_bytes,
+                            state: inst.state.as_str().to_string(),
+                            ssh_target: inst.network.ssh_target(),
+                            price_per_hour: inst.price.as_ref().map(|p| p.per_hour_cny),
+                            occupied_models: occupied(&provider, &inst.id),
+                            display_name: inst.display_name.clone(),
+                        });
+                    }
                 }
-                out.push(crate::deployment::CloudInstanceBrief {
-                    provider: provider.clone(),
-                    instance_id: inst.id.clone(),
-                    gpu_model: inst.spec.gpu.model.clone(),
-                    gpu_count: inst.spec.gpu.count,
-                    vram_bytes: inst.spec.gpu.vram_bytes,
-                    state: inst.state.as_str().to_string(),
-                    ssh_target: inst.network.ssh_target(),
-                    price_per_hour: inst.price.as_ref().map(|p| p.per_hour_cny),
-                    occupied_models: occupied(&provider, &inst.id),
-                    display_name: inst.display_name.clone(),
-                });
+                Err(e) => {
+                    eprintln!(
+                        "[cloud] provider {provider} list_instances 失败：{e}"
+                    );
+                }
             }
         }
         out
