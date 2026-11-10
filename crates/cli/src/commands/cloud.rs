@@ -47,12 +47,8 @@ const ALLOWED: &[&str] = &[
     "running",
     "stopped",
     // 云厂商密钥管理（与 UI 设置页同一套后端）
-    "password",
-    "env",
     "access-key",
     "secret-key",
-    "set",
-    "unset",
     "enable",
     "disable",
 ];
@@ -808,17 +804,13 @@ fn destroy_bare_instance(args: &Args, target: &str) -> MnResult<i32> {
 ///
 /// * `--access-key`：直接写入明文到 `options.public_key`（用于 API 签名）
 /// * `--secret-key`：写入 secrets 文件（0600），配置存 `SecretRef::File(path)` 路径引用
-/// * `--password`/`--env`：写入 secret 字段（与 --secret-key 互斥）
 ///
 /// 写入后自动启用该厂商，并热重建云端驱动（无需重启网关）。
 ///
 /// ## 用法
 ///
-/// * `mangosteen cloud key <厂商> --password <值>`  —— 写入通用密码/密钥（自动启用）
-/// * `mangosteen cloud key <厂商> --env <ENV_VAR>`     —— 引用环境变量
 /// * `mangosteen cloud key <厂商> --access-key <值>`   —— 写入 AccessKeyId 明文（优云智算等）
 /// * `mangosteen cloud key <厂商> --secret-key <值>`   —— 写入 AccessKeySecret 到文件（优云智算等）
-/// * `mangosteen cloud key <厂商> --set <k=v>`         —— 写入厂商专属选项（可重复）
 /// * `mangosteen cloud key <厂商> --enable`            —— 启用该厂商
 /// * `mangosteen cloud key <厂商> --disable`           —— 禁用该厂商
 /// * `mangosteen cloud key <厂商>`                      —— 查看当前状态（脱敏）
@@ -827,7 +819,7 @@ fn cloud_key(args: Args) -> MnResult<i32> {
         Some(p) => p,
         None => {
             return Err(MnError::bad_request(
-                "缺少云厂商名。用法：mangosteen cloud key <厂商> [--password <值> | --env <ENV>] [--access-key <值>] [--secret-key <值>] [--set <k=v>] [--enable | --disable]",
+                "缺少云厂商名。用法：mangosteen cloud key <厂商> [--access-key <值>] [--secret-key <值>] [--enable | --disable]",
             ))
         }
     };
@@ -852,30 +844,6 @@ fn cloud_key(args: Args) -> MnResult<i32> {
 
     let mut changed = false;
 
-    // ---- 写入单个密钥文件的辅助闭包 ----
-    let write_secret_file = |secret_name: &str, secret_value: &str| -> MnResult<std::path::PathBuf> {
-        let secret_value = secret_value.trim();
-        if secret_value.is_empty() {
-            return Err(MnError::bad_request(format!("{secret_name} 不能为空")));
-        }
-        let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
-        let dir = mangosteen_platform::paths::config_dir(env).join("secrets");
-        ensure_private_dir(&dir)?;
-        let path = dir.join(format!("{provider}_{secret_name}"));
-        write_private_file(&path, secret_value)?;
-        Ok(path)
-    };
-
-    // 设置密码/密钥（写入 secrets 文件，复用 UI 设置页方式）
-    if let Some(password) = args.get("password") {
-        let path = write_secret_file("private_key", password)?;
-        slot.secret = SecretRef::File(path);
-        if !slot.enabled {
-            slot.enabled = true;
-        }
-        changed = true;
-    }
-
     // 设置 AccessKey ID（写入 options.public_key 明文）。
     // compshare 驱动期望 public_key 是 AccessKey ID 的明文，不是文件路径。
     if let Some(access_key) = args.get("access-key") {
@@ -892,55 +860,20 @@ fn cloud_key(args: Args) -> MnResult<i32> {
     // 设置 AccessKey Secret（写入 secrets 文件，记录到 secret 字段）。
     // compshare 驱动期望 private_key，即 AccessKey Secret。
     if let Some(secret_key) = args.get("secret-key") {
-        let path = write_secret_file("secret_key", secret_key)?;
+        let secret_key = secret_key.trim();
+        if secret_key.is_empty() {
+            return Err(MnError::bad_request("AccessKey Secret 不能为空"));
+        }
+        let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
+        let dir = mangosteen_platform::paths::config_dir(env).join("secrets");
+        mangosteen_platform::fs::ensure_private_dir(&dir)?;
+        let path = dir.join(format!("{provider}_secret_key"));
+        mangosteen_platform::fs::write_private_file(&path, secret_key)?;
         slot.secret = SecretRef::File(path);
         if !slot.enabled {
             slot.enabled = true;
         }
         changed = true;
-    }
-
-    // 设置环境变量引用（用于 secret 字段，与 --secret-key 互斥）
-    if let Some(env_var) = args.get("env") {
-        let env_var = env_var.trim();
-        if env_var.is_empty() {
-            return Err(MnError::bad_request("环境变量名不能为空"));
-        }
-        slot.secret = SecretRef::Env(env_var.to_string());
-        if !slot.enabled {
-            slot.enabled = true;
-        }
-        changed = true;
-    }
-
-    // 设置厂商专属选项（--set k=v，可重复；args.options 取最后一个值）
-    if let Some(set_value) = args.options.get("set") {
-        let set_value = set_value.trim();
-        if let Some((k, v)) = set_value.split_once('=') {
-            let k = k.trim();
-            let v = v.trim();
-            if k.is_empty() || v.is_empty() {
-                return Err(MnError::bad_request("--set 格式应为 key=value"));
-            }
-            slot.options.insert(k.to_string(), v.to_string());
-            if !slot.enabled {
-                slot.enabled = true;
-            }
-            changed = true;
-        } else {
-            return Err(MnError::bad_request("--set 格式应为 key=value"));
-        }
-    }
-
-    // 删除厂商专属选项（--unset key）
-    if let Some(unset_key) = args.options.get("unset") {
-        let unset_key = unset_key.trim();
-        if unset_key.is_empty() {
-            return Err(MnError::bad_request("--unset 不能为空"));
-        }
-        if slot.options.remove(unset_key).is_some() {
-            changed = true;
-        }
     }
 
     // 启用 / 禁用
@@ -957,19 +890,9 @@ fn cloud_key(args: Args) -> MnResult<i32> {
         }
     }
 
-    // compshare 只允许 public_key（AccessKey ID）一个选项，
-    // 其余所有厂商专属选项（image_id、endpoint、region、zone、
-    // machine_type、cpu_platform、charge_type、disk_type、disk_size_gb、
-    // require_stock、name_prefix、remark、gpu_types、max_gpu_count、
-    // min_memory_gb、max_price_queries、operation_timeout_secs、
-    // poll_interval_secs、release_data_disk 等）必须清除，否则配置校验
-    // 会报错。
-    //
-    // 注意：public_key 是 AccessKey ID，由 --access-key 写入；
-    // secret 是 AccessKey Secret，由 --secret-key 写入到 slot.secret。
-    // 两者都不应被 retain 清理。
+    // 清理厂商专属选项（只保留 public_key）
     let opts_len_before = slot.options.len();
-    slot.options.retain(|k, _| k == "public_key" || k == "image_id");
+    slot.options.retain(|k, _| k == "public_key");
     if slot.options.len() != opts_len_before {
         changed = true;
     }
