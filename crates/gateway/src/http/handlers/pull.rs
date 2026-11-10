@@ -184,7 +184,7 @@ impl GatewayServer {
             });
 
         let mut opts = mangosteen_base::DownloadOptions::new(
-            cfg.storage.models_dir.clone(),
+            mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env),
             cfg.storage.max_model_bytes,
         );
 
@@ -228,7 +228,7 @@ impl GatewayServer {
         // 远端 32G V100 这种明明够用的机器也开不起来。
         if deploy_target == "local" {
             if let Some(need) = opts.expected_bytes {
-                if let Ok(avail) = mangosteen_platform::fs::available_space(&cfg.storage.models_dir) {
+                if let Ok(avail) = mangosteen_platform::fs::available_space(&mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env)) {
                     let required = need + need / 20 + (128 << 20);
                     if avail < required {
                         return Response::json(
@@ -249,7 +249,7 @@ impl GatewayServer {
 
         // 本地已有完整文件 → 不必启动下载线程，直接标记完成
         let file_name = model.local_file_name();
-        let final_path = cfg.storage.models_dir.join(&file_name);
+        let final_path = mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env).join(&file_name);
         let already = match (opts.expected_bytes, std::fs::metadata(&final_path)) {
             (Some(expected), Ok(meta)) => meta.len() == expected,
             _ => false,
@@ -572,9 +572,7 @@ impl GatewayServer {
                     &job_id,
                     "本地已存在模型文件，仍执行完整部署流程并在下载阶段重新校验",
                 );
-                let resumed = cfg
-                    .storage
-                    .models_dir
+                let resumed = mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env)
                     .join(format!("{file_name}.part"))
                     .is_file();
                 // 阶段状态只能由 worker 在完成真实校验后上报。这里不能提前
@@ -613,11 +611,9 @@ impl GatewayServer {
             let size = std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0);
             self.pull_jobs.mark_done(&job_id, &model_id, size, true);
         } else {
-            let resumed = cfg
-                .storage
-                .models_dir
-                .join(format!("{file_name}.part"))
-                .is_file();
+                let resumed = mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env)
+                    .join(format!("{file_name}.part"))
+                    .is_file();
             crate::pulljobs::spawn(
                 self.pull_jobs.clone(),
                 job_id.clone(),

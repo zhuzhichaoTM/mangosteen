@@ -311,8 +311,6 @@ impl GatewayServer {
                     "auto_library_path": cfg.local.auto_library_path,
                 },
                 "storage": {
-                    "models_dir": cfg.storage.models_dir.display().to_string(),
-                    "cache_dir": cfg.storage.cache_dir.display().to_string(),
                     "default_source": cfg.storage.default_source,
                     "verify_hash": cfg.storage.verify_hash,
                     "max_model_bytes": cfg.storage.max_model_bytes,

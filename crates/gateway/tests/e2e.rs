@@ -154,10 +154,8 @@ HTTPServer((host, port), H).serve_forever()
 
     /// 构造配置：授权模型目录、指定假引擎、关闭云端。
     fn config(&self, engine: &Path) -> Config {
-        let mut cfg = Config::sample(self.models_dir(), self.root.join("cache"));
+        let mut cfg = Config::sample();
         cfg.storage = StorageConfig {
-            models_dir: self.models_dir(),
-            cache_dir: self.root.join("cache"),
             allowed_read_roots: vec![self.models_dir()],
             // 测试不计算大文件哈希
             verify_hash: false,

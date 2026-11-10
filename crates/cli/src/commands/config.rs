@@ -161,8 +161,7 @@ fn show(args: Args) -> MnResult<i32> {
                 "port_range": [cfg.local.port_range_start, cfg.local.port_range_end],
             },
             "storage": {
-                "models_dir": cfg.storage.models_dir.display().to_string(),
-                "cache_dir": cfg.storage.cache_dir.display().to_string(),
+                "default_source": cfg.storage.default_source,
                 "verify_hash": cfg.storage.verify_hash,
                 "max_model_bytes": cfg.storage.max_model_bytes,
                 "allowed_read_roots": cfg.storage.allowed_read_roots
@@ -273,11 +272,6 @@ fn show(args: Args) -> MnResult<i32> {
     println!("{}", output::bold("存储与访问控制"));
     output::print_kv(&[
         (
-            "模型库".into(),
-            cfg.storage.models_dir.display().to_string(),
-        ),
-        ("缓存".into(), cfg.storage.cache_dir.display().to_string()),
-        (
             "哈希校验".into(),
             if cfg.storage.verify_hash {
                 "开启"
@@ -343,10 +337,7 @@ fn init(args: Args) -> MnResult<i32> {
     }
 
     let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
-    let cfg = mangosteen_core::config::Config::sample(
-        mangosteen_platform::paths::models_dir(env),
-        mangosteen_platform::paths::cache_dir(env),
-    );
+    let cfg = mangosteen_core::config::Config::sample();
     cfg.validate()?;
     let written = store.save(&cfg)?;
 

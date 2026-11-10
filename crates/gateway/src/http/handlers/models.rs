@@ -176,7 +176,7 @@ impl GatewayServer {
             .to_string();
 
         let opts = mangosteen_base::DownloadOptions::new(
-            cfg.storage.models_dir.clone(),
+            mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env),
             cfg.storage.max_model_bytes,
         );
 

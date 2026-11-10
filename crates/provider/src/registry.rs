@@ -291,8 +291,6 @@ mod tests {
             local: Default::default(),
             storage: mangosteen_core::config::StorageConfig {
                 default_source: "modelscope".to_string(),
-                models_dir: PathBuf::from("/m"),
-                cache_dir: PathBuf::from("/c"),
                 allowed_read_roots: vec![],
                 verify_hash: false,
                 max_model_bytes: 1 << 30,

@@ -35,10 +35,9 @@ pub struct AccessGuard {
 impl AccessGuard {
     /// 由存储配置构造。
     ///
-    /// 授权范围 = `models_dir` ∪ `cache_dir` ∪ `allowed_read_roots`。
+    /// 授权范围 = `allowed_read_roots`。
     pub fn from_config(cfg: &StorageConfig) -> Self {
-        let mut roots = vec![cfg.models_dir.clone(), cfg.cache_dir.clone()];
-        roots.extend(cfg.allowed_read_roots.iter().cloned());
+        let roots = cfg.allowed_read_roots.iter().cloned().collect();
         Self {
             roots,
             max_bytes: cfg.max_model_bytes,
@@ -302,14 +301,12 @@ mod tests {
         let d = tmpdir("fromcfg");
         let cfg = StorageConfig {
             default_source: "modelscope".to_string(),
-            models_dir: d.join("models"),
-            cache_dir: d.join("cache"),
             allowed_read_roots: vec![d.join("extra")],
             verify_hash: false,
             max_model_bytes: 42,
         };
         let g = AccessGuard::from_config(&cfg);
-        assert_eq!(g.roots().len(), 3);
+        assert_eq!(g.roots().len(), 1);
         assert_eq!(g.max_bytes, 42);
         fs::remove_dir_all(&d).ok();
     }

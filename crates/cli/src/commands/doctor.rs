@@ -212,58 +212,6 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
             }),
         }
 
-        // 本地优先开关
-        if cfg.scheduler.local_first {
-            out.push(Check {
-                name: "本地优先策略".into(),
-                status: Status::Ok,
-                detail: "已启用（符合产品基线）".into(),
-                hint: None,
-            });
-        } else {
-            out.push(Check {
-                name: "本地优先策略".into(),
-                status: Status::Warn,
-                detail: "被配置关闭，将不再优先尝试本地部署".into(),
-                hint: Some("把 scheduler.local_first 改回 true；只在临时排障时才应关闭".into()),
-            });
-        }
-
-        // 目录可写
-        for (label, dir) in [
-            ("模型库目录", cfg.storage.models_dir.clone()),
-            ("下载缓存目录", cfg.storage.cache_dir.clone()),
-            (
-                "配置目录",
-                mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env),
-            ),
-            (
-                "日志目录",
-                mangosteen_platform::paths::log_dir(&mangosteen_platform::paths::real_env),
-            ),
-        ] {
-            let writable = ensure_writable(&dir);
-            out.push(Check {
-                name: label.into(),
-                status: if writable.is_ok() {
-                    Status::Ok
-                } else {
-                    Status::Fail
-                },
-                detail: format!(
-                    "{} —— {}",
-                    dir.display(),
-                    writable
-                        .as_ref()
-                        .map(|_| "可写".to_string())
-                        .unwrap_or_else(|e| e.clone())
-                ),
-                hint: writable
-                    .err()
-                    .map(|_| "检查该目录权限，或改用有写权限的路径（配置 storage.*）".to_string()),
-            });
-        }
-
         // 网关端口
         let port = cfg.gateway.port;
         if mangosteen_platform::process::is_port_bindable(port) {
@@ -322,28 +270,45 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
         }
     }
 
-    // 本地 llama-server 启动路径已撤销（本地推理交由 Ollama 承担，
-    // Mangosteen 只部署到云端/远端节点），doctor 不再检查本地引擎。
-    // 推理能力自检聚焦云端：上面已检查云服务商凭证。
+    out
+}
 
-    // ---- 磁盘空间 ----
-    if let Some(cfg) = &cfg {
-        if let Some(avail) = available_space(&cfg.storage.models_dir) {
-            let gib = avail as f64 / (1u64 << 30) as f64;
-            out.push(Check {
-                name: "模型库磁盘".into(),
-                status: if gib < 10.0 { Status::Warn } else { Status::Ok },
-                detail: format!("{} 剩余约 {:.1} GiB", cfg.storage.models_dir.display(), gib),
-                hint: if gib < 10.0 {
-                    Some("7B Q4 模型约需 4.5 GiB，32B 约需 20 GiB。请清理或换盘".into())
-                } else {
-                    None
-                },
-            });
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_labels_and_colors() {
+        assert_eq!(Status::Ok.label(), "OK");
+        assert_eq!(Status::Warn.label(), "WARN");
+        assert_eq!(Status::Fail.label(), "FAIL");
+        assert_eq!(Status::Ok.color(), output::Color::Green);
+        assert_eq!(Status::Fail.color(), output::Color::Red);
     }
 
-    out
+    #[test]
+    fn checks_run_without_panicking() {
+        let a = crate::cli::parse_args(&["doctor".to_string()]).unwrap();
+        let checks = run_checks(&a);
+        assert!(!checks.is_empty(), "至少应有硬件检查项");
+        assert!(checks.iter().any(|c| c.name == "硬件采集"));
+        assert!(checks.iter().any(|c| c.name == "加速卡"));
+        // 不应再出现本地部署相关的检查项
+        assert!(!checks.iter().any(|c| c.name == "本地优先策略"), "本地优先策略检查应已移除");
+        assert!(!checks.iter().any(|c| c.name.contains("模型库")), "模型库相关检查应已移除");
+    }
+
+    #[test]
+    fn doctor_rejects_unknown_option() {
+        let a = crate::cli::parse_args(&[
+            "doctor".to_string(),
+            "--whatever".to_string(),
+            "1".to_string(),
+        ])
+        .unwrap();
+        let e = run(a).unwrap_err();
+        assert!(e.to_string().contains("--whatever"));
+    }
 }
 
 /// 测试目录可写（实际创建目录并写一个探针文件）。
@@ -365,76 +330,4 @@ fn ensure_writable(dir: &std::path::Path) -> Result<(), String> {
 /// 查询可用空间（转发到平台层实现，避免两处逻辑分叉）。
 fn available_space(path: &std::path::Path) -> Option<u64> {
     mangosteen_platform::fs::available_space(path).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_labels_and_colors() {
-        assert_eq!(Status::Ok.label(), "OK");
-        assert_eq!(Status::Warn.label(), "WARN");
-        assert_eq!(Status::Fail.label(), "FAIL");
-        assert_eq!(Status::Ok.color(), output::Color::Green);
-        assert_eq!(Status::Fail.color(), output::Color::Red);
-    }
-
-    #[test]
-    fn checks_run_without_panicking() {
-        let a = crate::cli::parse_args(&["doctor".to_string()]).unwrap();
-        let checks = run_checks(&a);
-        assert!(!checks.is_empty(), "至少应有硬件检查项");
-        // 硬件与加速卡检查必须存在
-        assert!(checks.iter().any(|c| c.name == "硬件采集"));
-        assert!(checks.iter().any(|c| c.name == "加速卡"));
-    }
-
-    #[test]
-    fn writable_probe_detects_good_dir() {
-        let d = std::env::temp_dir().join(format!("mn-doctor-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        assert!(ensure_writable(&d).is_ok());
-        // 探针文件不应残留
-        assert!(!d.join(".mangosteen-write-probe").exists());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn writable_probe_detects_readonly_dir() {
-        use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("mn-doctor-ro-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o500)).unwrap();
-
-        // root 用户可以无视权限，因此仅在非 root 时断言失败
-        let is_root = unsafe { libc::geteuid() } == 0;
-        if !is_root {
-            assert!(ensure_writable(&d).is_err(), "只读目录应被判定为不可写");
-        }
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).ok();
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn available_space_is_reported() {
-        let v = available_space(&std::env::temp_dir());
-        assert!(v.is_some());
-        assert!(v.unwrap() > 0);
-    }
-
-    #[test]
-    fn doctor_rejects_unknown_option() {
-        let a = crate::cli::parse_args(&[
-            "doctor".to_string(),
-            "--whatever".to_string(),
-            "1".to_string(),
-        ])
-        .unwrap();
-        let e = run(a).unwrap_err();
-        assert!(e.to_string().contains("--whatever"));
-    }
 }

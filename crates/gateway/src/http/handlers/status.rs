@@ -190,7 +190,7 @@ impl GatewayServer {
         // 各活跃部署的进程资源占用
         let deps = {
             let gw = self.gateway.as_ref();
-            let models_dir = gw.config().storage.models_dir.clone();
+            let models_dir = mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env);
             gw.list_deployments()
                 .unwrap_or_default()
                 .into_iter()
@@ -218,7 +218,7 @@ impl GatewayServer {
         let hardware = {
             let gw = self.gateway.as_ref();
             let hw = gw.assessor().hardware().clone();
-            let models_dir = gw.config().storage.models_dir.clone();
+            let models_dir = mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env);
             (hw, models_dir)
         };
 

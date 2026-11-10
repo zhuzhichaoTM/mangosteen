@@ -695,13 +695,9 @@ impl LocalConfig {
 /// 模型存储与访问控制配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// 模型库根目录
-    pub models_dir: PathBuf,
-    /// 下载缓存目录
-    pub cache_dir: PathBuf,
     /// 允许访问的本地路径白名单（前缀匹配）。
     ///
-    /// **文件访问控制模块**据此拒绝越权读取。空表示仅允许 `models_dir` / `cache_dir`。
+    /// **文件访问控制模块**据此拒绝越权读取。空表示拒绝所有本地读取。
     #[serde(default)]
     pub allowed_read_roots: Vec<PathBuf>,
     /// 是否在**登记时**立即计算 SHA-256。
@@ -723,6 +719,17 @@ fn default_model_source() -> String {
     "modelscope".to_string()
 }
 
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            allowed_read_roots: Vec::new(),
+            verify_hash: false,
+            max_model_bytes: default_max_model_size(),
+            default_source: default_model_source(),
+        }
+    }
+}
+
 fn default_max_model_size() -> u64 {
     200 * (1u64 << 30) // 200 GiB
 }
@@ -730,9 +737,6 @@ fn default_max_model_size() -> u64 {
 impl StorageConfig {
     /// 校验。
     pub fn validate(&self) -> MnResult<()> {
-        if self.models_dir.as_os_str().is_empty() {
-            return Err(MnError::config("storage.models_dir", "不能为空"));
-        }
         if self.max_model_bytes == 0 {
             return Err(MnError::config("storage.max_model_bytes", "不能为 0"));
         }
@@ -741,11 +745,10 @@ impl StorageConfig {
 
     /// 给定路径是否在允许读取的范围内。
     ///
-    /// 授权范围 = `models_dir` ∪ `cache_dir` ∪ `allowed_read_roots`。
+    /// 授权范围 = `allowed_read_roots`。
     /// 使用**规范化的词法前缀比较**，不跟随符号链接解析（避免 TOCTOU）。
     pub fn is_read_allowed(&self, path: &Path) -> bool {
-        let mut roots: Vec<&Path> = vec![self.models_dir.as_path(), self.cache_dir.as_path()];
-        roots.extend(self.allowed_read_roots.iter().map(|p| p.as_path()));
+        let roots: Vec<&Path> = self.allowed_read_roots.iter().map(|p| p.as_path()).collect();
         roots.iter().any(|root| lexical_starts_with(path, root))
     }
 }
@@ -875,6 +878,7 @@ pub struct Config {
     #[serde(default)]
     pub cloud: CloudConfig,
     /// 存储与访问控制
+    #[serde(default)]
     pub storage: StorageConfig,
     /// 云服务商表（键为配置内唯一名）
     #[serde(default)]
@@ -1042,7 +1046,7 @@ impl Config {
     }
 
     /// 内置示例配置。`mangosteen init` 输出此内容。
-    pub fn sample(models_dir: PathBuf, cache_dir: PathBuf) -> Self {
+    pub fn sample() -> Self {
         let mut providers = BTreeMap::new();
         providers.insert(
             "autodl".to_string(),
@@ -1092,8 +1096,6 @@ impl Config {
             local: LocalConfig::default(),
             cloud: CloudConfig::default(),
             storage: StorageConfig {
-                models_dir,
-                cache_dir,
                 allowed_read_roots: Vec::new(),
                 verify_hash: false,
                 max_model_bytes: default_max_model_size(),
@@ -1149,10 +1151,7 @@ mod tests {
     use crate::model::Quantization;
 
     fn base_config() -> Config {
-        Config::sample(
-            PathBuf::from("/tmp/m/models"),
-            PathBuf::from("/tmp/m/cache"),
-        )
+        Config::sample()
     }
 
     #[test]
@@ -1227,14 +1226,12 @@ cache_dir = "/c"
     #[test]
     fn storage_access_control_blocks_escape() {
         let s = StorageConfig {
-            models_dir: PathBuf::from("/opt/mangosteen/models"),
-            cache_dir: PathBuf::from("/opt/mangosteen/cache"),
             allowed_read_roots: vec![PathBuf::from("/data/gguf")],
             verify_hash: false,
             max_model_bytes: 1 << 30,
             default_source: default_model_source(),
         };
-        assert!(s.is_read_allowed(Path::new("/opt/mangosteen/models/q.gguf")));
+        assert!(s.is_read_allowed(Path::new("/data/gguf/q.gguf")));
         assert!(s.is_read_allowed(Path::new("/data/gguf/other.gguf")));
         assert!(!s.is_read_allowed(Path::new("/etc/passwd")));
         // 路径穿越必须被拦住
@@ -1325,19 +1322,15 @@ cache_dir = "/c"
 
     #[test]
     fn invalid_toml_reports_field() {
-        let text = "[storage]\nmodels_dir = ''\ncache_dir = '/c'\n";
+        let text = "[storage]\nmax_model_bytes = 0\n";
         let e = Config::from_toml(text).unwrap_err();
         let msg = e.to_string();
-        assert!(msg.contains("storage.models_dir"), "got: {msg}");
+        assert!(msg.contains("storage.max_model_bytes"), "got: {msg}");
     }
 
     #[test]
     fn quant_and_kv_parse_from_config_text() {
         let text = r#"
-[storage]
-models_dir = "/m"
-cache_dir = "/c"
-
 [local]
 kv_cache = "q8_0"
 "#;
@@ -1361,7 +1354,7 @@ mod registry_consistency_tests {
     /// 永远报「未知模型源 hf-mirror」，而 UI 的默认源正是它。
     #[test]
     fn default_config_exposes_all_builtin_sources() {
-        let cfg = Config::sample("/tmp/models".into(), "/tmp/cache".into());
+        let cfg = Config::sample();
         let reg = cfg.model_source_registry().unwrap();
 
         for expected in ["modelscope", "hf", "hf-mirror"] {

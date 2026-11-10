@@ -149,10 +149,7 @@ impl ConfigStore {
         }
         // 5. 内置默认
         Ok(LoadedConfig {
-            config: Config::sample(
-                mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env),
-                mangosteen_platform::paths::cache_dir(&mangosteen_platform::paths::real_env),
-            ),
+            config: Config::sample(),
             source: ConfigSource::Builtin,
         })
     }
@@ -214,10 +211,7 @@ fn load_or_quarantine(path: &Path) -> MnResult<Config> {
                 path.display()
             );
             eprintln!("[config] 本次启动将使用内置默认配置；请在设置页重新保存以生成新配置");
-            Ok(Config::sample(
-                mangosteen_platform::paths::models_dir(&mangosteen_platform::paths::real_env),
-                mangosteen_platform::paths::cache_dir(&mangosteen_platform::paths::real_env),
-            ))
+            Ok(Config::sample())
         }
     }
 }
@@ -270,8 +264,6 @@ mod tests {
             local: Default::default(),
             storage: StorageConfig {
                 default_source: "modelscope".to_string(),
-                models_dir: PathBuf::from("/m"),
-                cache_dir: PathBuf::from("/c"),
                 allowed_read_roots: vec![],
                 verify_hash: false,
                 max_model_bytes: 1 << 30,
@@ -308,7 +300,7 @@ mod tests {
 
         let l = s.load().unwrap();
         assert!(matches!(l.source, ConfigSource::User(_)));
-        assert_eq!(l.config.storage.models_dir, PathBuf::from("/m"));
+        assert_eq!(l.config.storage.default_source, "modelscope");
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -347,7 +339,7 @@ mod tests {
         // 显式配置写另一个值
         let explicit = d.join("explicit.toml");
         let mut cfg = minimal_config();
-        cfg.storage.models_dir = PathBuf::from("/explicit-models");
+        cfg.storage.allowed_read_roots = vec![PathBuf::from("/explicit-models")];
         s.save_to(&cfg, &explicit).unwrap();
 
         let s2 = ConfigStore::new(ConfigPaths {
@@ -358,8 +350,8 @@ mod tests {
         let l = s2.load().unwrap();
         assert_eq!(l.source, ConfigSource::Explicit(explicit));
         assert_eq!(
-            l.config.storage.models_dir,
-            PathBuf::from("/explicit-models")
+            l.config.storage.allowed_read_roots,
+            vec![PathBuf::from("/explicit-models")]
         );
         std::fs::remove_dir_all(&d).ok();
     }
