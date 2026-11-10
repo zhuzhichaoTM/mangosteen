@@ -49,6 +49,9 @@ const ALLOWED: &[&str] = &[
     // 云厂商密钥管理（与 UI 设置页同一套后端）
     "password",
     "env",
+    "access-key",
+    "secret-key",
+    "set",
     "enable",
     "disable",
 ];
@@ -808,8 +811,11 @@ fn destroy_bare_instance(args: &Args, target: &str) -> MnResult<i32> {
 ///
 /// ## 用法
 ///
-/// * `mangosteen cloud key <厂商> --password <密钥>`  —— 写入明文密钥（自动启用）
+/// * `mangosteen cloud key <厂商> --password <值>`  —— 写入通用密码/密钥（自动启用）
 /// * `mangosteen cloud key <厂商> --env <ENV_VAR>`     —— 引用环境变量
+/// * `mangosteen cloud key <厂商> --access-key <值>`   —— 写入 AccessKeyId（优云智算等）
+/// * `mangosteen cloud key <厂商> --secret-key <值>`   —— 写入 AccessKeySecret（优云智算等）
+/// * `mangosteen cloud key <厂商> --set <k=v>`         —— 写入厂商专属选项（可重复）
 /// * `mangosteen cloud key <厂商> --enable`            —— 启用该厂商
 /// * `mangosteen cloud key <厂商> --disable`           —— 禁用该厂商
 /// * `mangosteen cloud key <厂商>`                      —— 查看当前状态（脱敏）
@@ -818,7 +824,7 @@ fn cloud_key(args: Args) -> MnResult<i32> {
         Some(p) => p,
         None => {
             return Err(MnError::bad_request(
-                "缺少云厂商名。用法：mangosteen cloud key <厂商> [--password <值> | --env <ENV>] [--enable | --disable]",
+                "缺少云厂商名。用法：mangosteen cloud key <厂商> [--password <值> | --env <ENV>] [--access-key <值>] [--secret-key <值>] [--set <k=v>] [--enable | --disable]",
             ))
         }
     };
@@ -843,18 +849,44 @@ fn cloud_key(args: Args) -> MnResult<i32> {
 
     let mut changed = false;
 
-    // 设置密码/密钥（写入 secrets 文件，复用 UI 设置页方式）
-    if let Some(password) = args.get("password") {
-        let secret = password.trim();
-        if secret.is_empty() {
-            return Err(MnError::bad_request("密码不能为空"));
+    // ---- 写入单个密钥文件的辅助闭包 ----
+    let write_secret_file = |secret_name: &str, secret_value: &str| -> MnResult<std::path::PathBuf> {
+        let secret_value = secret_value.trim();
+        if secret_value.is_empty() {
+            return Err(MnError::bad_request(format!("{secret_name} 不能为空")));
         }
         let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
         let dir = mangosteen_platform::paths::config_dir(env).join("secrets");
         ensure_private_dir(&dir)?;
-        let path = dir.join(format!("{provider}_private_key"));
-        write_private_file(&path, secret)?;
+        let path = dir.join(format!("{provider}_{secret_name}"));
+        write_private_file(&path, secret_value)?;
+        Ok(path)
+    };
+
+    // 设置密码/密钥（写入 secrets 文件，复用 UI 设置页方式）
+    if let Some(password) = args.get("password") {
+        let path = write_secret_file("private_key", password)?;
         slot.secret = SecretRef::File(path);
+        if !slot.enabled {
+            slot.enabled = true;
+        }
+        changed = true;
+    }
+
+    // 设置 AccessKeyId（写入 secrets 文件，记录到 options）
+    if let Some(access_key) = args.get("access-key") {
+        let path = write_secret_file("access_key", access_key)?;
+        slot.options.insert("access_key_id".to_string(), format!("file:{}", path.display()));
+        if !slot.enabled {
+            slot.enabled = true;
+        }
+        changed = true;
+    }
+
+    // 设置 AccessKeySecret（写入 secrets 文件，记录到 options）
+    if let Some(secret_key) = args.get("secret-key") {
+        let path = write_secret_file("secret_key", secret_key)?;
+        slot.options.insert("access_key_secret".to_string(), format!("file:{}", path.display()));
         if !slot.enabled {
             slot.enabled = true;
         }
@@ -872,6 +904,25 @@ fn cloud_key(args: Args) -> MnResult<i32> {
             slot.enabled = true;
         }
         changed = true;
+    }
+
+    // 设置厂商专属选项（--set k=v，可重复；args.options 取最后一个值）
+    if let Some(set_value) = args.options.get("set") {
+        let set_value = set_value.trim();
+        if let Some((k, v)) = set_value.split_once('=') {
+            let k = k.trim();
+            let v = v.trim();
+            if k.is_empty() || v.is_empty() {
+                return Err(MnError::bad_request("--set 格式应为 key=value"));
+            }
+            slot.options.insert(k.to_string(), v.to_string());
+            if !slot.enabled {
+                slot.enabled = true;
+            }
+            changed = true;
+        } else {
+            return Err(MnError::bad_request("--set 格式应为 key=value"));
+        }
     }
 
     // 启用 / 禁用
