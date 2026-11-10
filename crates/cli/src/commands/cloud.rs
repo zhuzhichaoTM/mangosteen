@@ -874,15 +874,17 @@ fn cloud_key(args: Args) -> MnResult<i32> {
         changed = true;
     }
 
-    // 设置 AccessKey ID（写入 secrets 文件，记录到 options.public_key）。
-    // compshare 驱动期望 public_key，即 AccessKey ID。
+    // 设置 AccessKey ID（写入 options.public_key 明文）。
+    // compshare 驱动期望 public_key 是 AccessKey ID 的明文，不是文件路径。
     if let Some(access_key) = args.get("access-key") {
-        let path = write_secret_file("access_key", access_key)?;
-        slot.options.insert("public_key".to_string(), format!("file:{}", path.display()));
-        if !slot.enabled {
-            slot.enabled = true;
+        let access_key = access_key.trim();
+        if !access_key.is_empty() {
+            slot.options.insert("public_key".to_string(), access_key.to_string());
+            if !slot.enabled {
+                slot.enabled = true;
+            }
+            changed = true;
         }
-        changed = true;
     }
 
     // 设置 AccessKey Secret（写入 secrets 文件，记录到 secret 字段）。
