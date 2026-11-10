@@ -12,16 +12,22 @@
 //! | `cheapest` | 查当前可用的**最低价**节点；`--create` 直接创建 |
 //! | `instances` | 列出所有云厂商托管的实例（含已关机），与 UI "云端节点" 对应 |
 //! | `destroy` | 销毁指定实例（部署 ID，或 `--instance 服务商/实例ID`） |
+//! | `key` | 管理云厂商访问凭证（与 UI 设置页同一套后端） |
 //!
 //! `pick --explain` 是本命令最有价值的部分：让用户在花钱前看清
 //! 「为什么选了这个节点」——价格/延迟/可用性/硬件四维分数都摊开。
 
+use mangosteen_core::config::SecretRef;
+use mangosteen_core::MnError;
 use mangosteen_core::policy::SelectionConstraints;
 use mangosteen_core::MnResult;
 
 use crate::cli::Args;
 use crate::commands::{build_gateway, load_config, reject_unknown_options};
 use crate::output;
+
+use mangosteen_platform::fs::{ensure_private_dir, write_private_file};
+use mangosteen_platform::paths;
 
 /// 允许的选项。
 const ALLOWED: &[&str] = &[
@@ -40,6 +46,11 @@ const ALLOWED: &[&str] = &[
     "instance",
     "running",
     "stopped",
+    // 云厂商密钥管理（与 UI 设置页同一套后端）
+    "password",
+    "env",
+    "enable",
+    "disable",
 ];
 
 /// 入口。
@@ -53,8 +64,9 @@ pub fn run(args: Args) -> MnResult<i32> {
         "cheapest" | "cheap" => cheapest(args),
         "instances" | "ls" => instances(args),
         "destroy" | "rm" => destroy(args),
+        "key" => cloud_key(args),
         other => Err(mangosteen_core::MnError::bad_request(format!(
-            "未知子命令 `cloud {other}`。可用：providers / specs / pick / cheapest / instances / destroy"
+            "未知子命令 `cloud {other}`。可用：providers / specs / pick / cheapest / instances / destroy / key"
         ))),
     }
 }
@@ -784,6 +796,152 @@ fn destroy_bare_instance(args: &Args, target: &str) -> MnResult<i32> {
             errors.join("；")
         ),
     })
+}
+
+/// `cloud key` - 管理云厂商访问凭证（与 UI 设置页同一套后端）
+///
+/// ## 密钥存储方式（与 UI 完全一致）
+///
+/// 密钥明文写入用户 secrets 目录（0700 目录 / 0600 文件），配置文件里
+/// 只存 `SecretRef::File(path)` 路径引用，**绝不落明文**。写入后自动
+/// 启用该厂商，并热重建云端驱动（无需重启网关）。
+///
+/// ## 用法
+///
+/// * `mangosteen cloud key <厂商> --password <密钥>`  —— 写入明文密钥（自动启用）
+/// * `mangosteen cloud key <厂商> --env <ENV_VAR>`     —— 引用环境变量
+/// * `mangosteen cloud key <厂商> --enable`            —— 启用该厂商
+/// * `mangosteen cloud key <厂商> --disable`           —— 禁用该厂商
+/// * `mangosteen cloud key <厂商>`                      —— 查看当前状态（脱敏）
+fn cloud_key(args: Args) -> MnResult<i32> {
+    let provider = match args.pos(2) {
+        Some(p) => p,
+        None => {
+            return Err(MnError::bad_request(
+                "缺少云厂商名。用法：mangosteen cloud key <厂商> [--password <值> | --env <ENV>] [--enable | --disable]",
+            ))
+        }
+    };
+
+    let gw = build_gateway(&args)?;
+    let mut cfg = gw.config().as_ref().clone();
+    let store = gw.config_store();
+
+    // 先收集可用厂商名（用于错误提示），避免与下面的可变借用冲突
+    let available: Vec<String> = cfg.providers.keys().cloned().collect();
+
+    // ---- 获取目标厂商的可变引用并修改 ----
+    let slot = cfg
+        .providers
+        .get_mut(provider)
+        .ok_or_else(|| {
+            MnError::bad_request(format!(
+                "云厂商 `{provider}` 未配置。可用：{}",
+                available.join(", ")
+            ))
+        })?;
+
+    let mut changed = false;
+
+    // 设置密码/密钥（写入 secrets 文件，复用 UI 设置页方式）
+    if let Some(password) = args.get("password") {
+        let secret = password.trim();
+        if secret.is_empty() {
+            return Err(MnError::bad_request("密码不能为空"));
+        }
+        let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
+        let dir = mangosteen_platform::paths::config_dir(env).join("secrets");
+        ensure_private_dir(&dir)?;
+        let path = dir.join(format!("{provider}_private_key"));
+        write_private_file(&path, secret)?;
+        slot.secret = SecretRef::File(path);
+        if !slot.enabled {
+            slot.enabled = true;
+        }
+        changed = true;
+    }
+
+    // 设置环境变量引用
+    if let Some(env_var) = args.get("env") {
+        let env_var = env_var.trim();
+        if env_var.is_empty() {
+            return Err(MnError::bad_request("环境变量名不能为空"));
+        }
+        slot.secret = SecretRef::Env(env_var.to_string());
+        if !slot.enabled {
+            slot.enabled = true;
+        }
+        changed = true;
+    }
+
+    // 启用 / 禁用
+    if args.has("enable") {
+        if !slot.enabled {
+            slot.enabled = true;
+            changed = true;
+        }
+    }
+    if args.has("disable") {
+        if slot.enabled {
+            slot.enabled = false;
+            changed = true;
+        }
+    }
+
+    // 显式释放 slot 的可变借用，随后才能不可变借用 cfg
+    drop(slot);
+
+    if changed {
+        cfg.validate()?;
+        let written = store.save(&cfg)?;
+        gw.replace_config(cfg);
+        let (hot, skipped) = gw.reload_cloud_drivers();
+        output::print_success(&format!(
+            "云厂商 `{provider}` 凭证已更新 → {}",
+            written.display()
+        ));
+        if hot {
+            output::print_info(&format!(
+                "云端驱动已热重建（跳过 {} 个厂商）",
+                skipped.len()
+            ));
+            for (name, reason) in &skipped {
+                output::print_warning(&format!("  {name}: {reason}"));
+            }
+        } else {
+            output::print_warning(
+                "云端驱动未热重建，请重启网关后生效：mangosteen ui restart",
+            );
+        }
+    } else {
+        // 仅查询状态（脱敏）：重新获取引用（此时已无其他借用）
+        let slot = cfg
+            .providers
+            .get(provider)
+            .ok_or_else(|| {
+                MnError::bad_request(format!(
+                    "云厂商 `{provider}` 未配置。可用：{}",
+                    available.join(", ")
+                ))
+            })?;
+        print_provider_status(slot, provider);
+    }
+
+    Ok(0)
+}
+
+/// 打印单个云厂商的状态（脱敏，不回显凭证明文）。
+fn print_provider_status(slot: &mangosteen_core::config::ProviderConfig, provider: &str) {
+    let title = format!("云厂商：{provider}");
+    println!("{}", output::bold(&title));
+    println!("  驱动：{}", slot.driver);
+    println!("  状态：{}", if slot.enabled { "启用" } else { "停用" });
+    println!("  凭证：{}", slot.secret.redacted());
+    println!("  优先级：{:.1}", slot.priority);
+    if !slot.options.is_empty() {
+        let opts: Vec<&str> = slot.options.keys().map(|s| s.as_str()).collect();
+        println!("  选项：{}", opts.join(", "));
+    }
 }
 
 #[cfg(test)]
