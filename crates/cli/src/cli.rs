@@ -291,6 +291,18 @@ fn print_help() {
     println!("  mangosteen ui stop                              # 关闭 UI/API 网关");
     println!("  mangosteen ui status                            # 查看 UI/API 网关状态");
     println!();
+    println!("{}", output::bold("各命令用法"));
+    println!("  deploy <模型> --gpu-model <型号> --watch   # 部署到云端，轮询进度");
+    println!("  deploy <模型> --template <槽位>              # 指定配置模板（default/uncensored/…）");
+    println!("  stop <部署ID> | --all                        # 停止部署并释放资源");
+    println!("  status [--json]                              # 查看网关与部署状态");
+    println!("  cloud providers | specs | pick | instances   # 云端算力：查厂商/规格/推荐/实例");
+    println!("  cloud key <厂商> [--password <值> | --env <ENV>] [--enable|--disable]  # 管理云厂商密钥");
+    println!("  cloud destroy <部署ID> | --instance <厂商>/<ID> --yes  # 销毁云端实例");
+    println!("  config show | init | path | validate | reset-templates  # 配置管理");
+    println!("  ui [start|stop|restart|status]               # Web UI 控制台生命周期");
+    println!("  doctor                                       # 环境自检（引擎、硬件、配置、权限）");
+    println!();
     println!("{}", output::bold("全局选项"));
     println!("  --config <path>   指定配置文件");
     println!("  --json            以 JSON 输出（便于脚本处理）");
