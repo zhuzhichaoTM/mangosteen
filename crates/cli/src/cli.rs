@@ -171,21 +171,15 @@ fn normalize_flag(s: &str) -> String {
 /// 顶层命令表。
 fn commands() -> &'static [(&'static str, &'static str)] {
     &[
-        ("deploy", "部署模型到云端（租赁 GPU 算力）"),
-        ("stop", "停止部署并释放云端资源"),
+        ("deploy", "部署模型到云端"),
+        ("stop", "停止部署并释放资源"),
         ("status", "查看网关与部署状态"),
-        (
-            "cloud",
-            "云端算力：instances / key / pick / cheapest",
-        ),
-        ("device", "自定义节点：list / add / remove / test"),
-        (
-            "config",
-            "配置管理：show / init / path / validate / reset-templates",
-        ),
-        ("ui", "启动 Web UI 控制台"),
-        ("doctor", "环境自检（云服务商、配置、权限）"),
-        ("version", "显示版本信息"),
+        ("cloud", "云端算力管理"),
+        ("device", "自定义节点管理"),
+        ("config", "配置管理"),
+        ("ui", "启动 Web UI"),
+        ("doctor", "环境自检"),
+        ("version", "显示版本"),
         ("help", "显示帮助"),
     ]
 }
@@ -201,7 +195,7 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
         print_version();
         return Ok(0);
     }
-    if args.has("help") || args.positionals.is_empty() {
+    if args.positionals.is_empty() {
         print_help();
         return Ok(0);
     }
@@ -292,60 +286,60 @@ fn print_help() {
     println!(
         "  {:<w$}  {}",
         "cloud",
-        "云端算力（instances/key/pick/cheapest/providers）",
+        "云端算力管理",
         w = 16
     );
     println!(
         "  {:<w$}  {}",
         "device",
-        "自定义节点（list/add/remove/test）",
+        "自定义节点管理",
         w = 16
     );
     println!(
         "  {:<w$}  {}",
         "config",
-        "配置管理（show/init/path/validate/reset-templates）",
+        "配置管理",
         w = 16
     );
-    println!("  {:<w$}  {}", "ui", "Web UI 控制台生命周期", w = 16);
-    println!("  {:<w$}  {}", "doctor", "环境自检（云服务商、配置、权限）", w = 16);
+    println!("  {:<w$}  {}", "ui", "Web UI 生命周期", w = 16);
+    println!("  {:<w$}  {}", "doctor", "环境自检", w = 16);
     println!();
     println!("{}", output::bold("cloud 子命令"));
     println!(
         "  {:<w$}  {}",
         "instances",
-        "列出/启动/停止/删除云端实例",
+        "云端实例管理",
         w = 18
     );
     println!(
         "  {:<w$}  {}",
         "key",
-        "管理云厂商密钥（公钥/私钥/启用/禁用）",
+        "云厂商密钥管理",
         w = 18
     );
-    println!("  {:<w$}  {}", "pick", "智能选点（四维打分）", w = 18);
-    println!("  {:<w$}  {}", "cheapest", "最便宜优先（纯价格序）", w = 18);
-    println!("  {:<w$}  {}", "providers", "列出云服务商及其启用状态", w = 18);
+    println!("  {:<w$}  {}", "pick", "智能选点", w = 18);
+    println!("  {:<w$}  {}", "cheapest", "最便宜优先", w = 18);
+    println!("  {:<w$}  {}", "providers", "云服务商管理", w = 18);
     println!();
     println!("{}", output::bold("config 子命令"));
     println!(
         "  {:<w$}  {}",
         "show",
-        "显示当前完整配置",
+        "显示配置",
         w = 18
     );
-    println!("  {:<w$}  {}", "init", "初始化默认配置文件", w = 18);
-    println!("  {:<w$}  {}", "path", "显示配置文件所在路径", w = 18);
+    println!("  {:<w$}  {}", "init", "初始化配置", w = 18);
+    println!("  {:<w$}  {}", "path", "显示配置路径", w = 18);
     println!(
         "  {:<w$}  {}",
         "validate",
-        "验证配置项合法性（如 image_id、region、zone 等）",
+        "验证配置合法性",
         w = 18
     );
     println!(
         "  {:<w$}  {}",
         "reset-templates",
-        "重置内置部署模板为默认值",
+        "重置模板",
         w = 18
     );
     println!();

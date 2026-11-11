@@ -21,14 +21,47 @@ const ALLOWED: &[&str] = &["config", "json", "force", "quiet", "yes"];
 
 /// 入口。
 pub fn run(args: Args) -> MnResult<i32> {
-    reject_unknown_options(&args, ALLOWED)?;
+    if args.has("help") {
+        print_config_help();
+        return Ok(0);
+    }
     let sub = args.pos(1).unwrap_or("show").to_string();
     match sub.as_str() {
-        "show" => show(args),
-        "init" => init(args),
-        "path" => path(args),
-        "validate" => validate(args),
-        "reset-templates" => reset_templates(args),
+        "show" => {
+            if args.has("help") {
+                print_config_show_help();
+                return Ok(0);
+            }
+            show(args)
+        }
+        "init" => {
+            if args.has("help") {
+                print_config_init_help();
+                return Ok(0);
+            }
+            init(args)
+        }
+        "path" => {
+            if args.has("help") {
+                print_config_path_help();
+                return Ok(0);
+            }
+            path(args)
+        }
+        "validate" => {
+            if args.has("help") {
+                print_config_validate_help();
+                return Ok(0);
+            }
+            validate(args)
+        }
+        "reset-templates" => {
+            if args.has("help") {
+                print_config_reset_templates_help();
+                return Ok(0);
+            }
+            reset_templates(args)
+        }
         other => Err(mangosteen_core::MnError::bad_request(format!(
             "未知子命令 `config {other}`。可用：show / init / path / validate / reset-templates"
         ))),
@@ -197,7 +230,7 @@ fn show(args: Args) -> MnResult<i32> {
     ]);
 
     println!();
-    println!("{}", output::bold("调度策略"));
+    println!("{}", output::bold("云端选择策略"));
     output::print_kv(&[
         (
             "本地优先".into(),
@@ -225,7 +258,7 @@ fn show(args: Args) -> MnResult<i32> {
     ]);
 
     println!();
-    println!("{}", output::bold("本地部署"));
+    println!("{}", output::bold("模型配置"));
     output::print_kv(&[
         (
             "推理引擎".into(),
@@ -237,65 +270,11 @@ fn show(args: Args) -> MnResult<i32> {
         ),
         ("默认上下文".into(), cfg.local.default_context.to_string()),
         (
-            "KV 精度".into(),
-            cfg.local.kv_cache.as_cli_value().to_string(),
-        ),
-        ("批大小".into(), cfg.local.batch_size.to_string()),
-        (
-            "CPU 回退".into(),
-            if cfg.local.allow_cpu_fallback {
-                "允许"
-            } else {
-                "禁止"
-            }
-            .to_string(),
-        ),
-        (
-            "部分卸载".into(),
-            if cfg.local.allow_partial_offload {
-                "允许"
-            } else {
-                "禁止"
-            }
-            .to_string(),
-        ),
-        (
             "端口区间".into(),
             format!(
                 "{}-{}",
                 cfg.local.port_range_start, cfg.local.port_range_end
             ),
-        ),
-    ]);
-
-    println!();
-    println!("{}", output::bold("存储与访问控制"));
-    output::print_kv(&[
-        (
-            "哈希校验".into(),
-            if cfg.storage.verify_hash {
-                "开启"
-            } else {
-                "关闭"
-            }
-            .to_string(),
-        ),
-        (
-            "单文件上限".into(),
-            mangosteen_platform::fs::human_bytes(cfg.storage.max_model_bytes),
-        ),
-        (
-            "额外授权目录".into(),
-            if cfg.storage.allowed_read_roots.is_empty() {
-                output::dim("（无）").to_string()
-            } else {
-                cfg.storage
-                    .allowed_read_roots
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            },
         ),
     ]);
 
@@ -379,18 +358,6 @@ fn path(args: Args) -> MnResult<i32> {
                 .join("\n                      "),
         ),
         (
-            "模型库".into(),
-            mangosteen_platform::paths::models_dir(env)
-                .display()
-                .to_string(),
-        ),
-        (
-            "下载缓存".into(),
-            mangosteen_platform::paths::cache_dir(env)
-                .display()
-                .to_string(),
-        ),
-        (
             "日志".into(),
             mangosteen_platform::paths::log_dir(env)
                 .display()
@@ -432,6 +399,118 @@ fn validate(args: Args) -> MnResult<i32> {
 /// 数字选项展示。
 fn opt_num<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_else(|| "不限".into())
+}
+
+/// 打印 config 命令帮助。
+fn print_config_help() {
+    println!("mangosteen config <子命令> [选项]");
+    println!();
+    println!("配置管理。");
+    println!();
+    println!("{}", output::bold("子命令"));
+    println!("  {:<w$}  {}", "show", "显示当前完整配置", w = 18);
+    println!("  {:<w$}  {}", "init", "初始化默认配置文件", w = 18);
+    println!("  {:<w$}  {}", "path", "显示配置文件所在路径", w = 18);
+    println!("  {:<w$}  {}", "validate", "验证配置项合法性", w = 18);
+    println!("  {:<w$}  {}", "reset-templates", "重置内置部署模板为默认值", w = 18);
+    println!();
+    println!("{}", output::bold("全局选项"));
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!("  {:<w$}  {}", "--force", "强制覆盖已存在的配置文件", w = 22);
+    println!("  {:<w$}  {}", "--yes", "免确认直接执行（与 reset-templates 配合）", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen config show");
+    println!("  mangosteen config path");
+    println!("  mangosteen config validate");
+    println!("  mangosteen config reset-templates --yes");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 config show 子命令帮助。
+fn print_config_show_help() {
+    println!("mangosteen config show [选项]");
+    println!();
+    println!("显示当前完整配置。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen config show");
+    println!("  mangosteen config show --json");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 config init 子命令帮助。
+fn print_config_init_help() {
+    println!("mangosteen config init [选项]");
+    println!();
+    println!("初始化默认配置文件。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--force", "强制覆盖已存在的配置文件", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen config init");
+    println!("  mangosteen config init --force");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 config path 子命令帮助。
+fn print_config_path_help() {
+    println!("mangosteen config path [选项]");
+    println!();
+    println!("显示配置文件所在路径。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen config path");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 config validate 子命令帮助。
+fn print_config_validate_help() {
+    println!("mangosteen config validate [选项]");
+    println!();
+    println!("验证配置项合法性（如 image_id、region、zone 等）。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen config validate");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 config reset-templates 子命令帮助。
+fn print_config_reset_templates_help() {
+    println!("mangosteen config reset-templates [选项]");
+    println!();
+    println!("重置内置部署模板为默认值。");
+    println!("只处理内置槽位，用户自建的模板名原样保留。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--yes", "免确认直接执行", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen config reset-templates --yes");
+    println!();
+    println!("更多信息：docs/USAGE.md");
 }
 
 #[cfg(test)]

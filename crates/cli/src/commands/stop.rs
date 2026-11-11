@@ -21,6 +21,10 @@ const ALLOWED: &[&str] = &["config", "all", "yes", "json", "quiet"];
 
 /// 入口。
 pub fn run(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_stop_help();
+        return Ok(0);
+    }
     reject_unknown_options(&args, ALLOWED)?;
 
     let all = args.has("all");
@@ -98,6 +102,29 @@ pub fn run(args: Args) -> MnResult<i32> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// 打印 stop 子命令帮助。
+fn print_stop_help() {
+    println!("mangosteen stop <部署ID> | --all [选项]");
+    println!();
+    println!("停止部署并释放云端资源。");
+    println!();
+    println!("{}", output::bold("位置参数"));
+    println!("  {:<w$}  {}", "<部署ID>", "要停止的部署 ID（可用 `mangosteen status` 查看）", w = 22);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--all", "停止全部活跃部署", w = 22);
+    println!("  {:<w$}  {}", "--yes", "免确认直接执行（与 --all 配合使用）", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen stop dep-1a1c8xxxx --yes");
+    println!("  mangosteen stop --all --yes");
+    println!();
+    println!("注意：停止云端部署会停止 GPU 计费，但保留实例与磁盘，可复用。");
+    println!("更多信息：docs/USAGE.md");
 }
 
 #[cfg(test)]

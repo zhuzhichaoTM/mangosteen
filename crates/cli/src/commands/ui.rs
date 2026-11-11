@@ -39,6 +39,10 @@ const ALLOWED: &[&str] = &["config", "port", "host", "no-open", "quiet", "foregr
 
 /// UI 生命周期子命令：`start` / `restart` / `stop` / `status`。
 pub fn run_lifecycle(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_ui_lifecycle_help();
+        return Ok(0);
+    }
     reject_unknown_options(&args, ALLOWED)?;
     let action = args.pos(1).unwrap_or("start");
     match action {
@@ -213,6 +217,10 @@ fn status_background(args: &Args) -> MnResult<i32> {
 }
 /// 前台兼容入口：`ui --foreground --no-open`。
 pub fn run(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_ui_help();
+        return Ok(0);
+    }
     // 选项白名单校验必须在这里也做一次：`run_lifecycle` 只覆盖
     // `ui start|restart|stop|status` 这条子命令路径，前台直跑 `mangosteen ui`
     // 走的是本函数。缺了这一步，拼错的参数会被静默忽略，用户只会看到
@@ -359,6 +367,65 @@ fn open_browser(url: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("启动 {program} 失败：{e}"))
+}
+
+/// 打印 ui 命令帮助。
+fn print_ui_help() {
+    println!("mangosteen ui [start|stop|restart|status] [选项]");
+    println!();
+    println!("启动 Web UI 控制台。");
+    println!();
+    println!("{}", output::bold("子命令"));
+    println!("  {:<w$}  {}", "start", "后台启动 UI/API 网关", w = 18);
+    println!("  {:<w$}  {}", "stop", "停止 UI/API 网关", w = 18);
+    println!("  {:<w$}  {}", "restart", "重启 UI/API 网关", w = 18);
+    println!("  {:<w$}  {}", "status", "查看 UI/API 网关运行状态", w = 18);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--port <端口>", "指定网关监听端口", w = 22);
+    println!("  {:<w$}  {}", "--host <地址>", "指定网关监听地址", w = 22);
+    println!("  {:<w$}  {}", "--no-open", "不自动打开浏览器（适合 SSH/容器环境）", w = 22);
+    println!("  {:<w$}  {}", "--foreground", "前台运行（不守护进程）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen ui start");
+    println!("  mangosteen ui --port 11516 --no-open");
+    println!("  mangosteen ui restart");
+    println!("  mangosteen ui status");
+    println!("  mangosteen ui stop");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 ui 生命周期子命令帮助。
+fn print_ui_lifecycle_help() {
+    println!("mangosteen ui <start|stop|restart|status> [选项]");
+    println!();
+    println!("UI/API 网关生命周期管理。");
+    println!();
+    println!("{}", output::bold("子命令"));
+    println!("  {:<w$}  {}", "start", "后台启动 UI/API 网关", w = 18);
+    println!("  {:<w$}  {}", "stop", "停止 UI/API 网关", w = 18);
+    println!("  {:<w$}  {}", "restart", "重启 UI/API 网关", w = 18);
+    println!("  {:<w$}  {}", "status", "查看 UI/API 网关运行状态", w = 18);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--port <端口>", "指定网关监听端口", w = 22);
+    println!("  {:<w$}  {}", "--host <地址>", "指定网关监听地址", w = 22);
+    println!("  {:<w$}  {}", "--no-open", "不自动打开浏览器（适合 SSH/容器环境）", w = 22);
+    println!("  {:<w$}  {}", "--foreground", "前台运行（不守护进程）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen ui start");
+    println!("  mangosteen ui stop");
+    println!("  mangosteen ui restart");
+    println!("  mangosteen ui status");
+    println!();
+    println!("更多信息：docs/USAGE.md");
 }
 
 #[cfg(test)]

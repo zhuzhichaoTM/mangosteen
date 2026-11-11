@@ -60,7 +60,49 @@ const POLL_INTERVAL_SECS: u64 = 5;
 
 /// `deploy` 入口。
 pub fn run(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_deploy_help();
+        return Ok(0);
+    }
     execute(args)
+}
+
+/// 打印 deploy 子命令帮助。
+fn print_deploy_help() {
+    println!("mangosteen deploy <模型> [选项]");
+    println!();
+    println!("部署模型到云端（租赁 GPU 算力）。");
+    println!();
+    println!("{}", output::bold("位置参数"));
+    println!("  {:<w$}  {}", "<模型>", "模型 ID 或 GGUF 文件路径", w = 22);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--context <N>", "上下文长度（默认 8192）", w = 22);
+    println!("  {:<w$}  {}", "--batch-size <N>", "批处理大小（默认 512）", w = 22);
+    println!("  {:<w$}  {}", "--kv-cache <类型>", "KV 缓存精度（如 f16, q8_0）", w = 22);
+    println!("  {:<w$}  {}", "--gpu-model <型号>", "GPU 型号（如 V100S、3080TI、P40）", w = 22);
+    println!("  {:<w$}  {}", "--max-price <元/小时>", "最高价格上限（元/小时）", w = 22);
+    println!("  {:<w$}  {}", "--template <槽位>", "配置模板槽位（default / uncensored / mode1…）", w = 22);
+    println!("  {:<w$}  {}", "--device <节点ID>", "指定自定义节点部署", w = 22);
+    println!("  {:<w$}  {}", "--reuse-instance", "复用已有实例（不重新创建）", w = 22);
+    println!("  {:<w$}  {}", "--reuse-provider <厂商>", "指定复用的云厂商", w = 22);
+    println!("  {:<w$}  {}", "--cloud-spec <规格>", "指定云端实例规格 ID", w = 22);
+    println!("  {:<w$}  {}", "--watch", "部署后轮询查看进度（每 5 秒刷新）", w = 22);
+    println!("  {:<w$}  {}", "--async", "异步返回，仅输出部署 ID 不等待完成", w = 22);
+    println!("  {:<w$}  {}", "--local-only", "仅使用本地算力，不走云端", w = 22);
+    println!("  {:<w$}  {}", "--no-cpu-fallback", "禁止 CPU 回退，仅 GPU 推理", w = 22);
+    println!("  {:<w$}  {}", "--require-full-gpu", "要求完整 GPU 显存，不允许部分卸载", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!("  {:<w$}  {}", "--interactive", "交互式确认部署方案", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen deploy qwen2.5-0.5b --gpu-model V100S --watch");
+    println!("  mangosteen deploy qwen2.5-7b --context 16384 --batch-size 256");
+    println!("  mangosteen deploy qwen2.5-0.5b --device dev-001 --template default");
+    println!("  mangosteen deploy qwen2.5-0.5b --max-price 1.5 --async");
+    println!();
+    println!("更多信息：docs/USAGE.md");
 }
 
 /// 共享实现。

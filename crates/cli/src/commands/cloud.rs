@@ -42,6 +42,11 @@ const ALLOWED: &[&str] = &[
 
 /// 入口。
 pub fn run(args: Args) -> MnResult<i32> {
+    let sub = args.pos(1).unwrap_or("").to_string();
+    if args.has("help") && sub.is_empty() {
+        print_cloud_help();
+        return Ok(0);
+    }
     reject_unknown_options(&args, ALLOWED)?;
 
     let sub = args.pos(1).unwrap_or("help").to_string();
@@ -59,12 +64,40 @@ pub fn run(args: Args) -> MnResult<i32> {
 
 /// `cloud instances` - 列出云端实例（含已关机），支持 start/stop/destroy 子命令。
 fn instances(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_instances_help();
+        return Ok(0);
+    }
     let sub = args.pos(2).unwrap_or("list").to_string();
     match sub.as_str() {
-        "list" | "ls" => instances_list(args),
-        "start" => instances_start(args),
-        "stop" => instances_stop(args),
-        "destroy" => instances_destroy(args),
+        "list" | "ls" => {
+            if args.has("help") {
+                print_cloud_instances_list_help();
+                return Ok(0);
+            }
+            instances_list(args)
+        }
+        "start" => {
+            if args.has("help") {
+                print_cloud_instances_start_help();
+                return Ok(0);
+            }
+            instances_start(args)
+        }
+        "stop" => {
+            if args.has("help") {
+                print_cloud_instances_stop_help();
+                return Ok(0);
+            }
+            instances_stop(args)
+        }
+        "destroy" => {
+            if args.has("help") {
+                print_cloud_instances_destroy_help();
+                return Ok(0);
+            }
+            instances_destroy(args)
+        }
         other => Err(mangosteen_core::MnError::bad_request(format!(
             "未知子命令 `cloud instances {other}`。可用：list / start / stop / destroy"
         ))),
@@ -565,4 +598,217 @@ fn providers(args: Args) -> MnResult<i32> {
     );
 
     Ok(0)
+}
+
+/// 打印 cloud 命令帮助。
+fn print_cloud_help() {
+    println!("mangosteen cloud <子命令> [选项]");
+    println!();
+    println!("云端算力管理。");
+    println!();
+    println!("{}", output::bold("子命令"));
+    println!("  {:<w$}  {}", "instances", "云端实例管理", w = 18);
+    println!("  {:<w$}  {}", "key", "云厂商密钥管理", w = 18);
+    println!("  {:<w$}  {}", "pick", "智能选点", w = 18);
+    println!("  {:<w$}  {}", "cheapest", "最便宜优先", w = 18);
+    println!("  {:<w$}  {}", "providers", "云服务商管理", w = 18);
+    println!();
+    println!("{}", output::bold("全局选项"));
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud instances list");
+    println!("  mangosteen cloud key compshare --secret <密钥> --public-key <公钥>");
+    println!("  mangosteen cloud pick --max-price 1.5 --explain");
+    println!("  mangosteen cloud cheapest --min-vram 1");
+    println!("  mangosteen cloud providers");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud instances 子命令帮助。
+fn print_cloud_instances_help() {
+    println!("mangosteen cloud instances <list|start|stop|destroy> [选项]");
+    println!();
+    println!("云端实例管理。");
+    println!();
+    println!("{}", output::bold("子命令"));
+    println!("  {:<w$}  {}", "list", "列出云端实例（含已关机）", w = 18);
+    println!("  {:<w$}  {}", "start", "启动实例", w = 18);
+    println!("  {:<w$}  {}", "stop", "关闭实例", w = 18);
+    println!("  {:<w$}  {}", "destroy", "删除实例（需 --yes 确认）", w = 18);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud instances list");
+    println!("  mangosteen cloud instances start compshare/uhost-xxx");
+    println!("  mangosteen cloud instances stop compshare/uhost-xxx");
+    println!("  mangosteen cloud instances destroy compshare/uhost-xxx --yes");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud instances list 子命令帮助。
+fn print_cloud_instances_list_help() {
+    println!("mangosteen cloud instances list [选项]");
+    println!();
+    println!("列出云端实例（含已关机）。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud instances list");
+    println!("  mangosteen cloud instances list --json");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud instances start 子命令帮助。
+fn print_cloud_instances_start_help() {
+    println!("mangosteen cloud instances start <厂商>/<实例ID> [选项]");
+    println!();
+    println!("启动实例（开机）。");
+    println!();
+    println!("{}", output::bold("位置参数"));
+    println!("  {:<w$}  {}", "<厂商>/<实例ID>", "实例标识，如 compshare/uhost-xxx", w = 22);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud instances start compshare/uhost-1xkb7e7x9c28");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud instances stop 子命令帮助。
+fn print_cloud_instances_stop_help() {
+    println!("mangosteen cloud instances stop <厂商>/<实例ID> [选项]");
+    println!();
+    println!("关闭实例（停止 GPU 计费，实例与磁盘保留）。");
+    println!();
+    println!("{}", output::bold("位置参数"));
+    println!("  {:<w$}  {}", "<厂商>/<实例ID>", "实例标识，如 compshare/uhost-xxx", w = 22);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud instances stop compshare/uhost-1xkb7e7x9c28");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud instances destroy 子命令帮助。
+fn print_cloud_instances_destroy_help() {
+    println!("mangosteen cloud instances destroy <厂商>/<实例ID> --yes [选项]");
+    println!();
+    println!("删除实例（销毁实例与磁盘，不可恢复）。");
+    println!();
+    println!("{}", output::bold("位置参数"));
+    println!("  {:<w$}  {}", "<厂商>/<实例ID>", "实例标识，如 compshare/uhost-xxx", w = 22);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--yes", "免确认直接执行（必须提供）", w = 22);
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud instances destroy compshare/uhost-1xkb7e7x9c28 --yes");
+    println!();
+    println!("警告：删除操作不可逆，实例与磁盘将被永久销毁。");
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud key 子命令帮助。
+fn print_cloud_key_help() {
+    println!("mangosteen cloud key <厂商> [选项]");
+    println!();
+    println!("管理云厂商密钥。");
+    println!();
+    println!("{}", output::bold("位置参数"));
+    println!("  {:<w$}  {}", "<厂商>", "云服务商名称（如 compshare、aliyun、autodl）", w = 22);
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--secret <密钥>", "更新厂商私钥（Secret Key，存储为加密文件）", w = 22);
+    println!("  {:<w$}  {}", "--public-key <公钥>", "更新厂商公钥（AccessKey ID，存储在 options 中）", w = 22);
+    println!("  {:<w$}  {}", "--enable", "启用该厂商", w = 22);
+    println!("  {:<w$}  {}", "--disable", "禁用该厂商", w = 22);
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud key compshare --secret <密钥> --public-key <公钥>");
+    println!("  mangosteen cloud key compshare --enable");
+    println!("  mangosteen cloud key aliyun --disable");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud pick 子命令帮助。
+fn print_cloud_pick_help() {
+    println!("mangosteen cloud pick [选项]");
+    println!();
+    println!("智能选点（四维打分：价格、延迟、可用性、硬件）。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--min-vram <GB>", "最小显存要求（GB）", w = 22);
+    println!("  {:<w$}  {}", "--max-price <元/小时>", "最高价格上限（元/小时）", w = 22);
+    println!("  {:<w$}  {}", "--explain", "显示打分明细", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!("  {:<w$}  {}", "--require-stock", "要求库存充足", w = 22);
+    println!("  {:<w$}  {}", "--no-require-stock", "不要求库存", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud pick --max-price 1.5 --explain");
+    println!("  mangosteen cloud pick --min-vram 8 --json");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud cheapest 子命令帮助。
+fn print_cloud_cheapest_help() {
+    println!("mangosteen cloud cheapest [选项]");
+    println!();
+    println!("最便宜优先（纯价格序）。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--min-vram <GB>", "最小显存要求（GB）", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!("  {:<w$}  {}", "--require-stock", "要求库存充足", w = 22);
+    println!("  {:<w$}  {}", "--no-require-stock", "不要求库存", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud cheapest --min-vram 1");
+    println!("  mangosteen cloud cheapest --json");
+    println!();
+    println!("更多信息：docs/USAGE.md");
+}
+
+/// 打印 cloud providers 子命令帮助。
+fn print_cloud_providers_help() {
+    println!("mangosteen cloud providers [选项]");
+    println!();
+    println!("列出云服务商及其启用状态。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen cloud providers");
+    println!("  mangosteen cloud providers --json");
+    println!();
+    println!("更多信息：docs/USAGE.md");
 }

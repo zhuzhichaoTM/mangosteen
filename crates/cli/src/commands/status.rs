@@ -16,6 +16,10 @@ const ALLOWED: &[&str] = &["config", "json", "quiet"];
 
 /// `status` 入口。
 pub fn run(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_status_help();
+        return Ok(0);
+    }
     reject_unknown_options(&args, ALLOWED)?;
     let gw = build_gateway(&args)?;
     let st = gw.status()?;
@@ -106,6 +110,24 @@ fn print_active(active: &[mangosteen_gateway::ActiveDeployment]) {
         &["部署 ID", "模型", "算力来源", "状态", "端口", "健康"],
         &rows,
     );
+}
+
+/// 打印 status 子命令帮助。
+fn print_status_help() {
+    println!("mangosteen status [选项]");
+    println!();
+    println!("查看网关与部署状态。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen status");
+    println!("  mangosteen status --json");
+    println!();
+    println!("输出包含：版本、硬件信息、云服务商、活跃部署列表（ID、模型、算力来源、状态、端口、健康）。");
+    println!("更多信息：docs/USAGE.md");
 }
 
 #[cfg(test)]

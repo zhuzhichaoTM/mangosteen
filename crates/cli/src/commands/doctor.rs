@@ -72,6 +72,10 @@ impl Status {
 
 /// 入口。
 pub fn run(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_doctor_help();
+        return Ok(0);
+    }
     reject_unknown_options(&args, ALLOWED)?;
     let checks = run_checks(&args);
 
@@ -271,6 +275,33 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
     }
 
     out
+}
+
+/// 打印 doctor 子命令帮助。
+fn print_doctor_help() {
+    println!("mangosteen doctor [选项]");
+    println!();
+    println!("环境自检。逐项检查并给出可操作的结论。");
+    println!();
+    println!("{}", output::bold("选项"));
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("检查项"));
+    println!("  硬件采集   - CPU / 内存 / 加速卡采集结果");
+    println!("  加速卡     - 是否有可用 GPU 加速卡");
+    println!("  推理引擎   - llama-server 是否就位、版本");
+    println!("  配置       - 能否加载、是否合法、密钥是否齐全");
+    println!("  云服务商   - 驱动加载情况");
+    println!("  目录权限   - 配置/模型/日志目录可写");
+    println!("  端口       - 网关端口是否可绑定");
+    println!("  磁盘       - 模型库所在分区剩余空间");
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen doctor");
+    println!("  mangosteen doctor --json");
+    println!();
+    println!("更多信息：docs/USAGE.md");
 }
 
 #[cfg(test)]

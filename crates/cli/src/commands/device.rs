@@ -39,6 +39,10 @@ const ALLOWED: &[&str] = &[
 
 /// 入口。
 pub fn run(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_device_help();
+        return Ok(0);
+    }
     reject_unknown_options(&args, ALLOWED)?;
 
     let sub = args.pos(1).unwrap_or("list").to_string();
@@ -301,6 +305,42 @@ fn test(args: Args) -> MnResult<i32> {
     gw.test_device(id)?;
     println!("{}", output::paint("连通", output::Color::Green));
     Ok(0)
+}
+
+/// 打印 device 子命令帮助。
+fn print_device_help() {
+    println!("mangosteen device <子命令> [选项]");
+    println!();
+    println!("管理自定义远端节点（设置页「自定义节点」的 CLI 对应）。");
+    println!("自定义节点是用户自己的机器，部署时优先复用，不走云厂商创建。");
+    println!();
+    println!("{}", output::bold("子命令"));
+    println!("  {:<w$}  {}", "list", "列出所有自定义节点", w = 18);
+    println!("  {:<w$}  {}", "add", "新增一个自定义节点", w = 18);
+    println!("  {:<w$}  {}", "remove", "删除一个自定义节点", w = 18);
+    println!("  {:<w$}  {}", "test", "测试指定节点的 SSH 连通性", w = 18);
+    println!();
+    println!("{}", output::bold("全局选项"));
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
+    println!();
+    println!("{}", output::bold("device add 选项"));
+    println!("  {:<w$}  {}", "--user <用户>", "SSH 登录用户名（默认 root）", w = 22);
+    println!("  {:<w$}  {}", "--workdir <目录>", "远端工作目录（默认 /root/mangosteen）", w = 22);
+    println!("  {:<w$}  {}", "--password <密码>", "SSH 登录密码", w = 22);
+    println!("  {:<w$}  {}", "--name <名称>", "节点显示名称", w = 22);
+    println!("  {:<w$}  {}", "--env", "从环境变量读取密码", w = 22);
+    println!("  {:<w$}  {}", "--enable", "启用节点", w = 22);
+    println!("  {:<w$}  {}", "--disable", "禁用节点", w = 22);
+    println!();
+    println!("{}", output::bold("示例"));
+    println!("  mangosteen device list");
+    println!("  mangosteen device add 192.168.1.100:22 --user root --name 我的节点");
+    println!("  mangosteen device remove dev-192.168.1.100:22");
+    println!("  mangosteen device test dev-192.168.1.100:22");
+    println!();
+    println!("更多信息：docs/USAGE.md");
 }
 
 #[cfg(test)]

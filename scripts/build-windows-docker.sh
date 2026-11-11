@@ -40,8 +40,15 @@ info "步骤 1/3：在 Docker 容器中编译..."
 docker run --rm \
   -v "$(pwd)":/project \
   -w /project \
-  rust:1.75 \
+  rust:latest \
   bash -c "
+    # 配置 Rust 国内镜像源（USTC）
+    mkdir -p ~/.cargo && \
+    echo '[source.crates-io]
+replace-with = 'ustc'
+[source.ustc]
+registry = \"sparse+https://mirrors.ustc.edu.cn/crates.io-index/\"
+' > ~/.cargo/config.toml && \
     apt-get update -qq && \
     apt-get install -y -qq mingw-w64 && \
     rustup target add x86_64-pc-windows-gnu && \
