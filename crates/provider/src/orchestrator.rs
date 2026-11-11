@@ -1251,10 +1251,21 @@ pub fn configure_existing_ssh_access(
 /// 之后 [`ensure_key_target`] 用该密码完成最后一次公钥安装，随后
 /// 一切连接自动切换为免密——用户全程无需手动输入密码。
 ///
-/// 重置登录密码为固定值 "1qaz@WSX"，并立即验证可用性。
+/// 重置登录密码为固定值 "1qaz@WSX"，等待生效后验证可用性。
 ///
 /// 所有云端实例均强制使用固定密码，确保 SSH 认证一致性。
-/// 重置密码后立即用密码登录测试一次，确保后续 SSH 认证可用。
+///
+/// ## 为什么重置后必须等待再验证
+///
+/// 厂商的 `ResetCompShareInstancePassword` 是异步操作：API 返回成功
+/// 只代表「重置指令已受理」，实例内部的 sshd 需要数秒才能真正加载
+/// 新密码（实测 3080Ti 实例上重置后立即验证会 Permission denied，
+/// v100S 上则偶尔成功——纯竞态）。重置后立即探测是**伪失败**：
+/// 密码本身没问题，只是还没生效。
+///
+/// 因此采用「等待 + 多轮重试」策略：先睡一个固定生效窗口，再按
+/// 间隔重试验证，任意一轮成功即认为密码可用。全部轮次失败才判定
+/// 为真正的认证问题。
 fn restore_login_credential(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
     instance: &mut Instance,
@@ -1272,28 +1283,55 @@ fn restore_login_credential(
                 instance.id
             );
             instance.network.ssh_password = Some(password.clone());
-            // 立即用密码登录测试，验证密码是否可用
+            // 重置指令已受理，等待 sshd 加载新密码（厂商异步生效窗口）
+            const SETTLE_SECS: u64 = 5;
+            const VERIFY_ROUNDS: u32 = 3;
+            const RETRY_INTERVAL_SECS: u64 = 3;
+            eprintln!(
+                "[cloud] 实例 {} 等待 {SETTLE_SECS}s 让新密码在 sshd 生效...",
+                instance.id
+            );
+            std::thread::sleep(Duration::from_secs(SETTLE_SECS));
+            // 多轮验证：任意一轮成功即认为密码可用
             if let Some(host) = instance.network.ssh_host.clone() {
                 let port = instance.network.ssh_port.unwrap_or(22);
                 let probe = mangosteen_device::remote::SshTarget {
                     host,
                     port,
                     user: "root".to_string(),
-                    password: Some(password),
+                    password: Some(password.clone()),
                     identity_file: None,
                 };
-                match mangosteen_device::remote::ssh_exec(&probe, "true", 5) {
-                    Ok(_) => {
-                        eprintln!("[cloud] ✓ 实例 {} 密码登录验证成功", instance.id);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[cloud] ⚠ 实例 {} 密码登录验证失败：{e}，可能厂商未立即生效新密码，\
-                             但后续隧道建立仍将尝试使用此密码",
-                            instance.id
-                        );
+                let mut verified = false;
+                for round in 1..=VERIFY_ROUNDS {
+                    match mangosteen_device::remote::ssh_exec(&probe, "true", 5) {
+                        Ok(_) => {
+                            eprintln!(
+                                "[cloud] ✓ 实例 {} 密码登录验证成功（第 {round} 轮）",
+                                instance.id
+                            );
+                            verified = true;
+                            break;
+                        }
+                        Err(e) => {
+                            if round < VERIFY_ROUNDS {
+                                eprintln!(
+                                    "[cloud] ⚠ 实例 {} 密码登录第 {round}/{VERIFY_ROUNDS} 轮失败：{e}，\
+                                     {RETRY_INTERVAL_SECS}s 后重试（新密码可能尚未生效）",
+                                    instance.id
+                                );
+                                std::thread::sleep(Duration::from_secs(RETRY_INTERVAL_SECS));
+                            } else {
+                                eprintln!(
+                                    "[cloud] ⚠ 实例 {} 密码登录验证失败（共 {VERIFY_ROUNDS} 轮）：{e}，\
+                                     可能厂商未生效新密码，但后续隧道建立仍将尝试使用此密码",
+                                    instance.id
+                                );
+                            }
+                        }
                     }
                 }
+                let _ = verified;
             } else {
                 eprintln!(
                     "[cloud] ⚠ 实例 {} 没有 SSH 主机地址，无法进行密码登录验证",

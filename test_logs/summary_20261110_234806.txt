@@ -1,0 +1,22 @@
+========================================
+CLI 指令测试汇总报告
+========================================
+总执行次数: 4
+成功次数: 4
+失败次数: 0
+成功率: 100.00%
+
+各指令执行结果:
+  help: 成功 3 次, 失败 0 次
+  version: 成功 3 次, 失败 0 次
+  status: 成功 3 次, 失败 0 次
+  config show: 成功 0 次, 失败 0 次
+  config validate: 成功 0 次, 失败 0 次
+  device list: 成功 0 次, 失败 0 次
+  doctor: 成功 3 次, 失败 0 次
+  cloud instances list: 成功 0 次, 失败 0 次
+  cloud pick --max-price 1.5: 成功 0 次, 失败 0 次
+  cloud cheapest --min-vram 1: 成功 0 次, 失败 0 次
+
+详细日志: /Users/zhuzhichao/Documents/mangosteen/test_logs/test_20261110_234806.log
+========================================

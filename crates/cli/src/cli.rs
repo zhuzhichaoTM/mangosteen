@@ -176,7 +176,7 @@ fn commands() -> &'static [(&'static str, &'static str)] {
         ("status", "查看网关与部署状态"),
         (
             "cloud",
-            "云端算力：instances / key",
+            "云端算力：instances / key / pick / cheapest",
         ),
         ("device", "自定义节点：list / add / remove / test"),
         (
@@ -278,51 +278,32 @@ fn print_help() {
         );
     }
     println!();
-    println!("{}", output::bold("常用示例"));
-    println!("  mangosteen deploy qwen2.5-7b --gpu-model 3080TI --watch    # 部署到云端，轮询进度");
-    println!("  mangosteen deploy qwen2.5-7b --device dev-001               # 指定自定义节点部署");
-    println!("  mangosteen deploy qwen2.5-7b --template default               # 指定配置模板");
-    println!("  mangosteen status                                             # 看部署状态");
-    println!("  mangosteen stop <部署ID> | --all --yes                        # 停止部署并释放资源");
-    println!("  mangosteen cloud instances --running                          # 查看运行中云端实例");
-    println!("  mangosteen device list                                        # 查看自定义节点");
-    println!("  mangosteen ui start                                           # 后台启动 UI/API 网关");
-    println!("  mangosteen cloud key compshare --access-key <AK> --secret-key <SK>  # 配置优云智算密钥");
-    println!("  mangosteen doctor                                             # 环境自检");
-    println!();
-    println!("{}", output::bold("各命令用法"));
-    println!("  deploy <模型> [--gpu-model <型号>] [--device <节点ID>] [--template <槽位>] [--watch] [--async]");
-    println!("    部署模型到云端。--gpu-model 指定 GPU 型号（如 3080TI、P40）；");
-    println!("    --device 指定自定义节点；--template 选择配置模板；--watch 轮询进度；--async 异步返回");
-    println!();
-    println!("  stop <部署ID> | --all [--yes]");
-    println!("    停止指定部署并释放资源。--all 停止全部部署；--yes 免确认直接执行");
-    println!();
-    println!("  status [--json]");
-    println!("    查看网关与部署状态。--json 以 JSON 输出");
-    println!();
-    println!("  cloud instances [list|start|stop|destroy]        # 云端实例管理");
-    println!("    cloud instances list                           # 列出云端实例（含已关机）");
-    println!("    cloud instances start <厂商>/<实例ID>            # 启动实例");
-    println!("    cloud instances stop <厂商>/<实例ID>             # 关闭实例");
-    println!("    cloud instances destroy <厂商>/<实例ID> --yes    # 删除实例（销毁实例与磁盘）");
-    println!("  cloud key <厂商> [--secret <密钥>] [--public-key <公钥>] [--enable|--disable]  # 管理云厂商密钥");
-    println!();
-    println!("  device list                                   # 列出自定义节点");
-    println!("  device add <主机> <端口> --user <用户> [--workdir <目录>] [--password <密码>] [--name <名称>]  # 新增自定义节点");
-    println!("  device remove <ID>                            # 删除自定义节点");
-    println!("  device test <ID>                              # 测试节点 SSH 连通性");
-    println!();
-    println!("  config show | init | path | validate | reset-templates  # 配置管理");
-    println!("  ui [start|stop|restart|status] [--port <端口>] [--no-open]   # Web UI 控制台生命周期");
-    println!("  doctor                                        # 环境自检（云服务商、配置、权限）");
-    println!();
     println!("{}", output::bold("全局选项"));
-    println!("  --config <path>   指定配置文件");
-    println!("  --json            以 JSON 输出（便于脚本处理）");
-    println!("  --quiet           抑制 banner 与进度提示");
-    println!("  --help, -h        显示帮助");
-    println!("  --version, -V     显示版本");
+    println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 18);
+    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 18);
+    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 18);
+    println!("  {:<w$}  {}", "--help, -h", "显示帮助", w = 18);
+    println!("  {:<w$}  {}", "--version, -V", "显示版本", w = 18);
+    println!();
+    println!("{}", output::bold("主要命令"));
+    println!("  {:<w$}  {}", "deploy", "部署模型到云端", w = 16);
+    println!("  {:<w$}  {}", "stop", "停止部署并释放云端资源", w = 16);
+    println!("  {:<w$}  {}", "status", "查看网关与部署状态", w = 16);
+    println!("  {:<w$}  {}", "cloud", "云端算力（instances/key/pick/cheapest）", w = 16);
+    println!("  {:<w$}  {}", "device", "自定义节点（list/add/remove/test）", w = 16);
+    println!("  {:<w$}  {}", "config", "配置管理（show/init/path/validate）", w = 16);
+    println!("  {:<w$}  {}", "ui", "Web UI 控制台生命周期", w = 16);
+    println!("  {:<w$}  {}", "doctor", "环境自检（云服务商、配置、权限）", w = 16);
+    println!();
+    println!("{}", output::bold("cloud 子命令"));
+    println!("  {:<w$}  {}", "instances", "列出/启动/停止/删除云端实例", w = 18);
+    println!("  {:<w$}  {}", "key", "管理云厂商密钥（公钥/私钥）", w = 18);
+    println!("  {:<w$}  {}", "pick", "智能选点（四维打分）", w = 18);
+    println!("  {:<w$}  {}", "cheapest", "最便宜优先（纯价格序）", w = 18);
+    println!();
+    println!("{}", output::bold("更多信息"));
+    println!("  {:<w$}  {}", "详细文档", "docs/USAGE.md", w = 12);
+    println!("  {:<w$}  {}", "命令帮助", "mangosteen <命令> --help", w = 12);
 }
 
 #[cfg(test)]

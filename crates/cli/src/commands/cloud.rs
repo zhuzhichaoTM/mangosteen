@@ -10,8 +10,11 @@
 //! |--------|------|
 //! | `instances` | 列出云端实例（含已关机），支持 start/stop/destroy 子命令 |
 //! | `key` | 管理云厂商密钥 |
+//! | `pick` | 智能选点（四维打分） |
+//! | `cheapest` | 最便宜优先（纯价格序） |
 
 use mangosteen_core::MnResult;
+use mangosteen_core::policy::SelectionConstraints;
 
 use crate::cli::Args;
 use crate::commands::{build_gateway, reject_unknown_options};
