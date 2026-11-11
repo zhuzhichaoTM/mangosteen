@@ -153,6 +153,9 @@ impl Orchestrator {
             // 云端：只信台账状态（真实探测需要网络往返，放到推理时兜底）
             let ready = r.status == DeploymentStatus::Ready;
 
+            // 远端推理端口（云端实例上的 llama-server 监听端口）
+            let remote_port = r.plan.cloud.as_ref().map(|c| c.engine_port);
+
             out.push(ActiveDeployment {
                 id: id.clone(),
                 // 用完整模型 ID（`name:quant`）而不是裸模型名：
@@ -166,6 +169,7 @@ impl Orchestrator {
                 origin: r.plan.origin.clone(),
                 status: r.status,
                 port: r.plan.local_access_port(),
+                remote_port,
                 ready,
             });
         }

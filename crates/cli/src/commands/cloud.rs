@@ -64,11 +64,11 @@ pub fn run(args: Args) -> MnResult<i32> {
 
 /// `cloud instances` - 列出云端实例（含已关机），支持 start/stop/destroy 子命令。
 fn instances(args: Args) -> MnResult<i32> {
-    if args.has("help") {
+    let sub = args.pos(2).unwrap_or("").to_string();
+    if args.has("help") && sub.is_empty() {
         print_cloud_instances_help();
         return Ok(0);
     }
-    let sub = args.pos(2).unwrap_or("list").to_string();
     match sub.as_str() {
         "list" | "ls" => {
             if args.has("help") {
@@ -108,6 +108,10 @@ fn instances(args: Args) -> MnResult<i32> {
 ///
 /// 与 UI 设置页「云端节点」列表功能一致。
 fn instances_list(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_instances_list_help();
+        return Ok(0);
+    }
     let gw = build_gateway(&args)?;
     let instances = gw.cloud_instance_admin_briefs();
 
@@ -185,6 +189,10 @@ fn instances_list(args: Args) -> MnResult<i32> {
 ///
 /// 与 UI 设置页「云端节点」开机按钮功能一致。
 fn instances_start(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_instances_start_help();
+        return Ok(0);
+    }
     let instance_ref = args.pos(3).ok_or_else(|| {
         mangosteen_core::MnError::bad_request(
             "缺少实例 ID。用法：mangosteen cloud instances start <厂商>/<实例ID>",
@@ -213,6 +221,10 @@ fn instances_start(args: Args) -> MnResult<i32> {
 ///
 /// 与 UI 设置页「云端节点」关机按钮功能一致。
 fn instances_stop(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_instances_stop_help();
+        return Ok(0);
+    }
     let instance_ref = args.pos(3).ok_or_else(|| {
         mangosteen_core::MnError::bad_request(
             "缺少实例 ID。用法：mangosteen cloud instances stop <厂商>/<实例ID>",
@@ -242,6 +254,10 @@ fn instances_stop(args: Args) -> MnResult<i32> {
 /// 与 UI 设置页「云端节点」删除按钮功能一致。
 /// 销毁实例与磁盘，不可恢复。
 fn instances_destroy(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_instances_destroy_help();
+        return Ok(0);
+    }
     let instance_ref = args.pos(3).ok_or_else(|| {
         mangosteen_core::MnError::bad_request(
             "缺少实例 ID。用法：mangosteen cloud instances destroy <厂商>/<实例ID>",
@@ -283,6 +299,10 @@ fn instances_destroy(args: Args) -> MnResult<i32> {
 
 /// `cloud key <厂商>` - 管理云厂商密钥。
 fn key(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_key_help();
+        return Ok(0);
+    }
     let provider = args.pos(2).ok_or_else(|| {
         mangosteen_core::MnError::bad_request(
             "缺少厂商名称。用法：mangosteen cloud key <厂商> [--secret <密钥>] [--public-key <公钥>] [--enable|--disable]",
@@ -351,6 +371,10 @@ fn key(args: Args) -> MnResult<i32> {
 /// 查询可用规格，按配置的权重策略打分排序，显示最优候选。
 /// 不创建任何资源，不产生费用。
 fn pick(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_pick_help();
+        return Ok(0);
+    }
     let gw = build_gateway(&args)?;
 
     // 解析约束
@@ -441,6 +465,10 @@ fn pick(args: Args) -> MnResult<i32> {
 /// 查询可用规格，按价格升序排序，显示最便宜的候选。
 /// 不创建任何资源，不产生费用。
 fn cheapest(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_cheapest_help();
+        return Ok(0);
+    }
     let gw = build_gateway(&args)?;
 
     // 解析约束
@@ -522,6 +550,10 @@ fn cheapest(args: Args) -> MnResult<i32> {
 ///
 /// 与 UI 设置页「云服务商」列表功能一致。
 fn providers(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        print_cloud_providers_help();
+        return Ok(0);
+    }
     let gw = build_gateway(&args)?;
     let cfg = gw.config();
 

@@ -35,6 +35,7 @@ pub fn run(args: Args) -> MnResult<i32> {
                 "origin": a.origin.label(),
                 "status": a.status.as_str(),
                 "port": a.port,
+                "remote_port": a.remote_port,
                 "ready": a.ready,
             })).collect::<Vec<_>>(),
         });
@@ -102,12 +103,13 @@ fn print_active(active: &[mangosteen_gateway::ActiveDeployment]) {
                 a.origin.label(),
                 a.status.as_str().to_string(),
                 a.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                a.remote_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
                 if a.ready { "就绪" } else { "未就绪" }.to_string(),
             ]
         })
         .collect();
     output::print_table(
-        &["部署 ID", "模型", "算力来源", "状态", "端口", "健康"],
+        &["部署 ID", "模型", "算力来源", "状态", "本地端口", "远端端口", "健康"],
         &rows,
     );
 }

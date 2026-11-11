@@ -95,8 +95,10 @@ pub struct ActiveDeployment {
     pub origin: mangosteen_core::plan::ComputeOrigin,
     /// 状态
     pub status: mangosteen_base::state::DeploymentStatus,
-    /// 访问端口
+    /// 本地访问端口（网关映射端口）
     pub port: Option<u16>,
+    /// 远端推理端口（云端实例上的 llama-server 端口）
+    pub remote_port: Option<u16>,
     /// 是否就绪
     pub ready: bool,
 }
