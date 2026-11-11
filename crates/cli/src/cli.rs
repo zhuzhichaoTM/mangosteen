@@ -289,17 +289,65 @@ fn print_help() {
     println!("  {:<w$}  {}", "deploy", "部署模型到云端", w = 16);
     println!("  {:<w$}  {}", "stop", "停止部署并释放云端资源", w = 16);
     println!("  {:<w$}  {}", "status", "查看网关与部署状态", w = 16);
-    println!("  {:<w$}  {}", "cloud", "云端算力（instances/key/pick/cheapest）", w = 16);
-    println!("  {:<w$}  {}", "device", "自定义节点（list/add/remove/test）", w = 16);
-    println!("  {:<w$}  {}", "config", "配置管理（show/init/path/validate）", w = 16);
+    println!(
+        "  {:<w$}  {}",
+        "cloud",
+        "云端算力（instances/key/pick/cheapest/providers）",
+        w = 16
+    );
+    println!(
+        "  {:<w$}  {}",
+        "device",
+        "自定义节点（list/add/remove/test）",
+        w = 16
+    );
+    println!(
+        "  {:<w$}  {}",
+        "config",
+        "配置管理（show/init/path/validate/reset-templates）",
+        w = 16
+    );
     println!("  {:<w$}  {}", "ui", "Web UI 控制台生命周期", w = 16);
     println!("  {:<w$}  {}", "doctor", "环境自检（云服务商、配置、权限）", w = 16);
     println!();
     println!("{}", output::bold("cloud 子命令"));
-    println!("  {:<w$}  {}", "instances", "列出/启动/停止/删除云端实例", w = 18);
-    println!("  {:<w$}  {}", "key", "管理云厂商密钥（公钥/私钥）", w = 18);
+    println!(
+        "  {:<w$}  {}",
+        "instances",
+        "列出/启动/停止/删除云端实例",
+        w = 18
+    );
+    println!(
+        "  {:<w$}  {}",
+        "key",
+        "管理云厂商密钥（公钥/私钥/启用/禁用）",
+        w = 18
+    );
     println!("  {:<w$}  {}", "pick", "智能选点（四维打分）", w = 18);
     println!("  {:<w$}  {}", "cheapest", "最便宜优先（纯价格序）", w = 18);
+    println!("  {:<w$}  {}", "providers", "列出云服务商及其启用状态", w = 18);
+    println!();
+    println!("{}", output::bold("config 子命令"));
+    println!(
+        "  {:<w$}  {}",
+        "show",
+        "显示当前完整配置",
+        w = 18
+    );
+    println!("  {:<w$}  {}", "init", "初始化默认配置文件", w = 18);
+    println!("  {:<w$}  {}", "path", "显示配置文件所在路径", w = 18);
+    println!(
+        "  {:<w$}  {}",
+        "validate",
+        "验证配置项合法性（如 image_id、region、zone 等）",
+        w = 18
+    );
+    println!(
+        "  {:<w$}  {}",
+        "reset-templates",
+        "重置内置部署模板为默认值",
+        w = 18
+    );
     println!();
     println!("{}", output::bold("更多信息"));
     println!("  {:<w$}  {}", "详细文档", "docs/USAGE.md", w = 12);

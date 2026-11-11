@@ -12,6 +12,7 @@
 //! | `key` | 管理云厂商密钥 |
 //! | `pick` | 智能选点（四维打分） |
 //! | `cheapest` | 最便宜优先（纯价格序） |
+//! | `providers` | 列出云服务商及其启用状态 |
 
 use mangosteen_core::MnResult;
 use mangosteen_core::policy::SelectionConstraints;
@@ -49,8 +50,9 @@ pub fn run(args: Args) -> MnResult<i32> {
         "key" => key(args),
         "pick" => pick(args),
         "cheapest" => cheapest(args),
+        "providers" => providers(args),
         other => Err(mangosteen_core::MnError::bad_request(format!(
-            "未知子命令 `cloud {other}`。可用：instances / key / pick / cheapest"
+            "未知子命令 `cloud {other}`。可用：instances / key / pick / cheapest / providers"
         ))),
     }
 }
@@ -478,6 +480,88 @@ fn cheapest(args: Args) -> MnResult<i32> {
     output::print_table(
         &["服务商", "GPU型号", "数量", "显存", "价格", "地域"],
         &rows,
+    );
+
+    Ok(0)
+}
+
+/// `cloud providers` - 列出云服务商及其启用状态。
+///
+/// 与 UI 设置页「云服务商」列表功能一致。
+fn providers(args: Args) -> MnResult<i32> {
+    let gw = build_gateway(&args)?;
+    let cfg = gw.config();
+
+    let providers: Vec<_> = cfg
+        .providers
+        .iter()
+        .map(|(name, p)| {
+            (
+                name.clone(),
+                p.display_name.clone().unwrap_or_else(|| name.clone()),
+                p.driver.clone(),
+                p.enabled,
+                p.priority,
+            )
+        })
+        .collect();
+
+    if args.has("json") {
+        let arr: Vec<serde_json::Value> = providers
+            .iter()
+            .map(|(name, display_name, driver, enabled, priority)| {
+                serde_json::json!({
+                    "name": name,
+                    "display_name": display_name,
+                    "driver": driver,
+                    "enabled": enabled,
+                    "priority": priority,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"providers": arr}))
+                .unwrap_or_default()
+        );
+        return Ok(0);
+    }
+
+    if providers.is_empty() {
+        println!("{}", output::dim("（未配置任何云服务商）"));
+        println!();
+        println!(
+            "  {}",
+            output::dim("在 config.toml 中配置 [providers.<name>] 后即可使用")
+        );
+        return Ok(0);
+    }
+
+    let rows: Vec<Vec<String>> = providers
+        .iter()
+        .map(|(name, display_name, driver, enabled, priority)| {
+            vec![
+                name.clone(),
+                display_name.clone(),
+                driver.clone(),
+                if *enabled { "启用".to_string() } else { "禁用".to_string() },
+                format!("{:.1}", priority),
+            ]
+        })
+        .collect();
+
+    output::print_table(
+        &["名称", "显示名", "驱动", "状态", "权重"],
+        &rows,
+    );
+    println!();
+    println!(
+        "  {}",
+        output::dim("用 `mangosteen cloud key <厂商> --enable|--disable` 启用/禁用服务商")
+    );
+    println!(
+        "  {}",
+        output::dim("用 `mangosteen cloud key <厂商> --secret <密钥> --public-key <公钥>` 更新密钥")
     );
 
     Ok(0)

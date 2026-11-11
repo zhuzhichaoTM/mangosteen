@@ -1263,9 +1263,12 @@ pub fn configure_existing_ssh_access(
 /// v100S 上则偶尔成功——纯竞态）。重置后立即探测是**伪失败**：
 /// 密码本身没问题，只是还没生效。
 ///
-/// 因此采用「等待 + 多轮重试」策略：先睡一个固定生效窗口，再按
-/// 间隔重试验证，任意一轮成功即认为密码可用。全部轮次失败才判定
-/// 为真正的认证问题。
+/// ## 为什么验证失败后需要重启节点
+///
+/// 某些厂商实例在重置密码后，sshd 虽然启动但仍无法通过密码认证，
+/// 只有重启实例后新密码才会真正生效（用户反馈：重置密码后直接 SSH
+/// 无回应，重启节点后即可正常登录）。因此在验证失败时，会执行
+/// 停机 → 开机的重启流程，再次验证密码。
 fn restore_login_credential(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
     instance: &mut Instance,
@@ -1283,58 +1286,145 @@ fn restore_login_credential(
                 instance.id
             );
             instance.network.ssh_password = Some(password.clone());
+
             // 重置指令已受理，等待 sshd 加载新密码（厂商异步生效窗口）
             const SETTLE_SECS: u64 = 5;
             const VERIFY_ROUNDS: u32 = 3;
             const RETRY_INTERVAL_SECS: u64 = 3;
+
             eprintln!(
                 "[cloud] 实例 {} 等待 {SETTLE_SECS}s 让新密码在 sshd 生效...",
                 instance.id
             );
             std::thread::sleep(Duration::from_secs(SETTLE_SECS));
+
             // 多轮验证：任意一轮成功即认为密码可用
+            let verified = verify_ssh_password(driver, instance, &password, VERIFY_ROUNDS, RETRY_INTERVAL_SECS);
+
+            if verified {
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 密码登录验证成功",
+                    instance.id
+                );
+                return;
+            }
+
+            // 多轮验证全部失败，尝试重启节点（厂商 sshd 可能未正确加载新密码，
+            // 重启后新密码会生效）
+            eprintln!(
+                "[cloud] 实例 {} 密码验证失败，尝试重启节点后重新验证...",
+                instance.id
+            );
+
+            // 第一步：停机
+            match driver.stop(&instance.id) {
+                Ok(updated) => {
+                    *instance = updated;
+                    eprintln!(
+                        "[cloud] ✓ 实例 {} 已发送停机指令",
+                        instance.id
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[cloud] ⚠ 实例 {} 停机失败：{e}，将尝试继续使用固定密码",
+                        instance.id
+                    );
+                }
+            }
+
+            // 等待实例进入 Stopped 状态
             if let Some(host) = instance.network.ssh_host.clone() {
                 let port = instance.network.ssh_port.unwrap_or(22);
-                let probe = mangosteen_device::remote::SshTarget {
-                    host,
-                    port,
-                    user: "root".to_string(),
-                    password: Some(password.clone()),
-                    identity_file: None,
-                };
-                let mut verified = false;
-                for round in 1..=VERIFY_ROUNDS {
-                    match mangosteen_device::remote::ssh_exec(&probe, "true", 5) {
-                        Ok(_) => {
-                            eprintln!(
-                                "[cloud] ✓ 实例 {} 密码登录验证成功（第 {round} 轮）",
-                                instance.id
-                            );
-                            verified = true;
-                            break;
-                        }
-                        Err(e) => {
-                            if round < VERIFY_ROUNDS {
+                let deadline = Instant::now() + Duration::from_secs(60);
+                loop {
+                    match driver.describe(&instance.id) {
+                        Ok(inst) => {
+                            *instance = inst;
+                            if instance.state == InstanceState::Stopped {
                                 eprintln!(
-                                    "[cloud] ⚠ 实例 {} 密码登录第 {round}/{VERIFY_ROUNDS} 轮失败：{e}，\
-                                     {RETRY_INTERVAL_SECS}s 后重试（新密码可能尚未生效）",
+                                    "[cloud] ✓ 实例 {} 已进入 Stopped 状态",
                                     instance.id
                                 );
-                                std::thread::sleep(Duration::from_secs(RETRY_INTERVAL_SECS));
-                            } else {
-                                eprintln!(
-                                    "[cloud] ⚠ 实例 {} 密码登录验证失败（共 {VERIFY_ROUNDS} 轮）：{e}，\
-                                     可能厂商未生效新密码，但后续隧道建立仍将尝试使用此密码",
-                                    instance.id
-                                );
+                                break;
                             }
                         }
+                        Err(e) => {
+                            eprintln!(
+                                "[cloud] ⚠ 查询实例状态失败：{e}，继续等待..."
+                            );
+                        }
                     }
+                    if Instant::now() >= deadline {
+                        eprintln!(
+                            "[cloud] ⚠ 等待实例停机超时，将尝试直接开机"
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(3));
                 }
-                let _ = verified;
+            }
+
+            // 第二步：开机
+            match driver.start(&instance.id) {
+                Ok(updated) => {
+                    *instance = updated;
+                    eprintln!(
+                        "[cloud] ✓ 实例 {} 已发送开机指令",
+                        instance.id
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[cloud] ⚠ 实例 {} 开机失败：{e}，将尝试继续使用固定密码",
+                        instance.id
+                    );
+                }
+            }
+
+            // 等待实例进入 Running 状态
+            if let Some(host) = instance.network.ssh_host.clone() {
+                let port = instance.network.ssh_port.unwrap_or(22);
+                let deadline = Instant::now() + Duration::from_secs(120);
+                loop {
+                    match driver.describe(&instance.id) {
+                        Ok(inst) => {
+                            *instance = inst;
+                            if instance.state == InstanceState::Running {
+                                eprintln!(
+                                    "[cloud] ✓ 实例 {} 已进入 Running 状态",
+                                    instance.id
+                                );
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[cloud] ⚠ 查询实例状态失败：{e}，继续等待..."
+                            );
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        eprintln!(
+                            "[cloud] ⚠ 等待实例启动超时，将尝试继续使用固定密码"
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            }
+
+            // 重启后再次验证 SSH 密码
+            let verified_after_restart = verify_ssh_password(driver, instance, &password, VERIFY_ROUNDS, RETRY_INTERVAL_SECS);
+
+            if verified_after_restart {
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 重启后密码登录验证成功",
+                    instance.id
+                );
             } else {
                 eprintln!(
-                    "[cloud] ⚠ 实例 {} 没有 SSH 主机地址，无法进行密码登录验证",
+                    "[cloud] ⚠ 实例 {} 重启后密码登录仍失败，但后续隧道建立仍将尝试使用此密码",
                     instance.id
                 );
             }
@@ -1348,6 +1438,61 @@ fn restore_login_credential(
             instance.network.ssh_password = Some(password.clone());
         }
     }
+}
+
+/// 多轮验证 SSH 密码登录是否可用。
+///
+/// 返回 true 表示任意一轮验证成功，false 表示全部失败。
+fn verify_ssh_password(
+    driver: &dyn mangosteen_core::cloud::ProviderDriver,
+    instance: &Instance,
+    password: &str,
+    rounds: u32,
+    retry_interval_secs: u64,
+) -> bool {
+    let Some(host) = instance.network.ssh_host.clone() else {
+        eprintln!(
+            "[cloud] 实例 {} 没有 SSH 主机地址，无法进行密码登录验证",
+            instance.id
+        );
+        return false;
+    };
+    let port = instance.network.ssh_port.unwrap_or(22);
+    let probe = mangosteen_device::remote::SshTarget {
+        host,
+        port,
+        user: "root".to_string(),
+        password: Some(password.to_string()),
+        identity_file: None,
+    };
+
+    for round in 1..=rounds {
+        match mangosteen_device::remote::ssh_exec(&probe, "true", 5) {
+            Ok(_) => {
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 密码登录验证成功（第 {round} 轮）",
+                    instance.id
+                );
+                return true;
+            }
+            Err(e) => {
+                if round < rounds {
+                    eprintln!(
+                        "[cloud] ⚠ 实例 {} 密码登录第 {round}/{rounds} 轮失败：{e}，\
+                         {retry_interval_secs}s 后重试（新密码可能尚未生效）",
+                        instance.id
+                    );
+                    std::thread::sleep(Duration::from_secs(retry_interval_secs));
+                } else {
+                    eprintln!(
+                        "[cloud] ⚠ 实例 {} 密码登录验证失败（共 {rounds} 轮）：{e}",
+                        instance.id
+                    );
+                }
+            }
+        }
+    }
+    false
 }
 
 /// SSH 快速探活失败时**强制重启实例**（伪 Running 的唯一有效处置）。

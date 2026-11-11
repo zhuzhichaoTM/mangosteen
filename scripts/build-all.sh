@@ -184,29 +184,21 @@ build_macos() {
   package_target "x86_64-apple-darwin"
 }
 
-# 构建 Windows x86_64（交叉编译，使用 GNU 工具链）
+# 构建 Windows x86_64（Docker 交叉编译）
 build_windows() {
-  info "==================== 构建 Windows x86_64 (GNU) ===================="
-  local target="x86_64-pc-windows-gnu"
-  ensure_target "$target"
+  info "==================== 构建 Windows x86_64 ===================="
+  info "使用 Docker 容器进行交叉编译..."
 
-  # 检查交叉编译工具链
-  if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-    warn "未找到 MinGW 交叉编译工具链"
-    info "跳过 Windows 构建"
-    info ""
-    info "如需构建 Windows 版本，请先安装 MinGW："
-    info "  brew install mingw-w64"
-    info ""
-    info "或者使用 GitHub Actions 在 Windows runner 上构建"
-    return 0
+  if ! docker ps &>/dev/null; then
+    fail "Docker 未运行，请先启动 Docker Desktop"
   fi
 
-  # 设置链接器
-  export CC_x86_64_pc_windows_gnu="x86_64-w64-mingw32-gcc"
-  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="x86_64-w64-mingw32-gcc"
-
-  package_target "$target"
+  # 调用 Docker 构建脚本
+  if [ -f "${SCRIPT_DIR}/build-windows-docker.sh" ]; then
+    bash "${SCRIPT_DIR}/build-windows-docker.sh"
+  else
+    fail "找不到 Docker 构建脚本：${SCRIPT_DIR}/build-windows-docker.sh"
+  fi
 }
 
 # 主函数
