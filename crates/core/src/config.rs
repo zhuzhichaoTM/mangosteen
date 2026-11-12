@@ -1107,10 +1107,24 @@ impl Config {
             },
         );
 
-        // 模型配置模板不写入内置示例：由 GatewayBuilder::build 的
-        // seed_builtin_templates 在首次启动时幂等补写（只补缺失槽位，
-        // 不覆盖用户已改内容），避免 config init 生成的文件与
-        // 网关启动后的实际配置出现两份模板漂移。
+        // 内置模型配置模板：config init 直接生成，部署页下拉框开箱可用。
+        // 与 GatewayBuilder::build 的 seed_builtin_templates 同一真源
+        // （BUILTIN_TEMPLATES），seed 只补缺失槽位、不覆盖用户已改内容，
+        // 两边不会产生漂移。
+        let mut model_whitelist: BTreeMap<String, WhitelistedModel> = BTreeMap::new();
+        for (model, slot, display, text) in crate::template::BUILTIN_TEMPLATES {
+            let entry = model_whitelist
+                .entry((*model).to_string())
+                .or_insert_with(|| WhitelistedModel {
+                    display_name: (*display).to_string(),
+                    source_spec: String::new(),
+                    template: (*slot).to_string(),
+                    templates: Default::default(),
+                });
+            entry
+                .templates
+                .insert((*slot).to_string(), (*text).to_string());
+        }
 
         Self {
             config_version: 1,
@@ -1125,7 +1139,7 @@ impl Config {
                 default_source: default_model_source(),
             },
             providers,
-            model_whitelist: BTreeMap::new(),
+            model_whitelist,
             model_sources: BTreeMap::new(),
             remote_devices: Vec::new(),
             remote_inference: None,
