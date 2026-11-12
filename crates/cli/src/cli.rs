@@ -93,6 +93,10 @@ const BOOLEAN_FLAGS: &[&str] = &[
     // 不加进这里的话 `--create --yes` 会把 `--yes` 吃成 create 的值，
     // 表现是「明明加了 --create 却只查询不创建」，且不报错——很难查。
     "create",
+    // `cloud key <厂商> --enable / --disable`：开关语义。
+    // 不加进这里的话会被当成带值选项，报「--enable 缺少值」。
+    "enable",
+    "disable",
     // 节点选择相关的布尔开关
     "interactive",
     "running",

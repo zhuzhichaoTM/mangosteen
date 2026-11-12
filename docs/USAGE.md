@@ -468,6 +468,10 @@ mangosteen cloud instances <子命令> [选项]
 
 管理云厂商的 API 密钥。
 
+> **厂商选择说明**：`compshare`（优云智算）是当前唯一已验证支持的云服务商（专用 RPC 驱动）。
+> `ucloud`/`aliyun`/`autodl` 为占位服务商，无内置 profile，配置密钥后驱动加载仍会被跳过，
+> 请勿向它们写入密钥。
+
 ```bash
 mangosteen cloud key <厂商> [选项]
 ```
@@ -476,7 +480,7 @@ mangosteen cloud key <厂商> [选项]
 
 | 参数 | 说明 |
 |------|------|
-| `<厂商>` | 云服务商名称（如 compshare、aliyun、autodl） |
+| `<厂商>` | 云服务商名称（**使用 compshare**；aliyun/autodl/ucloud 为占位） |
 | `--secret <密钥>` | 更新厂商私钥（Secret Key） |
 | `--public-key <公钥>` | 更新厂商公钥（AccessKey ID） |
 | `--enable` | 启用该厂商 |

@@ -72,7 +72,27 @@ mangosteen config path
 
 ## 第 3 步：配置云服务商（优云智算 compshare）
 
-云端部署需要一个云 GPU 服务商。以**优云智算 compshare** 为例：
+云端部署需要一个云 GPU 服务商。
+
+### 云服务商支持状态（重要）
+
+| 配置名 | 显示名 | 驱动 | 状态 |
+|--------|--------|------|------|
+| **compshare** | 优云智算 | `compshare`（专用 RPC 驱动） | ✅ **唯一已验证支持，推荐使用** |
+| ucloud | 优云智算 | `ucloud`（通用 REST 占位） | ⚠️ 占位未实现：无内置 profile，启用后驱动加载会跳过 |
+| aliyun | 阿里云 | `aliyun`（通用 REST 占位） | ⚠️ 同上 |
+| autodl | AutoDL | `autodl`（通用 REST 占位） | ⚠️ 同上 |
+
+> **为什么密钥配到 ucloud 不生效？**
+>
+> 优云智算（Compshare）是 UCloud 旗下的 GPU 算力平台，代码中由**专用驱动** `compshare` 实现
+> （UCloud RPC 协议：单端点 + SHA1 签名，无法用通用 REST 字段映射表达）。
+> `ucloud`/`aliyun`/`autodl` 只是配置中的**占位服务商**——没有内置 REST profile，
+> 即使写入密钥并启用，驱动加载时也会因「既无内置 profile、配置里也没有 profile 段」被跳过。
+> **请始终使用 `compshare` 配置密钥。**
+>
+> 若从旧版配置升级（密钥配在 ucloud 段）：重新执行
+> `mangosteen cloud key compshare --secret ... --public-key ...` 即可。
 
 ### 3.1 准备 API 凭证
 

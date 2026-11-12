@@ -1089,6 +1089,28 @@ impl Config {
                 profile: None,
             },
         );
+        // 优云智算 compshare：UCloud RPC + SHA1 签名，专用驱动
+        // 密钥（secret / public_key）不写默认值，由 `mangosteen cloud key compshare`
+        // 命令写入；image_id 给默认公共镜像，config init 后只需写入密钥即可用。
+        providers.insert(
+            "compshare".to_string(),
+            ProviderConfig {
+                driver: "compshare".into(),
+                enabled: true,
+                display_name: Some("优云智算".into()),
+                secret: SecretRef::Env("COMPSHARE_PRIVATE_KEY".into()),
+                options: BTreeMap::from([
+                    ("region".to_string(), "cn-wlcb".to_string()),
+                    ("zone".to_string(), "cn-wlcb-01".to_string()),
+                    ("image_id".to_string(), "compshareImage-1k99rzcvdg6j".to_string()),
+                    ("charge_type".to_string(), "Postpay".to_string()),
+                    ("disk_type".to_string(), "CLOUD_SSD".to_string()),
+                    ("disk_size_gb".to_string(), "100".to_string()),
+                ]),
+                priority: 1.0,
+                profile: None,
+            },
+        );
         Self {
             config_version: 1,
             gateway: GatewayConfig::default(),
