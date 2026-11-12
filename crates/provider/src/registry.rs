@@ -63,11 +63,28 @@ where
         }
         match build_one(name, pc, &make_transport) {
             Ok(driver) => registry.register(driver),
-            Err(e) => skipped.push((name.clone(), e.to_string())),
+            Err(e) => skipped.push((name.clone(), user_facing_reason(&e))),
         }
     }
 
     RegistryBuild { registry, skipped }
+}
+
+/// 把内部错误转成「doctor / cloud providers 可直接展示」的用户向文案。
+///
+/// 原则：**只保留对用户有意义的信息**，剥离错误类型前缀（「配置项 `x`
+/// 非法：」「请求非法：」等）——这些前缀是排障用，展示给用户只会制造
+/// 噪音。comp share 缺密钥场景直接展示申请引导文案。
+fn user_facing_reason(e: &MnError) -> String {
+    match e {
+        // 配置类错误：reason 已是面向用户的完整描述（申请链接等），
+        // 去掉「配置项 `field` 非法：」前缀直接展示
+        MnError::Config { reason, .. } => reason.clone(),
+        // 请求类错误：去掉「请求非法：」前缀
+        MnError::BadRequest { reason } => reason.clone(),
+        // 其它错误：保留原 Display（已是用户向描述）
+        other => other.to_string(),
+    }
 }
 
 /// 构建单个驱动。
@@ -117,6 +134,10 @@ where
 }
 
 /// 解析私钥（`secret` 字段）。
+///
+/// 错误文案以「优云智算需要申请 API 公钥和私钥」开头、附注册链接；
+/// `build_registry_with` 的 `user_facing_reason` 会剥掉「配置项 `field`
+/// 非法：」前缀，doctor / cloud providers 展示时即为干净的申请引导。
 fn resolve_private_key(name: &str, pc: &ProviderConfig) -> MnResult<String> {
     if pc.secret.is_none() {
         return Err(MnError::config(
