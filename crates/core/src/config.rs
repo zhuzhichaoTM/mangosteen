@@ -1047,48 +1047,10 @@ impl Config {
 
     /// 内置示例配置。`mangosteen init` 输出此内容。
     pub fn sample() -> Self {
+        // 只内置 compshare（优云智算，UCloud RPC + SHA1 签名专用驱动）。
+        // 其余厂商按需添加：在 config.toml 写 [providers.<name>] 段 + profile 即可，
+        // 无需改代码（见 docs/DESIGN.md 多云抽象）。
         let mut providers = BTreeMap::new();
-        providers.insert(
-            "autodl".to_string(),
-            ProviderConfig {
-                driver: "autodl".into(),
-                enabled: true,
-                display_name: Some("AutoDL".into()),
-                secret: SecretRef::Env("AUTODL_API_TOKEN".into()),
-                options: BTreeMap::new(),
-                priority: 1.0,
-                profile: None,
-            },
-        );
-        providers.insert(
-            "ucloud".to_string(),
-            ProviderConfig {
-                driver: "ucloud".into(),
-                // 默认不启用：密钥必须由用户在 UI「设置 → 云平台密钥」里
-                // 输入（公钥 + 私钥两项），否则该厂商不可用但不影响其它厂商。
-                enabled: false,
-                display_name: Some("优云智算".into()),
-                secret: SecretRef::Env("UCLOUD_API_KEY".into()),
-                options: BTreeMap::new(),
-                priority: 1.0,
-                profile: None,
-            },
-        );
-        providers.insert(
-            "aliyun".to_string(),
-            ProviderConfig {
-                driver: "aliyun".into(),
-                enabled: false,
-                display_name: Some("阿里云".into()),
-                secret: SecretRef::Env("ALIBABA_CLOUD_ACCESS_KEY_SECRET".into()),
-                options: BTreeMap::from([(
-                    "access_key_id".to_string(),
-                    "LTAI********".to_string(),
-                )]),
-                priority: 1.0,
-                profile: None,
-            },
-        );
         // 优云智算 compshare：UCloud RPC + SHA1 签名，专用驱动
         // 密钥（secret / public_key）不写默认值，由 `mangosteen cloud key compshare`
         // 命令写入；image_id 给默认公共镜像，config init 后只需写入密钥即可用。
@@ -1111,6 +1073,25 @@ impl Config {
                 profile: None,
             },
         );
+
+        // 内置模型配置模板：config init 直接生成，部署页下拉框开箱可用。
+        // 与 GatewayBuilder::build 的 seed_builtin_templates 同一真源（幂等补写），
+        // 用户之后可在设置页修改；升级时只补缺失槽位，不覆盖已改内容。
+        let mut model_whitelist: BTreeMap<String, WhitelistedModel> = BTreeMap::new();
+        for (model, slot, display, text) in crate::template::BUILTIN_TEMPLATES {
+            let entry = model_whitelist
+                .entry((*model).to_string())
+                .or_insert_with(|| WhitelistedModel {
+                    display_name: (*display).to_string(),
+                    source_spec: String::new(),
+                    template: (*slot).to_string(),
+                    templates: Default::default(),
+                });
+            entry
+                .templates
+                .insert((*slot).to_string(), (*text).to_string());
+        }
+
         Self {
             config_version: 1,
             gateway: GatewayConfig::default(),
@@ -1124,7 +1105,7 @@ impl Config {
                 default_source: default_model_source(),
             },
             providers,
-            model_whitelist: BTreeMap::new(),
+            model_whitelist,
             model_sources: BTreeMap::new(),
             remote_devices: Vec::new(),
             remote_inference: None,
