@@ -1882,8 +1882,8 @@ fn download_single_url(
                 stage: "云端模型下载".to_string(),
             });
         }
-        // **优化**：轮询间隔从 2s 减少到 1s，加快完成检测
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        // 轮询间隔 10s：不需要频繁查询，避免无效查询增加 SSH 负担
+        std::thread::sleep(std::time::Duration::from_secs(10));
 
         // 一次连接取回三态；解析失败按 0 处理并计入连续失败。
         let (size, completed, is_dead) = match ssh_exec(target, &poll_cmd, 60) {
