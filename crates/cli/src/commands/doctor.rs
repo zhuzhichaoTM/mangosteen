@@ -16,6 +16,9 @@
 //! | 目录权限 | 配置/模型/日志目录可写 |
 //! | 端口 | 网关端口是否可绑定 |
 //! | 磁盘 | 模型库所在分区剩余空间 |
+//!
+//! 注：「加速卡」独立检查项已移除——纯云端部署场景本地无 GPU 属正常，
+//! 单独告警只制造噪音；硬件采集行已含加速卡信息。
 
 use mangosteen_core::MnResult;
 
@@ -159,31 +162,8 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
         });
     }
 
-    if probe.profile.has_accelerator() {
-        out.push(Check {
-            name: "加速卡".into(),
-            status: Status::Ok,
-            detail: format!(
-                "{}，可全量/部分卸载",
-                probe
-                    .profile
-                    .primary_accelerator()
-                    .map(|a| a.name.clone())
-                    .unwrap_or_default()
-            ),
-            hint: None,
-        });
-    } else {
-        out.push(Check {
-            name: "加速卡".into(),
-            status: Status::Warn,
-            detail: "未检测到可用加速卡，只能 CPU 推理".into(),
-            hint: Some(
-                "CPU 推理速度通常 <5 tok/s。如需 GPU 加速，检查驱动/显存；或配置云服务商以降级"
-                    .into(),
-            ),
-        });
-    }
+    // 加速卡检查已移除：纯云端部署场景本地无 GPU 属正常，
+    // 告警只制造噪音；硬件采集行已含加速卡信息。
 
     // ---- 2. 推理引擎 ----
     let (cfg, config_source) = match load_config(args) {
@@ -289,7 +269,6 @@ fn print_doctor_help() {
     println!();
     println!("{}", output::bold("检查项"));
     println!("  硬件采集   - CPU / 内存 / 加速卡采集结果");
-    println!("  加速卡     - 是否有可用 GPU 加速卡");
     println!("  推理引擎   - llama-server 是否就位、版本");
     println!("  配置       - 能否加载、是否合法、密钥是否齐全");
     println!("  云服务商   - 驱动加载情况");
@@ -323,7 +302,8 @@ mod tests {
         let checks = run_checks(&a);
         assert!(!checks.is_empty(), "至少应有硬件检查项");
         assert!(checks.iter().any(|c| c.name == "硬件采集"));
-        assert!(checks.iter().any(|c| c.name == "加速卡"));
+        // 加速卡检查已移除（纯云端部署场景无本地 GPU 属正常）
+        assert!(!checks.iter().any(|c| c.name == "加速卡"), "加速卡检查应已移除");
         // 不应再出现本地部署相关的检查项
         assert!(!checks.iter().any(|c| c.name == "本地优先策略"), "本地优先策略检查应已移除");
         assert!(!checks.iter().any(|c| c.name.contains("模型库")), "模型库相关检查应已移除");

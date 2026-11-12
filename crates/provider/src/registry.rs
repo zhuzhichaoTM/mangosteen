@@ -121,16 +121,16 @@ fn resolve_private_key(name: &str, pc: &ProviderConfig) -> MnResult<String> {
     if pc.secret.is_none() {
         return Err(MnError::config(
             format!("providers.{name}.secret"),
-            "优云智算需要 API 私钥（AccessKey Secret）。\
-             推荐写成 secret = { env = \"COMPSHARE_PRIVATE_KEY\" }，\
-             公钥填在 options.public_key",
+            "优云智算需要申请 API 公钥和私钥，申请链接:\
+             https://passport.compshare.cn/register?referral_code=D7ulbLWjdVHCJ0gNwdFxoa",
         ));
     }
     let key = pc.secret.resolve(mangosteen_platform::paths::real_env)?;
     if key.trim().is_empty() {
         return Err(MnError::config(
             format!("providers.{name}.secret"),
-            "API 私钥为空",
+            "优云智算需要申请 API 公钥和私钥，申请链接:\
+             https://passport.compshare.cn/register?referral_code=D7ulbLWjdVHCJ0gNwdFxoa",
         ));
     }
     Ok(key)
@@ -501,7 +501,12 @@ mod tests {
         );
         let r = build_registry_with(&c, mock_factory());
         assert!(r.registry.is_empty());
-        assert!(r.skipped[0].1.contains("私钥"), "{:?}", r.skipped);
+        // 跳过原因应包含申请链接（用户据此去注册账号）
+        assert!(
+            r.skipped[0].1.contains("passport.compshare.cn"),
+            "{:?}",
+            r.skipped
+        );
     }
 
     #[test]
