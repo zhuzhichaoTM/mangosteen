@@ -405,7 +405,7 @@ impl CloudOrchestrator {
 
         let (provider, instance) = self.create_first_running(
             &ordered,
-            Some(&format!("mangosteen-{}", plan.engine_port)),
+            Some(&plan.engine_port.to_string()),
             Some(plan.engine_port),
         )?;
 
@@ -798,6 +798,10 @@ impl CloudOrchestrator {
     /// 「停止服务」会把隧道一起关掉（机器都关了，留着只会反复重连），
     /// 所以「启动服务」必须能把它重新建起来。这里复用与供给流程完全相同的
     /// 隧道参数构造，避免两处逻辑漂移。
+    ///
+    /// **注意**：本地端口必须与 CLI 部署时分配的一致（plan.local_port），
+    /// 不能传远端端口（engine_port），否则 UI 重启后会覆盖台账中的 local_port，
+    /// 导致部署后的端口信息被篡改。
     pub fn establish_tunnel(
         &self,
         provider: &str,
@@ -806,7 +810,9 @@ impl CloudOrchestrator {
     ) -> MnResult<String> {
         let driver = self.registry.get(provider)?;
         let instance = driver.describe(instance_id)?;
-        let spec = self.tunnel_spec_for(&instance, plan, Some(plan.engine_port))?;
+        // 使用台账中已保存的 local_port 作为隧道本地端口，保持与 CLI 部署一致。
+        // 如果 local_port 为 0（未分配），则传 Some(0) 让 TunnelManager 在固定范围内分配。
+        let spec = self.tunnel_spec_for(&instance, plan, Some(plan.local_port))?;
         // 优先用 heal：隧道已存在且健康时直接复用，断了则原地重建。
         // 直接 establish 也能复用，但会绕过「按远端端口定位」的清理逻辑，
         // 残留的 ssh 进程会占着本地端口不放。
@@ -1898,7 +1904,7 @@ impl CloudOrchestrator {
 
         let (provider, mut instance) = self.create_first_running(
             &ordered,
-            Some(&format!("mangosteen-{}", plan.engine_port)),
+            Some(&plan.engine_port.to_string()),
             Some(plan.engine_port),
         )?;
         let driver = self.registry.get(&provider)?;
