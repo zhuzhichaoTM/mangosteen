@@ -16,6 +16,7 @@ pub mod config;
 pub mod deploy;
 pub mod device;
 pub mod doctor;
+pub mod models;
 pub mod status;
 pub mod stop;
 pub mod ui;

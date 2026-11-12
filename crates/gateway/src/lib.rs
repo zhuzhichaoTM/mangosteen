@@ -50,9 +50,11 @@ pub use gateway::{
     GatewayStatus,
 };
 pub use mangosteen_orchestration::progress;
-pub use mangosteen_orchestration::progress::{DeployStage, StageEvent, StageOutcome};
+pub use mangosteen_orchestration::progress::{noop_sink, DeployStage, StageEvent, StageOutcome};
 pub use mangosteen_orchestration::{assess, scheduler};
-pub use mangosteen_orchestration::{Assessor, DeploymentRequest, Evaluated};
+pub use mangosteen_orchestration::{
+    Assessor, DeploymentRequest, Evaluated, ModelDownloadSpec, PreparedDeployment,
+};
 pub use runprobe::{spawn_runtime_probe, RuntimeProbe};
 
 pub use mangosteen_orchestration::{Decision, Scheduler, SchedulerOutcome};

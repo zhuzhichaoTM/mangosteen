@@ -219,7 +219,7 @@ fn execute(args: Args) -> MnResult<i32> {
         },
     };
     req.config_template = Some(slot.clone());
-    req.config_template_text = Some(template_text);
+    req.config_template_text = Some(template_text.clone());
     // 模板 schema 按 UI 下拉框的模型 id（如 qwen2.5-0.5b）注册；
     // CLI 必须显式带上，否则后端会拿 GGUF 解析名（qwen2.5-0.5b-instruct）
     // 去查 schema 而报「暂不支持」。同时交给 template::resolve 选对正文。
@@ -229,12 +229,30 @@ fn execute(args: Args) -> MnResult<i32> {
         slot
     ));
 
+    // 解析模板正文，提取下载地址和模型文件名（用于远端直连下载）。
+    // 模板是部署的唯一真源：下哪个仓库的哪个文件、用什么参数启动，全部由它决定。
+    let template_download = parse_template_download(&model_key, &template_text);
+
     let spinner = output::Spinner::new(format!("正在部署 {model}"));
     let mut spinner = spinner;
     spinner.tick("评估资源并调度…");
 
     // 启动部署（同步调用，会阻塞直到部署进入 provisioning 状态或完成）
-    let result = gw.deploy(&req);
+    //
+    // 两种路径：
+    // 1. 模型在台账中（已 models add 或之前部署过）→ 直接 gw.deploy
+    // 2. 模型不在台账但有配置模板（如 qwen3.8-27b）→ 用模板信息做估算评估，
+    //    然后走 prepare + commit（与 UI 部署页一致）
+    let result = if gw.evaluate(&req).is_ok() {
+        // 路径 1：模型已在台账，直接部署
+        gw.deploy(&req)
+    } else if let Some(dl) = template_download {
+        // 路径 2：模型不在台账但有模板，走估算评估 → prepare → commit
+        deploy_from_template(&gw, &req, &model_key, &dl)
+    } else {
+        // 路径 3：模型不在台账且无模板，返回原始错误
+        gw.deploy(&req)
+    };
     spinner.finish();
 
     let plan = match result {
@@ -486,6 +504,94 @@ fn print_deploy_result(
         output::print_info(
             "云上实例正在计费，用完请执行 `mangosteen stop <部署ID>` 或 `mangosteen stop --all`",
         );
+    }
+}
+
+/// 从模板正文解析下载地址和模型文件名。
+///
+/// 模板格式示例：
+/// ```yaml
+/// source: https://hf-mirror.com/
+/// repository: unsloth/Qwen3.8-27B-GGUF
+/// model: qwen3.8-27b-q4_k_m.gguf
+/// ```
+///
+/// 返回 `(download_url, expected_bytes)`，`expected_bytes` 为 None 表示未知。
+fn parse_template_download(
+    _model_key: &str,
+    template_text: &str,
+) -> Option<mangosteen_gateway::ModelDownloadSpec> {
+    let source = template_text
+        .lines()
+        .find(|l| l.trim().starts_with("source:"))
+        .and_then(|l| l.trim().strip_prefix("source:"))
+        .map(|s| s.trim().to_string())?;
+    let repository = template_text
+        .lines()
+        .find(|l| l.trim().starts_with("repository:"))
+        .and_then(|l| l.trim().strip_prefix("repository:"))
+        .map(|s| s.trim().to_string());
+    let model_file = template_text
+        .lines()
+        .find(|l| l.trim().starts_with("model:"))
+        .and_then(|l| l.trim().strip_prefix("model:"))
+        .map(|s| s.trim().to_string())?;
+
+    // 拼接下载地址：source/repository/resolve/main/model_file
+    let url = if let Some(repo) = repository {
+        format!(
+            "{}/{}/resolve/main/{}",
+            source.trim_end_matches('/'),
+            repo,
+            model_file
+        )
+    } else {
+        // 没有 repository，source 本身就是完整前缀
+        format!(
+            "{}/{}",
+            source.trim_end_matches('/'),
+            model_file
+        )
+    };
+
+    Some(mangosteen_gateway::ModelDownloadSpec {
+        url,
+        expected_bytes: None,
+    })
+}
+
+/// 从模板部署（模型不在台账时）。
+///
+/// 与 UI 部署页一致：用模板信息做估算评估 → prepare → commit。
+fn deploy_from_template(
+    gw: &mangosteen_gateway::Gateway,
+    req: &mangosteen_gateway::DeploymentRequest,
+    model_key: &str,
+    download: &mangosteen_gateway::ModelDownloadSpec,
+) -> MnResult<mangosteen_core::plan::DeploymentPlan> {
+    use mangosteen_core::model::Quantization;
+    use mangosteen_gateway::noop_sink;
+
+    // 估算评估：用模板中的模型名和默认量化
+    let est_name = model_key;
+    let est_quant = Quantization::Q4KM; // 默认 Q4_K_M
+    let est_size = download.expected_bytes.unwrap_or(0);
+
+    // 设置下载信息到请求
+    let mut req_with_download = req.clone();
+    req_with_download.model_download = Some(download.clone());
+
+    // 估算评估
+    let evaluated = gw.evaluate_estimated(est_name, est_quant, est_size, &req_with_download);
+
+    // 准备（评估 → 选设备 → 配置 → 落台账）
+    let prepared = gw.prepare_with_progress(evaluated, &req_with_download, &noop_sink)?;
+
+    // 提交（启动实例、下载模型、启动引擎）
+    match prepared {
+        mangosteen_gateway::PreparedDeployment::Cloud(prepared) => {
+            gw.commit_cloud(*prepared, &noop_sink)
+        }
     }
 }
 

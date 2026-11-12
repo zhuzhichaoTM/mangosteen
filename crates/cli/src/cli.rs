@@ -176,6 +176,7 @@ fn commands() -> &'static [(&'static str, &'static str)] {
         ("status", "查看网关与部署状态"),
         ("cloud", "云端算力管理"),
         ("device", "自定义节点管理"),
+        ("models", "模型配置模板管理"),
         ("config", "配置管理"),
         ("ui", "启动 Web UI"),
         ("doctor", "环境自检"),
@@ -216,6 +217,7 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
         "status" => crate::commands::status::run(args),
         "cloud" => crate::commands::cloud::run(args),
         "device" => crate::commands::device::run(args),
+        "models" => crate::commands::models::run(args),
         "config" => crate::commands::config::run(args),
         "ui" => {
             if args.pos(1).is_some() {
@@ -297,12 +299,44 @@ fn print_help() {
     );
     println!(
         "  {:<w$}  {}",
+        "models",
+        "模型配置模板管理",
+        w = 16
+    );
+    println!(
+        "  {:<w$}  {}",
         "config",
         "配置管理",
         w = 16
     );
     println!("  {:<w$}  {}", "ui", "Web UI 生命周期", w = 16);
     println!("  {:<w$}  {}", "doctor", "环境自检", w = 16);
+    println!();
+    println!("{}", output::bold("models 子命令"));
+    println!(
+        "  {:<w$}  {}",
+        "list",
+        "列出全部模型配置模板",
+        w = 18
+    );
+    println!(
+        "  {:<w$}  {}",
+        "add",
+        "新增或更新配置模板",
+        w = 18
+    );
+    println!(
+        "  {:<w$}  {}",
+        "remove",
+        "删除自定义配置模板",
+        w = 18
+    );
+    println!(
+        "  {:<w$}  {}",
+        "show",
+        "显示模板详情",
+        w = 18
+    );
     println!();
     println!("{}", output::bold("cloud 子命令"));
     println!(
