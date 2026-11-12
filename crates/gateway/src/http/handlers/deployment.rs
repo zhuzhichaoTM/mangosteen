@@ -534,3 +534,28 @@ fn ssh_info_response(info: mangosteen_orchestration::orchestrator::InstanceSshIn
         }),
     )
 }
+
+impl GatewayServer {
+    /// 为单个部署重建 SSH 隧道（CLI 部署完成后通知网关调用）。
+    ///
+    /// 场景：CLI 是临时进程，部署完成后隧道随之关闭；网关是常驻进程，
+    /// 收到本请求后在网关节扭内建立隧道并持有，CLI 退出后隧道依然有效。
+    /// 幂等：已建立则复用，断了则重建。
+    pub(crate) fn restore_tunnel(&self, id: &str) -> Response {
+        let gw = self.gateway.as_ref();
+        match gw.restore_deployment_tunnel(id) {
+            Ok(()) => Response::json(
+                200,
+                &serde_json::json!({
+                    "ok": true,
+                    "deployment_id": id,
+                    "message": "隧道已就绪",
+                }),
+            ),
+            Err(msg) => Response::json(
+                502,
+                &ErrorResponse::bad_request(format!("恢复隧道失败：{msg}"), None),
+            ),
+        }
+    }
+}

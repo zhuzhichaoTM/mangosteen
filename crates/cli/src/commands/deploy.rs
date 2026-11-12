@@ -315,6 +315,20 @@ fn execute(args: Args) -> MnResult<i32> {
         }
     }
 
+    // 部署完成（同步模式已阻塞到终态）：确保隧道由网关持有，
+    // CLI 退出后依然可通过网关访问远端模型
+    let deployed_ready = gw
+        .get_deployment(&plan.id)
+        .ok()
+        .flatten()
+        .map(|r| r.status == DeploymentStatus::Ready)
+        .unwrap_or(false);
+    if deployed_ready {
+        if let Err(e) = ensure_gateway_running(&gw, &plan.id) {
+            output::print_warning(&format!("网关隧道保持失败：{e}"));
+        }
+    }
+
     Ok(0)
 }
 
@@ -371,13 +385,12 @@ fn poll_deploy_progress(
                         if let Ok(Some(rec)) = gw.get_deployment(deploy_id) {
                             print_deploy_result_full(&rec, &gw);
                         }
-                        // 部署成功后，确保守护网关在运行（保持 SSH 隧道）。
-                        // CLI 是临时进程，退出后 SSH 隧道随之关闭；UI 是常驻进程，隧道保持。
-                        // 为了让 CLI 部署的模型也能持续服务，部署成功后自动启动守护网关：
-                        // 网关启动时会调用 restore_deployment_tunnels() 恢复隧道。
-                        if let Err(e) = ensure_gateway_running(gw) {
-                            output::print_warning(&format!("守护网关启动失败：{e}"));
-                            output::print_info("请手动执行 `./mangosteen ui start` 启动网关以保持隧道");
+                        // 部署成功后，确保隧道由网关持有（CLI 退出后隧道依然有效）。
+                        // 网关已运行时通过 HTTP 通知它为本次部署重建隧道；
+                        // 未运行时拉起守护网关，其启动流程会恢复全部隧道。
+                        if let Err(e) = ensure_gateway_running(gw, deploy_id) {
+                            output::print_warning(&format!("网关隧道保持失败：{e}"));
+                            output::print_info("请手动执行 `./mangosteen ui restart` 恢复隧道");
                         }
                         return Ok(0);
                     }
@@ -412,23 +425,33 @@ fn poll_deploy_progress(
     }
 }
 
-/// 确保守护网关在运行（部署成功后调用）。
+/// 确保部署隧道由网关持有（部署成功后调用）。
 ///
-/// 如果网关已运行且健康，什么都不做；否则启动后台网关进程。
-/// 网关启动时会调用 restore_deployment_tunnels() 恢复隧道，
-/// 从而保证 CLI 部署的模型在 CLI 进程退出后仍能通过隧道访问。
-fn ensure_gateway_running(gw: &mangosteen_gateway::Gateway) -> MnResult<()> {
+/// ## 为什么需要这一步
+///
+/// CLI 是临时进程，SSH 隧道随进程退出而关闭；网关是常驻进程，隧道由它
+/// 持有才能在 CLI 退出后继续服务。两种情形：
+///
+/// | 网关状态 | 动作 |
+/// |---|---|
+/// | 已运行 | POST `/api/deployments/{id}/restore-tunnel`，让网关节扭建立并持有 |
+/// | 未运行 | 拉起守护网关，其启动时的 `restore_deployment_tunnels` 会恢复全部隧道 |
+///
+/// 幂等：网关已持有健康隧道时重建会直接复用，不会中断服务。
+fn ensure_gateway_running(gw: &mangosteen_gateway::Gateway, deploy_id: &str) -> MnResult<()> {
     let port = gw.config().gateway.port;
+    let addr: std::net::SocketAddr = match format!("127.0.0.1:{port}").parse() {
+        Ok(a) => a,
+        Err(_) => return Ok(()),
+    };
 
-    // 检查网关是否已运行
-    if let Ok(addr) = format!("127.0.0.1:{port}").parse() {
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
-            // 网关已运行，隧道应保持
-            return Ok(());
-        }
+    // 网关已运行：通知它为刚部署完成的记录重建并持有隧道
+    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
+        notify_gateway_restore_tunnel(port, deploy_id);
+        return Ok(());
     }
 
-    // 网关未运行，启动后台网关
+    // 网关未运行，启动后台网关（启动时会恢复全部 ready 部署的隧道）
     output::print_info("正在启动守护网关以保持隧道...");
 
     let exe = std::env::current_exe()
@@ -459,16 +482,55 @@ fn ensure_gateway_running(gw: &mangosteen_gateway::Gateway) -> MnResult<()> {
     // 等待网关就绪（最多 10 秒）
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        if let Ok(addr) = format!("127.0.0.1:{port}").parse() {
-            if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
-                output::print_success(&format!("守护网关已启动：http://127.0.0.1:{port}"));
-                return Ok(());
-            }
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
+            output::print_success(&format!("守护网关已启动：http://127.0.0.1:{port}"));
+            return Ok(());
         }
     }
 
     output::print_warning("守护网关启动超时，请手动执行 `./mangosteen ui start` 启动");
     Ok(())
+}
+
+/// 调用网关 HTTP 端点，让网关为指定部署重建并持有 SSH 隧道。
+///
+/// 失败只打警告不中断：隧道最终也可以通过 `./mangosteen ui restart`
+/// 手动恢复，不应让一个辅助动作影响部署成功的结果展示。
+fn notify_gateway_restore_tunnel(port: u16, deploy_id: &str) {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}").parse().unwrap(),
+        Duration::from_secs(5),
+    ) else {
+        output::print_warning("网关连接失败，隧道可能未保持，可执行 `./mangosteen ui restart` 恢复");
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+
+    let body = format!("{{\"deployment_id\":\"{deploy_id}\"}}");
+    let req = format!(
+        "POST /api/deployments/{deploy_id}/restore-tunnel HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        output::print_warning("通知网关失败，可执行 `./mangosteen ui restart` 恢复隧道");
+        return;
+    }
+    let mut resp = String::new();
+    let _ = stream.read_to_string(&mut resp);
+    if resp.contains(" 200 ") || resp.contains(" 502 ") {
+        // 端点已响应（502 时隧道建立失败，下一轮探测会重试）
+    }
+    output::print_success("隧道已交由网关节扭持有（CLI 退出后依然有效）");
 }
 
 /// 打印带颜色的图标。

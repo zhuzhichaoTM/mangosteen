@@ -57,6 +57,18 @@ use crate::protocol::BackendTarget;
 /// 与云端监控的 5 秒同理：更密的频率只是白烧 CPU，用户感知不到差异。
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 探测连续失败多少轮后触发隧道自愈重建（约 15 秒）。
+///
+/// 瞬时失败（模型加载期 503、网络抖动）不应触发重建；持续失败才说明
+/// 隧道真的断了（如 CLI 部署后未通知网关），值得发起一次 SSH 重建。
+const RESTORE_AFTER_MISSES: u32 = 3;
+
+/// 隧道重建冷却期：同一部署两次重建尝试的最小间隔。
+///
+/// 实例已关机时 SSH 会一直超时，每轮都试是浪费；60 秒节流既能让
+/// 真正的隧道断裂在合理时间内自愈，又不会反复冲击已关机的实例。
+const RESTORE_COOLDOWN: Duration = Duration::from_secs(60);
+
 /// 单次探测的操作超时。
 ///
 /// 只探测本机回环端口，400 毫秒已远超正常握手时间；给足余量是为了
@@ -154,6 +166,11 @@ pub fn spawn_runtime_probe(
     probe: RuntimeProbe,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        // ready→failed 的降级计数：跨探测轮次累计，只在连续失败时触发。
+        let mut misses: BTreeMap<String, u32> = BTreeMap::new();
+        // 隧道重建节流：记录每个部署上次尝试重建的时间（Instant），
+        // 冷却期内不重复尝试（实例已关机时避免反复 SSH 超时浪费）
+        let mut last_restore: BTreeMap<String, std::time::Instant> = BTreeMap::new();
         loop {
             // ① 只读台账（微秒级）
             let targets: Vec<ProbeTarget> = {
@@ -196,6 +213,36 @@ pub fn spawn_runtime_probe(
                     "/health",
                     PROBE_TIMEOUT,
                 );
+
+                // 隧道自愈（二道防线）：探测连续失败达到阈值时，
+                // 主动重建 SSH 隧道。覆盖「CLI 部署后未通知网关」或
+                // 「隧道意外断开」场景，让网关节扭自行恢复。
+                if !mapped {
+                    let miss = misses.entry(t.id.clone()).or_insert(0);
+                    *miss += 1;
+                    let cooled_down = last_restore
+                        .get(&t.id)
+                        .map(|last| last.elapsed() >= RESTORE_COOLDOWN)
+                        .unwrap_or(true);
+                    if *miss >= RESTORE_AFTER_MISSES && cooled_down {
+                        let gw = gateway.as_ref();
+                        match gw.restore_deployment_tunnel(&t.id) {
+                            Ok(()) => {
+                                eprintln!("[probe] {}：探测失败，已重建 SSH 隧道", t.id);
+                                last_restore.insert(t.id.clone(), std::time::Instant::now());
+                                // 重建后留待下一轮探测验证
+                            }
+                            Err(e) => {
+                                // 实例可能已关机/删除：记录时间进入冷却，
+                                // 避免每轮都发起 SSH 尝试
+                                last_restore.insert(t.id.clone(), std::time::Instant::now());
+                                eprintln!("[probe] {}：隧道重建失败（进入冷却）：{}", t.id, e);
+                            }
+                        }
+                    }
+                } else {
+                    misses.remove(&t.id);
+                }
                 snapshot.insert(t.id.clone(), mapped);
 
                 // 探测结果只更新 run_status（active/unactive），不修改 DeploymentStatus

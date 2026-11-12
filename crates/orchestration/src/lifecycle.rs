@@ -187,6 +187,67 @@ impl Orchestrator {
         errors
     }
 
+    /// 恢复**单个部署**的 SSH 隧道（CLI 部署完成后通知网关调用）。
+    ///
+    /// ## 与 `restore_deployment_tunnels` 的差异
+    ///
+    /// - 不查询云厂商实例状态（不发起厂商 API 调用，避免限流 [226619]）；
+    /// - 不删除台账记录（即使实例已关机也保留，由后续操作处理）；
+    /// - 只建立隧道，不启动推理进程（远端引擎已在运行）；
+    /// - 适用于「CLI 部署成功 → 通知已运行的网关节扭建立并持有隧道」
+    ///   场景——隧道由网关进程持有，CLI 退出后依然有效。
+    pub fn restore_deployment_tunnel(&self, id: &str) -> Result<(), String> {
+        let record = match self.state.get(id) {
+            Ok(Some(r)) => r,
+            Ok(None) => return Err(format!("部署 `{id}` 不存在")),
+            Err(e) => return Err(format!("读取台账失败：{e}")),
+        };
+        let Some(cloud_plan) = record.plan.cloud.clone() else {
+            return Err(format!("部署 `{id}` 不是云端部署，无需恢复隧道"));
+        };
+        let ComputeOrigin::Cloud {
+            provider: origin_provider,
+            instance_id,
+        } = &record.plan.origin;
+        // provider 回退规则与 stop_service 相同：实例创建阶段失败的记录
+        // origin.provider 可能为空，回退到 cloud.provider
+        let provider = if !origin_provider.trim().is_empty() {
+            origin_provider.clone()
+        } else {
+            cloud_plan.provider.clone()
+        };
+        if provider.trim().is_empty() {
+            return Err(format!(
+                "部署 `{id}` 缺少服务商信息（实例创建阶段失败），无法建立隧道"
+            ));
+        }
+
+        // 只建隧道，不修改台账中的 local_port（CLI 分配的固定端口）
+        if let Some(target) = self.device_target_for(&cloud_plan) {
+            let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
+                &target,
+                cloud_plan.engine_port,
+                false,
+                Some(cloud_plan.local_port),
+            );
+            self.tunnels()
+                .establish(&spec, Duration::from_secs(30))
+                .map(|t| {
+                    let _ = t.local_port;
+                })
+                .map_err(|e| format!("建立 SSH 隧道失败：{e}"))
+        } else {
+            let mut cloud = self.cloud();
+            let Some(orchestrator) = cloud.as_mut() else {
+                return Err("未配置云端能力，无法建立隧道".to_string());
+            };
+            orchestrator
+                .establish_tunnel(&provider, instance_id, &cloud_plan)
+                .map(|_| ())
+                .map_err(|e| format!("建立 SSH 隧道失败：{e}"))
+        }
+    }
+
     /// 查询云端实例的实际状态。
     fn query_instance_state(
         &self,

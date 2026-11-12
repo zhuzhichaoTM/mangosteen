@@ -167,6 +167,13 @@ impl GatewayServer {
                 let id = &p["/api/deployments/".len()..p.len() - "/unload".len()];
                 self.unload(id)
             }
+            // CLI 部署完成后通知网关节扭重建并持有（CLI 退出后隧道依然有效）
+            ("POST", p)
+                if p.starts_with("/api/deployments/") && p.ends_with("/restore-tunnel") =>
+            {
+                let id = &p["/api/deployments/".len()..p.len() - "/restore-tunnel".len()];
+                self.restore_tunnel(id)
+            }
             // 兼容：前端/旧版本可能用 DELETE 语义表达「删除部署」，但把
             // 动作后缀（/unload）也带上了。DELETE /api/deployments/{id}/unload
             // 必须路由到 unload，而不是掉进 DELETE catch-all 把 "id/unload"
