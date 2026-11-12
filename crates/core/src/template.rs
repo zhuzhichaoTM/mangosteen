@@ -301,7 +301,6 @@ pub const BUILTIN_TEMPLATES: &[(&str, &str, &str, &str)] = &[
         r#"template: default
 model_id: qwen2.5-0.5b
 quantization: 4-bit (Q4_K_M)
-device: ssh
 source: https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF
 framework: llama.cpp
 binary: llama-server
@@ -320,7 +319,6 @@ cache_v: q4_0"#,
         r#"template: default
 model_id: qwen3.8-27b
 quantization: 4-bit (Q4_K_M)
-device: ssh
 source: https://hf-mirror.com/
 repository: unsloth/Qwen3.8-27B-GGUF
 framework: llama.cpp
@@ -362,7 +360,6 @@ alias: qwen3.8-27b
         r#"template: Uncensored
 model_id: qwen3.8-27b
 quantization: 4-bit (Q4_K_M)
-device: ssh
 source: https://hf-mirror.com/
 repository: JonathanColetti/Qwen3.8-27B-Uncensored-GGUF
 framework: llama.cpp
@@ -690,7 +687,6 @@ multimodal:
     const DEFAULT_05B: &str = r#"template: default
 model_id: qwen2.5-0.5b
 quantization: 4-bit (Q4_K_M)
-device: ssh
 source: https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF
 framework: llama.cpp
 binary: llama-server

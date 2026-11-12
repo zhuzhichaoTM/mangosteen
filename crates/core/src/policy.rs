@@ -312,14 +312,17 @@ fn cheapest_cmp(a: &(f64, u32, &str, &str), b: &(f64, u32, &str, &str)) -> std::
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionStrategy {
-    /// 综合打分：价格 40 / 延迟 15 / 库存 30 / 硬件 15（默认）
-    #[default]
+    /// 综合打分：价格 40 / 延迟 15 / 库存 30 / 硬件 15。
+    ///
+    /// 四维加权打分（`scheduler.weights` 仅在选中本策略时生效）；
+    /// 曾为默认值，现默认改为 [`Self::Cheapest`]。
     Balanced,
-    /// 最便宜优先：在**满足约束**的候选里按价格升序取第一个。
+    /// 最便宜优先：在**满足约束**的候选里按价格升序取第一个。（默认）
     ///
     /// 约束（显存、内存、磁盘、库存、价格上限）仍然生效——
     /// 「最便宜」不等于「不管跑不跑得动」。同价时按库存富余与
     /// provider 字典序稳定排序，保证结果可复现。
+    #[default]
     Cheapest,
 }
 

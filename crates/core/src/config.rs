@@ -104,8 +104,9 @@ pub struct ProviderConfig {
     /// 展示名（覆盖驱动默认）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// 密钥
-    #[serde(default)]
+    /// 密钥。None 时生成配置里省略——由 `mangosteen cloud key <厂商>`
+    /// 命令写入（加密存储），不需要用户手写。
+    #[serde(default, skip_serializing_if = "SecretRef::is_none")]
     pub secret: SecretRef,
     /// 驱动专属参数。<b>不参与上层逻辑</b>，由驱动自行解释。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -327,31 +328,35 @@ pub struct SchedulerConfig {
     /// **默认且必须为 `true`**。此字段存在仅为应对极端场景
     /// （如本地 GPU 被占用需临时全量走云端），关闭时 CLI 会打印显著警告。
     /// 违反本地优先原则需用户显式确认。
-    #[serde(default = "yes")]
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub local_first: bool,
-    /// 四维权重
-    #[serde(default)]
-    pub weights: ScoreWeights,
-    /// 云端节点选择策略。
+    /// 四维权重（**仅 `strategy = "balanced"` 时生效**）。
     ///
-    /// `balanced`（默认）走四维加权打分；`cheapest` 在满足约束的候选里
-    /// 直接按价格升序取第一个。后者不看延迟/硬件偏好——「最便宜」就是
+    /// 与 strategy 的关系：strategy 是「用哪种策略选节点」，weights 是
+    /// balanced 策略内部的打分权重（价格/延迟/库存/硬件四维相对重要性）。
+    /// 默认策略 cheapest 不看权重，故默认值不写入配置。
+    #[serde(default, skip_serializing_if = "is_default_value")]
+    pub weights: ScoreWeights,
+    /// 云端节点选择策略（默认 `cheapest` 最便宜优先）。
+    ///
+    /// `balanced` 走四维加权打分（配合 `weights`）；`cheapest` 在满足约束的
+    /// 候选里直接按价格升序取第一个。后者不看延迟/硬件偏好——「最便宜」就是
     /// 字面意思，只在同价时才用库存与名称做稳定排序。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_cheapest")]
     pub strategy: SelectionStrategy,
-    /// 总降级重试次数上限（本地失败 → 换云端节点）
-    #[serde(default = "default_max_fallbacks")]
+    /// 总降级重试次数上限（本地失败 → 换云端节点）。默认 2，一般无需配置。
+    #[serde(default = "default_max_fallbacks", skip_serializing_if = "is_default_max_fallbacks")]
     pub max_fallbacks: u32,
-    /// 引擎启动后等待 `/health` 就绪的超时（秒）
-    #[serde(default = "default_launch_timeout")]
+    /// 引擎启动后等待 `/health` 就绪的超时（秒）。默认 120，一般无需配置。
+    #[serde(default = "default_launch_timeout", skip_serializing_if = "is_default_launch_timeout")]
     pub launch_timeout_secs: u64,
-    /// 云端实例创建超时（秒）
-    #[serde(default = "default_provision_timeout")]
+    /// 云端实例创建超时（秒）。默认 600，一般无需配置。
+    #[serde(default = "default_provision_timeout", skip_serializing_if = "is_default_provision_timeout")]
     pub provision_timeout_secs: u64,
     /// 单次部署可接受的最高时价（元/小时）。`None` 不限。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_price_per_hour: Option<f64>,
-    /// 是否只考虑厂商声称「有库存」的候选。
+    /// 是否只考虑厂商声称「有库存」的候选。**必须为 true**。
     ///
     /// ## 为什么要能关掉
     ///
@@ -363,7 +368,7 @@ pub struct SchedulerConfig {
     ///
     /// 关掉后由真实创建失败来兜底：创建失败会明确报错并回滚，
     /// 不会产生「以为部署了其实没部署」的假象。
-    #[serde(default = "yes")]
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub require_stock: bool,
     /// GPU 型号偏好表覆盖（归一化型号 → 系数）
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -391,6 +396,35 @@ fn default_launch_timeout() -> u64 {
 }
 fn default_provision_timeout() -> u64 {
     600
+}
+
+/* -------- skip_serializing_if 判定（默认值不写入生成配置） -------- */
+
+/// 布尔开关为 true（本地优先/需库存等默认开启项，生成配置里省略）。
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+/// 值与类型默认相等（weights/local/storage 等整段默认时省略）。
+fn is_default_value<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+/// 策略为 cheapest（新默认，生成配置里省略）。
+fn is_cheapest(s: &SelectionStrategy) -> bool {
+    matches!(s, SelectionStrategy::Cheapest)
+}
+
+fn is_default_max_fallbacks(v: &u32) -> bool {
+    *v == default_max_fallbacks()
+}
+
+fn is_default_launch_timeout(v: &u64) -> bool {
+    *v == default_launch_timeout()
+}
+
+fn is_default_provision_timeout(v: &u64) -> bool {
+    *v == default_provision_timeout()
 }
 
 impl Default for SchedulerConfig {
@@ -798,8 +832,9 @@ pub struct GatewayConfig {
     /// 是否要求客户端携带 API Key
     #[serde(default)]
     pub require_api_key: bool,
-    /// 网关自身的 API Key（`require_api_key` 为真时必填）
-    #[serde(default)]
+    /// 网关自身的 API Key（`require_api_key` 为真时必填）。
+    /// None 时生成配置里省略——需要鉴权时由用户显式配置。
+    #[serde(default, skip_serializing_if = "SecretRef::is_none")]
     pub api_key: SecretRef,
 }
 
@@ -871,14 +906,14 @@ pub struct Config {
     /// 调度策略
     #[serde(default)]
     pub scheduler: SchedulerConfig,
-    /// 本地部署
-    #[serde(default)]
+    /// 本地部署（默认值即适用绝大多数场景，生成配置里默认时省略）
+    #[serde(default, skip_serializing_if = "is_default_value")]
     pub local: LocalConfig,
     /// 云端通用配置
     #[serde(default)]
     pub cloud: CloudConfig,
-    /// 存储与访问控制
-    #[serde(default)]
+    /// 存储与访问控制（默认值即适用，生成配置里默认时省略）
+    #[serde(default, skip_serializing_if = "is_default_value")]
     pub storage: StorageConfig,
     /// 云服务商表（键为配置内唯一名）
     #[serde(default)]
@@ -1054,15 +1089,15 @@ impl Config {
         // 优云智算 compshare：UCloud RPC + SHA1 签名，专用驱动
         // options 只保留 image_id（其余 region/zone/charge_type/disk_* 等
         // 均走 CompshareConfig 默认值：cn-wlcb / cn-wlcb-01 / Postpay /
-        // CLOUD_SSD / 100GB）；密钥（secret / public_key）不写默认值，
-        // 由 `mangosteen cloud key compshare` 命令写入。
+        // CLOUD_SSD / 100GB）；secret 用 None——由 `mangosteen cloud key compshare`
+        // 命令写入（加密存储），配置里不出现密钥占位。
         providers.insert(
             "compshare".to_string(),
             ProviderConfig {
                 driver: "compshare".into(),
                 enabled: true,
                 display_name: Some("优云智算".into()),
-                secret: SecretRef::Env("COMPSHARE_PRIVATE_KEY".into()),
+                secret: SecretRef::None,
                 options: BTreeMap::from([(
                     "image_id".to_string(),
                     "compshareImage-1k99rzcvdg6j".to_string(),
