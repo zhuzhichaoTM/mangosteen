@@ -381,10 +381,11 @@ mod tests {
     fn invalid_config_surfaces_field_path() {
         let d = tmpdir("invalid");
         let bad = d.join("config.toml");
-        std::fs::write(&bad, "[storage]\nmodels_dir = ''\ncache_dir = '/c'\n").unwrap();
+        // storage.max_model_bytes = 0 触发校验错误（含字段路径）
+        std::fs::write(&bad, "[storage]\nmax_model_bytes = 0\n").unwrap();
         let s = store_in(&d);
         let e = s.load().unwrap_err();
-        assert!(e.to_string().contains("storage.models_dir"), "got {e}");
+        assert!(e.to_string().contains("storage.max_model_bytes"), "got {e}");
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -415,10 +416,18 @@ mod tests {
 
         let s = store_in(&d);
         let loaded = s.load().expect("损坏配置不应阻止启动");
-        // 回落到内置样例：models_dir 等取平台默认值，而不是损坏文件里的内容
+        // 回落到内置样例（Config::sample）：模板等取内置默认值，
+        // 而不是损坏文件里的内容（损坏文件本身没有这些段）
         assert!(
-            loaded.config.model_whitelist.is_empty(),
-            "损坏内容不应被部分采纳"
+            loaded
+                .config
+                .model_whitelist
+                .contains_key("qwen2.5-0.5b"),
+            "应回落到内置样例的模型模板"
+        );
+        assert!(
+            loaded.config.providers.contains_key("compshare"),
+            "应回落到内置样例的 compshare 服务商"
         );
         assert_eq!(loaded.config.gateway.port, 11516, "应使用内置默认端口");
 

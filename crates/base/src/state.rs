@@ -547,6 +547,7 @@ mod tests {
     fn sample_plan(id: &str) -> DeploymentPlan {
         let spec = ModelSpec {
             name: "qwen2.5-7b-instruct".into(),
+            alias: None,
             params_b: 7.615,
             quant: Quantization::Q4KM,
             n_layers: 28,

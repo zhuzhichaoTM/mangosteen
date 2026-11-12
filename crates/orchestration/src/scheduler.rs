@@ -599,6 +599,7 @@ mod tests {
     fn spec_7b() -> ModelSpec {
         ModelSpec {
             name: "qwen2.5-7b-instruct".into(),
+            alias: None,
             params_b: 7.615,
             quant: Quantization::Q4KM,
             n_layers: 28,
@@ -614,6 +615,7 @@ mod tests {
     fn spec_70b() -> ModelSpec {
         ModelSpec {
             name: "llama3.3-70b".into(),
+            alias: None,
             params_b: 70.6,
             quant: Quantization::Q4KM,
             n_layers: 80,

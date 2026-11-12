@@ -210,6 +210,15 @@ impl DeploymentRequest {
                 return Some(a.to_string());
             }
         }
+        // 模板正文的 alias 字段（模板驱动部署的默认 API 模型名，
+        // 如 qwen2.5-0.5b；让 curl 调用无需拼接量化后缀）
+        if let Some(text) = self.config_template_text.as_deref() {
+            if let Ok(raw) = mangosteen_core::template::parse_raw(text) {
+                if let Some(a) = raw.get("alias").map(str::trim).filter(|s| !s.is_empty()) {
+                    return Some(a.to_string());
+                }
+            }
+        }
         if let Some(id) = self.model_id.as_deref().map(str::trim) {
             if !id.is_empty() {
                 return Some(id.to_string());
@@ -525,6 +534,7 @@ mod tests {
     fn spec_evaluation_skips_disk() {
         let spec = ModelSpec {
             name: "qwen2.5-32b".into(),
+            alias: None,
             params_b: 32.5,
             quant: Quantization::Q4KM,
             n_layers: 64,
@@ -550,6 +560,7 @@ mod tests {
     fn small_card_insufficient_marks_not_viable() {
         let spec = ModelSpec {
             name: "huge".into(),
+            alias: None,
             params_b: 70.0,
             quant: Quantization::Q4KM,
             n_layers: 80,
@@ -589,6 +600,7 @@ mod tests {
             reuse_instance_id: None,
             reuse_provider: None,
             device_id: None,
+            alias: None,
             config_template: None,
             config_template_text: None,
             auxiliary_models: Vec::new(),
@@ -614,6 +626,7 @@ mod tests {
     fn suggest_quantization_finds_workable_option() {
         let spec = ModelSpec {
             name: "qwen2.5-32b".into(),
+            alias: None,
             params_b: 32.5,
             quant: Quantization::Q4KM,
             n_layers: 64,
@@ -636,6 +649,7 @@ mod tests {
     fn cloud_vram_requirement_is_monotonic_in_context() {
         let spec = ModelSpec {
             name: "m".into(),
+            alias: None,
             params_b: 7.615,
             quant: Quantization::Q4KM,
             n_layers: 28,

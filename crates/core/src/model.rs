@@ -443,6 +443,7 @@ mod tests {
         // Qwen2.5-7B-Instruct 公开架构参数
         ModelSpec {
             name: "qwen2.5-7b-instruct".into(),
+            alias: None,
             params_b: 7.615,
             quant: Quantization::Q4KM,
             n_layers: 28,
@@ -544,9 +545,15 @@ mod tests {
 
     #[test]
     fn stable_model_id() {
+        // 无别名：用模型名生成 slug（不带量化后缀）
         assert_eq!(
-            ModelEntry::derive_id("Qwen2.5 7B Instruct", Quantization::Q4KM),
-            "qwen2.5-7b-instruct:q4_k_m"
+            ModelEntry::derive_id("Qwen2.5 7B Instruct", Quantization::Q4KM, None),
+            "qwen2.5-7b-instruct"
+        );
+        // 有别名：优先使用别名
+        assert_eq!(
+            ModelEntry::derive_id("Qwen2.5 7B Instruct", Quantization::Q4KM, Some("qwen-7b")),
+            "qwen-7b"
         );
     }
 }

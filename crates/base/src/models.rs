@@ -520,6 +520,7 @@ mod tests {
         let s = store_in(&d, false);
         let spec = ModelSpec {
             name: "qwen2.5-7b-instruct".into(),
+            alias: None,
             params_b: 7.615,
             quant: Quantization::Q4KM,
             n_layers: 28,

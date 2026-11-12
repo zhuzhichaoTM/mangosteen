@@ -73,6 +73,7 @@ pub(crate) fn legacy_spec(
                 .config_template
                 .clone()
                 .unwrap_or_else(|| "default".to_string()),
+            alias: None,
             model_file: remote_file,
             download_url: d.url.clone(),
             aux_files: Vec::new(),
@@ -113,6 +114,7 @@ pub(crate) fn legacy_spec(
             .config_template
             .clone()
             .unwrap_or_else(|| "default".to_string()),
+        alias: None,
         model_file: remote_file.clone(),
         download_url: format!("https://hf-mirror.com/{remote_file}"),
         aux_files: Vec::new(),

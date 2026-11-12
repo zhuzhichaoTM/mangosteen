@@ -506,13 +506,15 @@ mod tests {
 
     #[test]
     fn compshare_without_image_id_is_skipped() {
+        // 设计：build 阶段不校验 image_id（list 查询不需要），
+        // 缺 image_id 的驱动仍能注册（部署创建实例时才报错）
         let mut c = base_config();
         let mut pc = compshare_provider(SecretRef::Inline("sk".into()), true);
         pc.options.remove("image_id");
         c.providers.insert("compshare".into(), pc);
         let r = build_registry_with(&c, mock_factory());
-        assert!(r.registry.is_empty());
-        assert!(r.skipped[0].1.contains("image_id"), "{:?}", r.skipped);
+        assert_eq!(r.registry.len(), 1, "缺 image_id 仍应注册（延迟校验）");
+        assert!(r.skipped.is_empty(), "{:?}", r.skipped);
     }
 
     #[test]

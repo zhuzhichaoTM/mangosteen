@@ -211,6 +211,11 @@ pub struct AuxFile {
 pub struct ModelDeploySpec {
     /// 模板显示名（用于 UI，如 `Uncensored`）
     pub template_name: String,
+    /// API 模型别名（模板 `alias:` 字段）。
+    ///
+    /// 模板驱动部署的默认 API 模型名（如 `qwen2.5-0.5b`），
+    /// 让 curl 调用无需拼接量化后缀。优先级低于 CLI `--alias`。
+    pub alias: Option<String>,
     /// 主模型远端文件名
     pub model_file: String,
     /// 主模型完整下载地址
@@ -310,7 +315,8 @@ gpu_layers: 99
 batch: 512
 ubatch: 128
 cache_k: q4_0
-cache_v: q4_0"#,
+cache_v: q4_0
+alias: qwen2.5-0.5b"#,
     ),
     (
         "qwen3.8-27b",
@@ -415,6 +421,10 @@ impl ModelTemplateSchema for SimpleGgufSchema {
         let download_url = main_url(raw, &model_file)?;
         Ok(ModelDeploySpec {
             template_name: raw.name.clone(),
+            alias: raw
+                .get("alias")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             model_file,
             download_url,
             aux_files: Vec::new(),
@@ -538,6 +548,10 @@ impl ModelTemplateSchema for Qwen38Schema {
 
         Ok(ModelDeploySpec {
             template_name: raw.name.clone(),
+            alias: raw
+                .get("alias")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             model_file,
             download_url,
             aux_files,

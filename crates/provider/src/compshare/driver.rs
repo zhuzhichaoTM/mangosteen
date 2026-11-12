@@ -1653,17 +1653,24 @@ mod tests {
 
     #[test]
     fn invalid_config_rejected_at_construction() {
+        // 设计：CompshareDriver::new 不校验 image_id（list 查询不需要），
+        // 非法配置在 validate()（创建实例时）被拒绝
         let bad = CompshareConfig {
             image_id: String::new(),
             ..Default::default()
         };
-        assert!(CompshareDriver::new(
+        assert!(
+            bad.validate().is_err(),
+            "缺 image_id 的配置必须在 validate 被拒绝"
+        );
+        // 构造本身成功（延迟校验设计）
+        let driver = CompshareDriver::new(
             "compshare",
             bad,
             Credential::new("pk", "sk").unwrap(),
-            MockTransport::always(200, "{}")
-        )
-        .is_err());
+            MockTransport::always(200, "{}"),
+        );
+        assert!(driver.is_ok(), "构造不应校验 image_id（list 查询可用）");
     }
 
     #[test]

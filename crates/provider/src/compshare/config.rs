@@ -449,23 +449,29 @@ mod tests {
 
     #[test]
     fn invalid_enum_values_are_rejected() {
+        // 枚举合法性在 validate() 校验（创建实例时调用）；
+        // from_options 只做拼写/类型检查
         let base = [("image_id", "img-1")];
 
         let mut o = opts(&base);
         o.insert("charge_type".into(), "Weekly".into());
-        assert!(CompshareConfig::from_options(&o).is_err());
+        let c = CompshareConfig::from_options(&o).unwrap();
+        assert!(c.validate().is_err(), "非法 charge_type 应被 validate 拒绝");
 
         let mut o = opts(&base);
         o.insert("disk_type".into(), "HDD".into());
-        assert!(CompshareConfig::from_options(&o).is_err());
+        let c = CompshareConfig::from_options(&o).unwrap();
+        assert!(c.validate().is_err(), "非法 disk_type 应被 validate 拒绝");
 
         let mut o = opts(&base);
         o.insert("cpu_platform".into(), "Arm/Auto".into());
-        assert!(CompshareConfig::from_options(&o).is_err());
+        let c = CompshareConfig::from_options(&o).unwrap();
+        assert!(c.validate().is_err(), "非法 cpu_platform 应被 validate 拒绝");
 
         let mut o = opts(&base);
         o.insert("machine_type".into(), "C".into());
-        assert!(CompshareConfig::from_options(&o).is_err());
+        let c = CompshareConfig::from_options(&o).unwrap();
+        assert!(c.validate().is_err(), "非法 machine_type 应被 validate 拒绝");
     }
 
     #[test]
@@ -482,6 +488,7 @@ mod tests {
 
     #[test]
     fn zero_values_rejected() {
+        // 0 值在 validate() 校验（from_options 只做数字解析）
         for (k, v) in [
             ("disk_size_gb", "0"),
             ("max_gpu_count", "0"),
@@ -491,7 +498,10 @@ mod tests {
         ] {
             let mut o = opts(&[("image_id", "img-1")]);
             o.insert(k.to_string(), v.to_string());
-            assert!(CompshareConfig::from_options(&o).is_err(), "应拒绝 {k}={v}");
+            let c = CompshareConfig::from_options(&o).unwrap_or_else(|e| {
+                panic!("{k}={v} 应在 validate 拒绝而非解析失败：{e}")
+            });
+            assert!(c.validate().is_err(), "应拒绝 {k}={v}");
         }
     }
 
@@ -538,8 +548,10 @@ mod tests {
 
     #[test]
     fn prefix_length_is_validated() {
+        // 长度校验在 validate()（创建实例时调用）
         let mut o = opts(&[("image_id", "img-1")]);
         o.insert("name_prefix".into(), "x".repeat(41));
-        assert!(CompshareConfig::from_options(&o).is_err());
+        let c = CompshareConfig::from_options(&o).unwrap();
+        assert!(c.validate().is_err(), "超长 name_prefix 应被 validate 拒绝");
     }
 }

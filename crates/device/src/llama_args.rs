@@ -105,6 +105,7 @@ mod tests {
     fn plan() -> LocalPlan {
         let spec = ModelSpec {
             name: "qwen2.5-7b-instruct".into(),
+            alias: None,
             params_b: 7.0,
             quant: Quantization::Q4KM,
             n_layers: 28,

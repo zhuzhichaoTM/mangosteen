@@ -903,8 +903,8 @@ pub struct Config {
     /// 网关配置
     #[serde(default)]
     pub gateway: GatewayConfig,
-    /// 调度策略
-    #[serde(default)]
+    /// 调度策略（全部默认时生成配置里省略——默认即 cheapest 最便宜优先）
+    #[serde(default, skip_serializing_if = "is_default_value")]
     pub scheduler: SchedulerConfig,
     /// 本地部署（默认值即适用绝大多数场景，生成配置里默认时省略）
     #[serde(default, skip_serializing_if = "is_default_value")]
@@ -1221,11 +1221,12 @@ cache_dir = "/c"
 
     #[test]
     fn disabled_providers_not_counted() {
+        // 内置服务商只剩 compshare（启用）；占位服务商已移除，
+        // 其余厂商由用户在 config.toml 按需添加
         let c = base_config();
         let enabled = c.enabled_providers();
-        assert!(enabled.contains(&"autodl"));
-        assert!(!enabled.contains(&"ucloud")); // 优云智算默认关闭：密钥由 UI 设置页输入后才启用
-        assert!(!enabled.contains(&"aliyun")); // 示例里默认关闭
+        assert!(enabled.contains(&"compshare"));
+        assert_eq!(enabled.len(), 1);
     }
 
     #[test]

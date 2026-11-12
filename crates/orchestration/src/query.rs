@@ -430,6 +430,7 @@ mod tests {
     fn record(id: &str, instance_id: &str, status: DeploymentStatus, at: i64) -> DeploymentRecord {
         let spec = ModelSpec {
             name: "qwen".into(),
+            alias: None,
             params_b: 0.5,
             quant: Quantization::Q4KM,
             n_layers: 24,
@@ -524,7 +525,8 @@ mod tests {
     /// 判错一次就是几 GB 重下加一段实例创建等待。
     #[test]
     fn reusable_needs_instance_and_must_not_be_running() {
-        let model = "qwen:q4_k_m";
+        // derive_id 不再附加量化后缀：模型名 "qwen" → ID "qwen"
+        let model = "qwen";
 
         // 空台账
         assert!(pick_reusable(vec![], model, None).is_none());
