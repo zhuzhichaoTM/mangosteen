@@ -1882,7 +1882,8 @@ fn download_single_url(
                 stage: "云端模型下载".to_string(),
             });
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // **优化**：轮询间隔从 2s 减少到 1s，加快完成检测
+        std::thread::sleep(std::time::Duration::from_secs(1));
 
         // 一次连接取回三态；解析失败按 0 处理并计入连续失败。
         let (size, completed, is_dead) = match ssh_exec(target, &poll_cmd, 60) {
@@ -1930,10 +1931,19 @@ fn download_single_url(
         if completed && size > 0 {
             return Ok(size);
         }
+        // **优化**：增加快速通道——如果文件大小达到期望值，立即判定完成。
+        // 这避免了 `.download.ok` 未写入（如 aria2c 已退出但标记写入失败）
+        // 导致的长时间等待。
         if let Some(exp) = expected_bytes {
             if exp > 0 && size == exp {
                 return Ok(size);
             }
+        }
+        // **优化**：如果期望大小未知（want=None）且文件已存在（size > 0），
+            // 且下载器已退出（is_dead），也判定完成。
+        // 这处理了模板未指定大小、但文件已下载完成的场景。
+        if expected_bytes.is_none() && size > 0 && is_dead {
+            return Ok(size);
         }
 
         // 停滞计数：进程活着但连续多轮采样大小不变（约 12s 无增长）

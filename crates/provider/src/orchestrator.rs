@@ -2252,9 +2252,13 @@ pub fn download_model_node(
     // 权威证据；大小相等只是无标记时的快速通道（如手工放置的文件）。
     let marked_complete =
         mangosteen_device::remote::remote_download_completed(target, remote_model)?;
-    let ready = remote_size > 0
-        && (marked_complete || Some(remote_size) == want)
-        && mangosteen_device::remote::remote_file_is_gguf(target, remote_model)?;
+    // **优化**：增加文件大小快速通道。如果文件已存在且大小 > 0，
+    // 且 GGUF 魔数正确，无论 `.download.ok` 是否存在，都判定为 ready。
+    // 这避免了 `.download.ok` 未写入（如 aria2c 已退出但标记写入失败）
+    // 或期望大小未知（want=None）导致的长时间等待。
+    let size_ready = remote_size > 0
+        && (marked_complete || Some(remote_size) == want || want.is_none());
+    let ready = size_ready && mangosteen_device::remote::remote_file_is_gguf(target, remote_model)?;
     if !ready {
         let url = plan
             .download_url
