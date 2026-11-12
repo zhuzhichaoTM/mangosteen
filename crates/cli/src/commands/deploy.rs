@@ -364,6 +364,14 @@ fn poll_deploy_progress(
                         if let Ok(Some(rec)) = gw.get_deployment(deploy_id) {
                             print_deploy_result_full(&rec, &gw);
                         }
+                        // 部署成功后，确保守护网关在运行（保持 SSH 隧道）。
+                        // CLI 是临时进程，退出后 SSH 隧道随之关闭；UI 是常驻进程，隧道保持。
+                        // 为了让 CLI 部署的模型也能持续服务，部署成功后自动启动守护网关：
+                        // 网关启动时会调用 restore_deployment_tunnels() 恢复隧道。
+                        if let Err(e) = ensure_gateway_running(gw) {
+                            output::print_warning(&format!("守护网关启动失败：{e}"));
+                            output::print_info("请手动执行 `./mangosteen ui start` 启动网关以保持隧道");
+                        }
                         return Ok(0);
                     }
                     DeploymentStatus::Failed => {
@@ -395,6 +403,65 @@ fn poll_deploy_progress(
         let _ = std::io::stdout().flush();
         std::thread::sleep(Duration::from_secs(POLL_INTERVAL_SECS));
     }
+}
+
+/// 确保守护网关在运行（部署成功后调用）。
+///
+/// 如果网关已运行且健康，什么都不做；否则启动后台网关进程。
+/// 网关启动时会调用 restore_deployment_tunnels() 恢复隧道，
+/// 从而保证 CLI 部署的模型在 CLI 进程退出后仍能通过隧道访问。
+fn ensure_gateway_running(gw: &mangosteen_gateway::Gateway) -> MnResult<()> {
+    let port = gw.config().gateway.port;
+
+    // 检查网关是否已运行
+    if let Ok(addr) = format!("127.0.0.1:{port}").parse() {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
+            // 网关已运行，隧道应保持
+            return Ok(());
+        }
+    }
+
+    // 网关未运行，启动后台网关
+    output::print_info("正在启动守护网关以保持隧道...");
+
+    let exe = std::env::current_exe()
+        .map_err(|e| mangosteen_core::MnError::io("定位 mangosteen 可执行文件", &e))?;
+
+    #[cfg(unix)]
+    let mut cmd = {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new("nohup");
+        c.arg(&exe);
+        c.process_group(0);
+        c
+    };
+    #[cfg(not(unix))]
+    let mut cmd = std::process::Command::new(&exe);
+
+    cmd.arg("ui")
+        .arg("--foreground")
+        .arg("--no-open")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let _child = cmd
+        .spawn()
+        .map_err(|e| mangosteen_core::MnError::io("启动守护网关", &e))?;
+
+    // 等待网关就绪（最多 10 秒）
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Ok(addr) = format!("127.0.0.1:{port}").parse() {
+            if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
+                output::print_success(&format!("守护网关已启动：http://127.0.0.1:{port}"));
+                return Ok(());
+            }
+        }
+    }
+
+    output::print_warning("守护网关启动超时，请手动执行 `./mangosteen ui start` 启动");
+    Ok(())
 }
 
 /// 打印带颜色的图标。
