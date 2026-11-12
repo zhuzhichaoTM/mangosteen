@@ -145,10 +145,7 @@ impl GatewayServer {
                             "model": r.plan.model.name,
                             // 完整模型 ID（含量化后缀）。`model` 只有裸名，
                             // 同家族多个量化版本并存时分不清实际在跑哪一个。
-                            "model_id": mangosteen_core::model::ModelEntry::derive_id(
-                                &r.plan.model.name,
-                                r.plan.model.quant,
-                            ),
+                            "model_id": mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant, r.plan.model.alias.as_deref()),
                             "quant": r.plan.model.quant.to_string(),
                             "origin": r.plan.origin.label(),
                             // 稳定机器可读类型：UI 用它渲染本地/云端符号，

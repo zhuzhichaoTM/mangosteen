@@ -153,6 +153,7 @@ impl GgufInfo {
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("{}-{}L", self.architecture, self.n_layers)),
+            alias: None, // GGUF 解析时没有别名
             params_b,
             quant: self.quant.unwrap_or(Quantization::Q4KM),
             n_layers: self.n_layers,

@@ -1394,6 +1394,7 @@ impl Orchestrator {
             let id = mangosteen_core::model::ModelEntry::derive_id(
                 &rec.plan.model.name,
                 rec.plan.model.quant,
+                rec.plan.model.alias.as_deref(),
             );
             if id != model_id {
                 continue;

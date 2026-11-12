@@ -18,6 +18,7 @@ fn pick_reusable(
         let id = mangosteen_core::model::ModelEntry::derive_id(
             &rec.plan.model.name,
             rec.plan.model.quant,
+            rec.plan.model.alias.as_deref(),
         );
         if id != model_id {
             continue;
@@ -83,8 +84,11 @@ fn dedupe_by_model(records: Vec<DeploymentRecord>) -> (Vec<DeploymentRecord>, Ve
     // 模型 ID → 当前最优记录的索引
     let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for (idx, r) in records.iter().enumerate() {
-        let mid =
-            mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant);
+        let mid = mangosteen_core::model::ModelEntry::derive_id(
+            &r.plan.model.name,
+            r.plan.model.quant,
+            r.plan.model.alias.as_deref(),
+        );
         match best.get(&mid) {
             Some(&cur) => {
                 let (cur_r, new_r) = (&records[cur], r);
@@ -186,11 +190,12 @@ impl Orchestrator {
                 id: id.clone(),
                 // 用完整模型 ID（`name:quant`）而不是裸模型名：
                 // `/v1/models`、推理请求、推理响应三处必须给出同一个标识，
-                // 否则上层应用做一致性校验会失败。同一模型的不同量化版本
-                // 也才能区分开。
+                /// 否则上层应用做一致性校验会失败。同一模型的不同量化版本
+                /// 也才能区分开。
                 model: mangosteen_core::model::ModelEntry::derive_id(
                     &r.plan.model.name,
                     r.plan.model.quant,
+                    r.plan.model.alias.as_deref(),
                 ),
                 origin: r.plan.origin.clone(),
                 status: r.status,
@@ -354,6 +359,7 @@ impl Orchestrator {
             model: mangosteen_core::model::ModelEntry::derive_id(
                 &rec.plan.model.name,
                 rec.plan.model.quant,
+                rec.plan.model.alias.as_deref(),
             ),
             status: rec.status,
         }))
@@ -388,6 +394,7 @@ impl Orchestrator {
                 model: mangosteen_core::model::ModelEntry::derive_id(
                     &r.plan.model.name,
                     r.plan.model.quant,
+                    r.plan.model.alias.as_deref(),
                 ),
                 origin: r.plan.origin.clone(),
                 status: r.status,

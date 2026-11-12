@@ -137,6 +137,7 @@ fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
         model_id: mangosteen_core::model::ModelEntry::derive_id(
             &rec.plan.model.name,
             rec.plan.model.quant,
+            rec.plan.model.alias.as_deref(),
         ),
         created_at: rec.plan.created_at,
         updated_at: rec.updated_at,

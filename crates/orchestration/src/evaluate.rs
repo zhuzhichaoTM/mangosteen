@@ -36,11 +36,22 @@ impl Orchestrator {
         if let Some(entry) = self.models.get(&req.model)? {
             if let mangosteen_core::model::ModelLocation::Local { path } = &entry.location {
                 if path.is_file() {
-                    return self.assessor.evaluate_file(path, req);
+                    let mut evaluated = self.assessor.evaluate_file(path, req)?;
+                    // 别名填充：spec 已有别名时保留；否则用生效别名
+                    // （--alias > 模板 model_id > 用户输入名），默认激活简化模型名
+                    if evaluated.spec.alias.is_none() {
+                        evaluated.spec.alias = req.effective_alias();
+                    }
+                    return Ok(evaluated);
                 }
             }
             // 云端模型或本地文件已丢失 → 用台账里的规格评估（不读盘）
-            return Ok(self.assessor.evaluate_spec(&entry.spec, req));
+            let mut evaluated = self.assessor.evaluate_spec(&entry.spec, req);
+            // 别名填充：spec 已有别名时保留；否则用生效别名
+            if evaluated.spec.alias.is_none() {
+                evaluated.spec.alias = req.effective_alias();
+            }
+            return Ok(evaluated);
         }
 
         // 2. 按模糊名查
@@ -48,10 +59,20 @@ impl Orchestrator {
         if hits.len() == 1 {
             if let mangosteen_core::model::ModelLocation::Local { path } = &hits[0].location {
                 if path.is_file() {
-                    return self.assessor.evaluate_file(path, req);
+                    let mut evaluated = self.assessor.evaluate_file(path, req)?;
+                    // 别名填充：spec 已有别名时保留；否则用生效别名
+                    if evaluated.spec.alias.is_none() {
+                        evaluated.spec.alias = req.effective_alias();
+                    }
+                    return Ok(evaluated);
                 }
             }
-            return Ok(self.assessor.evaluate_spec(&hits[0].spec, req));
+            let mut evaluated = self.assessor.evaluate_spec(&hits[0].spec, req);
+            // 别名填充：spec 已有别名时保留；否则用生效别名
+            if evaluated.spec.alias.is_none() {
+                evaluated.spec.alias = req.effective_alias();
+            }
+            return Ok(evaluated);
         }
         if hits.len() > 1 {
             return Err(MnError::bad_request(format!(
@@ -68,7 +89,13 @@ impl Orchestrator {
         // 3. 当作文件路径
         let p = PathBuf::from(&req.model);
         if p.is_file() {
-            return self.assessor.evaluate_file(&p, req);
+            let mut evaluated = self.assessor.evaluate_file(&p, req)?;
+            // 别名填充：文件路径部署默认不生成别名（路径名不适合做模型 ID）
+            // 如需简化名称，请显式传入 --alias
+            if evaluated.spec.alias.is_none() && req.alias.is_some() {
+                evaluated.spec.alias = req.alias.clone();
+            }
+            return Ok(evaluated);
         }
 
         Err(MnError::ModelNotFound { path: p })

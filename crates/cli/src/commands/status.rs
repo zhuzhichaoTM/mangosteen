@@ -43,7 +43,7 @@ pub fn run(args: Args) -> MnResult<i32> {
             })).collect::<Vec<_>>(),
             "all": all_records.iter().map(|r| serde_json::json!({
                 "id": r.plan.id,
-                "model": mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant),
+                "model": mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant, r.plan.model.alias.as_deref()),
                 "origin": r.plan.origin.label(),
                 "status": r.status.as_str(),
                 "run_status": r.run_status.as_str(),
@@ -152,7 +152,7 @@ fn print_all_deployments(
             .iter()
             .map(|r| {
                 let model_id =
-                    mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant);
+                    mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant, r.plan.model.alias.as_deref());
                 let local_port = r.plan.local_access_port();
                 let remote_port = r.plan.cloud.as_ref().map(|c| c.engine_port);
                 vec![

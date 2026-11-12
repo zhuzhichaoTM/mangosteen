@@ -53,6 +53,8 @@ const ALLOWED: &[&str] = &[
     "async",
     // 配置模板槽位（与 UI 部署页下拉框一致：default / uncensored / mode1…）
     "template",
+    // 模型别名（自定义 API 调用时使用的模型名称）
+    "alias",
 ];
 
 /// 轮询间隔（秒）。
@@ -156,6 +158,11 @@ fn execute(args: Args) -> MnResult<i32> {
     }
     if let Some(gpu_model) = args.get("gpu-model") {
         req.gpu_model = Some(gpu_model.to_string());
+    }
+    
+    // 模型别名：自定义 API 调用时使用的模型名称
+    if let Some(alias) = args.get("alias") {
+        req.alias = Some(alias.to_string());
     }
 
     // 配置模板槽位：与 UI 部署页下拉框一致。

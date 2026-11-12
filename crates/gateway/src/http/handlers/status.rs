@@ -53,10 +53,7 @@ impl GatewayServer {
         // 可对话模型。只读台账（list_active 不触发厂商网络）。
         if let Ok(recs) = gw.state().list_active() {
             for r in recs {
-                let id = mangosteen_core::model::ModelEntry::derive_id(
-                    &r.plan.model.name,
-                    r.plan.model.quant,
-                );
+                let id = mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant, r.plan.model.alias.as_deref());
                 if !entries.iter().any(|(eid, _)| eid == &id) {
                     let owner = if r.plan.cloud.is_some() {
                         "cloud"
@@ -198,8 +195,7 @@ impl GatewayServer {
                     let pid = r.pid;
                     serde_json::json!({
                         "id": r.plan.id,
-                        "model": mangosteen_core::model::ModelEntry::derive_id(
-                            &r.plan.model.name, r.plan.model.quant),
+                        "model": mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant, r.plan.model.alias.as_deref()),
                         "origin": r.plan.origin.label(),
                         "status": r.status.as_str(),
                         "port": r.plan.local_access_port(),

@@ -179,6 +179,7 @@ impl Orchestrator {
                     mangosteen_core::model::ModelEntry::derive_id(
                         &r.plan.model.name,
                         r.plan.model.quant,
+                        r.plan.model.alias.as_deref(),
                     )
                 })
                 .collect()
@@ -247,6 +248,7 @@ impl Orchestrator {
                     mangosteen_core::model::ModelEntry::derive_id(
                         &r.plan.model.name,
                         r.plan.model.quant,
+                        r.plan.model.alias.as_deref(),
                     )
                 })
                 .collect()

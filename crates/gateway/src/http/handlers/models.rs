@@ -22,10 +22,7 @@ impl GatewayServer {
             std::collections::HashMap::new();
         if let Ok(recs) = gw.state().list_active() {
             for r in recs {
-                let id = mangosteen_core::model::ModelEntry::derive_id(
-                    &r.plan.model.name,
-                    r.plan.model.quant,
-                );
+                let id = mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant, r.plan.model.alias.as_deref());
                 let (kind, ip) = (
                     "cloud",
                     r.plan.cloud.as_ref().and_then(|c| c.node_ip.clone()),

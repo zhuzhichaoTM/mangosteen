@@ -35,6 +35,7 @@ fn get_hardcoded_model_spec(model_id: &str) -> Option<mangosteen_core::model::Mo
     match base_id.as_str() {
         id if id.contains("qwen2.5") && id.contains("0.5b") => Some(mangosteen_core::model::ModelSpec {
             name: "qwen2.5-0.5b".to_string(),
+            alias: None,
             params_b: 0.5, // 0.5B 参数
             quant: Quantization::Q4KM,
             n_layers: 24,
@@ -47,6 +48,7 @@ fn get_hardcoded_model_spec(model_id: &str) -> Option<mangosteen_core::model::Mo
         }),
         id if id.contains("qwen3.8") && id.contains("27b") => Some(mangosteen_core::model::ModelSpec {
             name: "qwen3.8-27b".to_string(),
+            alias: None,
             params_b: 27.0, // 27B 参数
             quant: Quantization::Q4KM,
             n_layers: 62,
@@ -158,6 +160,7 @@ impl Orchestrator {
                 model_id: mangosteen_core::model::ModelEntry::derive_id(
                     &spec.name,
                     spec.quant,
+                    spec.alias.as_deref(),
                 ),
                 origin: ComputeOrigin::Cloud {
                     provider: String::new(),
@@ -182,6 +185,7 @@ impl Orchestrator {
             model_id: mangosteen_core::model::ModelEntry::derive_id(
                 &spec.name,
                 spec.quant,
+                spec.alias.as_deref(),
             ),
             origin: ComputeOrigin::Cloud {
                 provider: cloud

@@ -138,6 +138,11 @@ pub struct DeploymentRequest {
     ///
     /// 由 UI 提交（设置页是模板的唯一维护入口），后端解析后驱动下载与启动。
     pub config_template_text: Option<String>,
+    /// 模型别名（自定义 API 调用时使用的模型名称）。
+    ///
+    /// 有值时，API 返回的模型列表和推理请求中使用此别名代替自动生成的模型 ID。
+    /// 例如：`--alias qwen2.5-0.5b` → API 返回 `qwen2.5-0.5b` 而不是 `qwen2.5-0.5b-instruct:q4_k_m`。
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,6 +182,7 @@ impl Default for DeploymentRequest {
             config_template: None,
             config_template_text: None,
             auxiliary_models: Vec::new(),
+            alias: None,
         }
     }
 }
@@ -188,6 +194,33 @@ impl DeploymentRequest {
             model: model.into(),
             ..Default::default()
         }
+    }
+
+    /// 生效的模型别名（API 调用时使用的模型名称）。
+    ///
+    /// 优先级：
+    /// 1. `alias`——用户显式传入 `--alias`；
+    /// 2. `model_id`——模板注册名（如 `qwen2.5-0.5b`，与 UI 下拉框一致）；
+    /// 3. `model`——用户命令行输入的模型名（文件路径除外）。
+    ///
+    /// 返回 Some 时作为 API 模型 ID 使用，让 curl 调用无需拼接量化后缀。
+    pub fn effective_alias(&self) -> Option<String> {
+        if let Some(a) = self.alias.as_deref().map(str::trim) {
+            if !a.is_empty() {
+                return Some(a.to_string());
+            }
+        }
+        if let Some(id) = self.model_id.as_deref().map(str::trim) {
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+        // 用户输入的模型名：非路径（不含 '/'、不以 .gguf 结尾）时可直接用作别名
+        let m = self.model.as_str().trim();
+        if !m.is_empty() && !m.contains('/') && !m.ends_with(".gguf") {
+            return Some(m.to_string());
+        }
+        None
     }
 
     /// 指定上下文。
@@ -359,6 +392,7 @@ impl Assessor {
         };
         let spec = ModelSpec {
             name: name.to_string(),
+            alias: req.effective_alias(), // 默认激活简化别名（--alias > 模板名 > 输入名）
             params_b,
             quant,
             n_layers: ESTIMATE_LAYERS,

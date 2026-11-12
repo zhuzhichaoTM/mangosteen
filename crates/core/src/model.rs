@@ -243,6 +243,12 @@ impl std::str::FromStr for Quantization {
 pub struct ModelSpec {
     /// 模型标识（用户可见名，如 `qwen2.5-7b-instruct`）
     pub name: String,
+    /// 模型别名（自定义 API 调用时使用的模型名称）。
+    ///
+    /// 有值时，API 返回的模型列表和推理请求中使用此别名代替 `name`。
+    /// 例如：`--alias qwen2.5-0.5b` → API 返回 `qwen2.5-0.5b` 而不是 `qwen2.5-0.5b-instruct:q4_k_m`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     /// 参数量（十亿为单位，如 7.6 表示 7.6B）
     pub params_b: f64,
     /// 量化格式
@@ -386,7 +392,30 @@ pub struct ModelEntry {
 
 impl ModelEntry {
     /// 由规格推导稳定 ID。
-    pub fn derive_id(name: &str, quant: Quantization) -> String {
+    ///
+    /// 如果提供了别名，直接使用别名作为 ID；
+    /// 否则从模型名称生成 slug（小写、连字符分隔），不附加量化后缀。
+    ///
+    /// 例如：
+    /// - `derive_id("Qwen2.5-0.5B-Instruct", Q4_K_M, None)` → `"qwen2.5-0.5b-instruct"`
+    /// - `derive_id("Qwen2.5-0.5B-Instruct", Q4_K_M, Some("qwen2.5-0.5b"))` → `"qwen2.5-0.5b"`
+    pub fn derive_id(name: &str, _quant: Quantization, alias: Option<&str>) -> String {
+        // 如果有别名，直接使用别名（转小写、替换非法字符）
+        if let Some(alias) = alias {
+            let slug: String = alias
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            return slug.trim_matches('-').to_string();
+        }
+        
+        // 否则从模型名称生成 slug
         let slug: String = name
             .chars()
             .map(|c| {
@@ -397,8 +426,7 @@ impl ModelEntry {
                 }
             })
             .collect();
-        let slug = slug.trim_matches('-').to_string();
-        format!("{slug}:{}", quant.as_str().to_ascii_lowercase())
+        slug.trim_matches('-').to_string()
     }
 
     /// 该条目是否部署在本地。

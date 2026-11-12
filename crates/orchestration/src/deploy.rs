@@ -161,10 +161,11 @@ impl Orchestrator {
         let wanted_id = mangosteen_core::model::ModelEntry::derive_id(
             &evaluated.spec.name,
             evaluated.spec.quant,
+            req.alias.as_deref(),
         );
         // 部署前清理同模型的历史残留记录：UI 的 pull 和直接 /api/deploy
         // 都必须经过同一条清理路径。否则旧的 Ready/Provisioning 台账会被
-        // 唯一性检查误判为活跃实例，直接返回“已有同 GPU 型号实例”，
+        // 唯一性检查误判为活跃实例，直接返回"已有同 GPU 型号实例"，
         // 实际新部署根本没有开始。
         // 只停止该模型自己的进程、释放端口并移除台账；远端模型文件和实例
         // 保留，后续下载阶段会校验并复用资源。
@@ -177,6 +178,7 @@ impl Orchestrator {
             let running_id = mangosteen_core::model::ModelEntry::derive_id(
                 &rec.plan.model.name,
                 rec.plan.model.quant,
+                rec.plan.model.alias.as_deref(),
             );
             if running_id == wanted_id {
                 // 只有「同一模型 + 同一 GPU 型号」才互相冲突。
@@ -282,10 +284,17 @@ impl Orchestrator {
     /// 生成部署 ID。
     pub(crate) fn new_deployment_id(&self, evaluated: &Evaluated) -> String {
         let seq = self.next_seq();
+        // 展示名优先用别名（与 API 模型名一致，如 qwen2.5-0.5b），
+        // 没有别名时回落到规格名（如 qwen2.5-0.5b-instruct）
+        let display_name = evaluated
+            .spec
+            .alias
+            .as_deref()
+            .unwrap_or(&evaluated.spec.name);
         format!(
             "dep-{:x}{:03x}",
             mangosteen_core::time::now_unix_millis(),
             seq & 0xfff
-        ) + &format!("-{}", sanitize(&evaluated.spec.name))
+        ) + &format!("-{}", sanitize(display_name))
     }
 }

@@ -154,7 +154,7 @@ impl ModelStore {
             None
         };
 
-        let id = ModelEntry::derive_id(&spec.name, spec.quant);
+        let id = ModelEntry::derive_id(&spec.name, spec.quant, spec.alias.as_deref());
         let now = mangosteen_core::time::now_unix();
         let entry = ModelEntry {
             id: id.clone(),
@@ -212,7 +212,7 @@ impl ModelStore {
         remote_path: &str,
     ) -> MnResult<ModelEntry> {
         spec.validate().map_err(MnError::bad_request)?;
-        let id = ModelEntry::derive_id(&spec.name, spec.quant);
+        let id = ModelEntry::derive_id(&spec.name, spec.quant, spec.alias.as_deref());
         let entry = ModelEntry {
             id: id.clone(),
             spec,

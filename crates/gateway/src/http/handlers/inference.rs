@@ -302,6 +302,7 @@ pub(crate) fn rebuild_snapshot(
         let model_id = mangosteen_core::model::ModelEntry::derive_id(
             &record.plan.model.name,
             record.plan.model.quant,
+            record.plan.model.alias.as_deref(),
         );
         snapshot.insert(
             model_id.clone(),
