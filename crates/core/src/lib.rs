@@ -43,6 +43,7 @@ pub mod hardware;
 pub mod model;
 pub mod net;
 pub mod openai;
+pub mod anthropic;
 pub mod plan;
 pub mod policy;
 pub mod source;

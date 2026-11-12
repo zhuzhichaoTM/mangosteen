@@ -32,6 +32,8 @@ impl GatewayServer {
             ("POST", "/v1/chat/completions") => self.chat(req),
             ("POST", "/v1/completions") => self.completion(req),
             ("POST", "/v1/embeddings") => self.embeddings(req),
+            // Anthropic 兼容接口
+            ("POST", "/v1/messages") => self.anthropic_messages(req),
             ("GET", "/api/status") => self.status(),
             ("POST", "/api/deploy") => self.deploy(req),
             ("GET", "/api/deployments") => self.deployments(),

@@ -279,6 +279,316 @@ pub fn error_payload(e: &MnError) -> (u16, ErrorResponse) {
     (r.http_status(), r)
 }
 
+// ============================================================================
+// Anthropic 协议适配
+// ============================================================================
+
+/// 将 Anthropic 请求转换为 OpenAI 请求。
+///
+/// Anthropic 的 `system` 字段需要插入到 messages 数组开头，
+/// `stop_sequences` 需要映射到 `stop`。
+pub fn normalize_anthropic_to_openai(
+    req: &mangosteen_core::anthropic::MessagesRequest,
+    target: &BackendTarget,
+) -> MnResult<mangosteen_core::openai::ChatRequest> {
+    use mangosteen_core::anthropic::{AnthropicRole, ContentBlock};
+    use mangosteen_core::openai::{ChatMessage, ChatRequest, Role, SamplingParams};
+
+    // 构建 messages 数组
+    let mut messages: Vec<ChatMessage> = Vec::new();
+
+    // 系统提示插入到开头
+    if let Some(system) = &req.system {
+        if !system.trim().is_empty() {
+            messages.push(ChatMessage::system(system.clone()));
+        }
+    }
+
+    // 转换消息
+    for msg in &req.messages {
+        let role = match msg.role {
+            AnthropicRole::User => Role::User,
+            AnthropicRole::Assistant => Role::Assistant,
+        };
+
+        // 处理 content（可能是字符串或 ContentBlock 数组）
+        let content = if let Some(s) = msg.content.as_str() {
+            s.to_string()
+        } else if let Some(blocks) = msg.content.as_array() {
+            // 提取文本内容
+            let mut text_parts = Vec::new();
+            for block in blocks {
+                if let Ok(cb) = serde_json::from_value::<ContentBlock>(block.clone()) {
+                    match cb {
+                        ContentBlock::Text { text } => {
+                            text_parts.push(text);
+                        }
+                        ContentBlock::ToolResult { content, .. } => {
+                            text_parts.push(content);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            text_parts.join("\n")
+        } else {
+            String::new()
+        };
+
+        messages.push(ChatMessage {
+            role,
+            content,
+            tool_call_id: None,
+        });
+    }
+
+    // 构建 OpenAI 请求
+    let model = if req.model.trim().is_empty() {
+        target.model_id.clone()
+    } else {
+        req.model.clone()
+    };
+
+    let sampling = SamplingParams {
+        temperature: req.temperature,
+        top_p: req.top_p,
+        max_tokens: Some(req.max_tokens),
+        stop: req.stop_sequences.clone(),
+        seed: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+    };
+
+    let mut extra = req.extra.clone();
+    // 保留 Anthropic 特有字段，方便调试
+    if let Some(metadata) = &req.metadata {
+        extra.insert("anthropic_metadata".to_string(), metadata.clone());
+    }
+
+    Ok(ChatRequest {
+        model,
+        messages,
+        stream: req.stream,
+        sampling,
+        extra,
+    })
+}
+
+/// 将 OpenAI 响应转换为 Anthropic 响应。
+pub fn parse_openai_to_anthropic_response(
+    body: &str,
+    status: u16,
+    model_id: &str,
+) -> MnResult<mangosteen_core::anthropic::MessagesResponse> {
+    use mangosteen_core::anthropic::{
+        ContentBlock, MessagesResponse, Usage,
+    };
+
+    if !(200..300).contains(&status) {
+        return Err(upstream_error(body, status));
+    }
+
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| MnError::Network {
+        stage: "解析上游响应".to_string(),
+        reason: format!("上游返回的不是合法 JSON：{e}"),
+    })?;
+
+    // 提取内容
+    let content_text = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    // 提取 token 用量
+    let usage = v.get("usage");
+    let input_tokens = usage
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let output_tokens = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+
+    // 提取停止原因
+    let stop_reason = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str())
+        .map(|s| {
+            match s {
+                "stop" => "end_turn".to_string(),
+                "length" => "max_tokens".to_string(),
+                _ => s.to_string(),
+            }
+        });
+
+    Ok(MessagesResponse {
+        id: new_request_id("msg", 0),
+        kind: "message".to_string(),
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::Text {
+            text: content_text.to_string(),
+        }],
+        model: model_id.to_string(),
+        stop_reason,
+        usage: Usage {
+            input_tokens,
+            output_tokens,
+        },
+    })
+}
+
+/// 将 OpenAI 流式 chunk 转换为 Anthropic 流式事件。
+///
+/// 返回 (event_type, data_json)，用于构造 SSE 响应。
+pub fn parse_openai_stream_to_anthropic(
+    chunk: &str,
+    model_id: &str,
+) -> Vec<(String, String)> {
+    use mangosteen_core::anthropic::{
+        ContentBlock, Delta, MessageDelta, MessageStreamEvent, Usage,
+    };
+
+    let mut events = Vec::new();
+
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(chunk) else {
+        return events;
+    };
+
+    // 提取 delta 内容
+    let delta_text = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .unwrap_or("");
+
+    let finish_reason = v
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str());
+
+    // 提取 token 用量
+    let usage = v.get("usage");
+    let input_tokens = usage
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    let output_tokens = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+
+    // 如果有文本内容，发送 content_block_delta
+    if !delta_text.is_empty() {
+        let event = MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Delta::TextDelta {
+                text: delta_text.to_string(),
+            },
+        };
+        if let Ok(json) = serde_json::to_string(&event) {
+            events.push(("content_block_delta".to_string(), json));
+        }
+    }
+
+    // 如果有停止原因，发送 message_delta 和 message_stop
+    if let Some(reason) = finish_reason {
+        let anthropic_reason = match reason {
+            "stop" => Some("end_turn".to_string()),
+            "length" => Some("max_tokens".to_string()),
+            _ => Some(reason.to_string()),
+        };
+
+        let event = MessageStreamEvent::MessageDelta {
+            delta: MessageDelta {
+                stop_reason: anthropic_reason,
+                stop_sequence: None,
+            },
+            usage: Usage {
+                input_tokens,
+                output_tokens,
+            },
+        };
+        if let Ok(json) = serde_json::to_string(&event) {
+            events.push(("message_delta".to_string(), json));
+        }
+
+        let event = MessageStreamEvent::MessageStop;
+        if let Ok(json) = serde_json::to_string(&event) {
+            events.push(("message_stop".to_string(), json));
+        }
+    }
+
+    events
+}
+
+/// 构造 Anthropic 流式响应的初始事件。
+pub fn build_anthropic_stream_start(model_id: &str) -> Vec<(String, String)> {
+    use mangosteen_core::anthropic::{
+        ContentBlock, MessagesResponse, MessageStreamEvent, Usage,
+    };
+
+    let mut events = Vec::new();
+
+    // message_start
+    let message = MessagesResponse {
+        id: new_request_id("msg", 0),
+        kind: "message".to_string(),
+        role: "assistant".to_string(),
+        content: vec![],
+        model: model_id.to_string(),
+        stop_reason: None,
+        usage: Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+    };
+    let event = MessageStreamEvent::MessageStart { message };
+    if let Ok(json) = serde_json::to_string(&event) {
+        events.push(("message_start".to_string(), json));
+    }
+
+    // content_block_start
+    let event = MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: ContentBlock::Text {
+            text: String::new(),
+        },
+    };
+    if let Ok(json) = serde_json::to_string(&event) {
+        events.push(("content_block_start".to_string(), json));
+    }
+
+    events
+}
+
+/// 构造 Anthropic 流式响应的结束事件。
+pub fn build_anthropic_stream_end() -> Vec<(String, String)> {
+    use mangosteen_core::anthropic::MessageStreamEvent;
+
+    let mut events = Vec::new();
+
+    // content_block_stop
+    let event = MessageStreamEvent::ContentBlockStop { index: 0 };
+    if let Ok(json) = serde_json::to_string(&event) {
+        events.push(("content_block_stop".to_string(), json));
+    }
+
+    events
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

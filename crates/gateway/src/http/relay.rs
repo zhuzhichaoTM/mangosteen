@@ -26,7 +26,7 @@ pub(crate) fn is_stream_request(req: &ParsedRequest) -> bool {
     }
     if !matches!(
         req.path.as_str(),
-        "/v1/chat/completions" | "/v1/completions"
+        "/v1/chat/completions" | "/v1/completions" | "/v1/messages"
     ) {
         return false;
     }

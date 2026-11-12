@@ -180,6 +180,98 @@ impl GatewayServer {
             Err(e) => Response::error(&e),
         }
     }
+
+    /// Anthropic Messages API 处理器（`/v1/messages`）。
+    ///
+    /// 将 Anthropic 请求转换为 OpenAI 格式，转发给后端，再将响应转换回 Anthropic 格式。
+    pub(crate) fn anthropic_messages(&self, req: &ParsedRequest) -> Response {
+        use mangosteen_core::anthropic::MessagesRequest;
+
+        let parsed: MessagesRequest = match serde_json::from_slice(&req.body) {
+            Ok(r) => r,
+            Err(e) => {
+                return Response::json(
+                    400,
+                    &mangosteen_core::anthropic::AnthropicErrorResponse::bad_request(format!(
+                        "请求体不是合法 MessagesRequest：{e}"
+                    )),
+                )
+            }
+        };
+
+        // 校验请求
+        if let Err((param, reason)) = parsed.validate() {
+            return Response::json(
+                400,
+                &mangosteen_core::anthropic::AnthropicErrorResponse::bad_request(format!(
+                    "参数 `{param}` 非法：{reason}"
+                )),
+            );
+        }
+
+        // 选择后端
+        let target = match self.backend_for_model(Some(parsed.model.as_str())) {
+            Ok(t) => t,
+            Err(e) => {
+                return Response::json(
+                    400,
+                    &mangosteen_core::anthropic::AnthropicErrorResponse::from_mn(&e),
+                )
+            }
+        };
+
+        // 转换为 OpenAI 请求
+        let openai_req = match protocol::normalize_anthropic_to_openai(&parsed, &target) {
+            Ok(r) => r,
+            Err(e) => {
+                return Response::json(
+                    400,
+                    &mangosteen_core::anthropic::AnthropicErrorResponse::from_mn(&e),
+                )
+            }
+        };
+
+        // 序列化请求体
+        let body = match serde_json::to_vec(&openai_req) {
+            Ok(b) => b,
+            Err(e) => {
+                return Response::json(
+                    500,
+                    &mangosteen_core::anthropic::AnthropicErrorResponse::bad_request(format!(
+                        "序列化失败：{e}"
+                    )),
+                )
+            }
+        };
+
+        // 转发请求
+        let response = self.forward_json("chat/completions", &body, &target);
+
+        // 转换响应为 Anthropic 格式
+        if response.status >= 200 && response.status < 300 {
+            let body_str = String::from_utf8_lossy(&response.body);
+            match protocol::parse_openai_to_anthropic_response(
+                &body_str,
+                response.status,
+                &target.model_id,
+            ) {
+                Ok(anthropic_resp) => Response::json(200, &anthropic_resp),
+                Err(e) => Response::json(
+                    500,
+                    &mangosteen_core::anthropic::AnthropicErrorResponse::from_mn(&e),
+                ),
+            }
+        } else {
+            // 错误响应也需要转换为 Anthropic 格式
+            let error = mangosteen_core::anthropic::AnthropicErrorResponse::from_mn(
+                &MnError::Network {
+                    stage: format!("上游推理服务（HTTP {}）", response.status),
+                    reason: String::from_utf8_lossy(&response.body).to_string(),
+                },
+            );
+            Response::json(response.status, &error)
+        }
+    }
 }
 
 /// 按台账整体重建业务转发快照。
