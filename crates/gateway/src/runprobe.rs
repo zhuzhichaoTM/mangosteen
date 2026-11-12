@@ -65,10 +65,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// `ready` 降级为 `failed` 前必须连续失败的探测轮数。
 ///
-/// 单轮失败几乎总是瞬时态（模型加载期 503、隧道重建、本机满载抖动），
-/// 立即降级会造成「部署完成却显示失败」。两轮（约 10 秒）足够滤掉
-/// 瞬时失败，又不至于让真死的部署在 UI 上挂太久。
-const DOWNGRADE_AFTER_MISSES: u32 = 2;
+/// 已废弃：探测线程不再修改 DeploymentStatus，只更新 run_status。
+/// 保留常量以免代码引用，但不再使用。
+#[allow(dead_code)]
+const DOWNGRADE_AFTER_MISSES: u32 = 3;
 
 /// 运行态缓存句柄。可跨线程共享。
 #[derive(Clone, Default)]
@@ -153,8 +153,6 @@ pub fn spawn_runtime_probe(
     probe: RuntimeProbe,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        // ready→failed 的降级计数：跨探测轮次累计，只在连续失败时触发。
-        let mut misses: BTreeMap<String, u32> = BTreeMap::new();
         loop {
             // ① 只读台账（微秒级）
             let targets: Vec<ProbeTarget> = {
@@ -167,7 +165,6 @@ pub fn spawn_runtime_probe(
             };
 
             // ② 每模型只认最新创建的那条记录（与 dedupe_by_model 同口径）。
-            //    旧记录的端口探测结果不代表当前部署，不能拿来回写状态。
             let mut newest: BTreeMap<String, (i64, i64)> = BTreeMap::new();
             for t in &targets {
                 let key = (t.created_at, t.updated_at);
@@ -179,22 +176,17 @@ pub fn spawn_runtime_probe(
                 }
             }
 
-            // ③ 做本地端口探测，按需回写台账。
+            // ③ 做本地端口探测，只探测 Ready 状态的记录，探测结果只更新 run_status，
+            //    不修改 DeploymentStatus（避免后台线程误降级状态文件）。
             let mut snapshot = BTreeMap::new();
-            let mut changed = false;
             for t in targets {
                 let eligible = t.owns_instance
-                    && matches!(
-                        t.status,
-                        DeploymentStatus::Ready | DeploymentStatus::Failed
-                    )
+                    && t.status == DeploymentStatus::Ready
                     && t.port.is_some()
                     && newest
                         .get(&t.model_id)
                         .is_some_and(|n| *n == (t.created_at, t.updated_at));
                 if !eligible {
-                    // 未探测的记录不出现在快照里：is_running 返回 None，
-                    // 前端按台账状态展示，而不是断言「已停止」。
                     continue;
                 }
                 let mapped = mangosteen_platform::process::probe_http_ok(
@@ -203,33 +195,16 @@ pub fn spawn_runtime_probe(
                     "/health",
                     PROBE_TIMEOUT,
                 );
-                if mapped {
-                    misses.remove(&t.id);
-                } else {
-                    *misses.entry(t.id.clone()).or_insert(0) += 1;
-                }
                 snapshot.insert(t.id.clone(), mapped);
 
-                let downgrade = t.status == DeploymentStatus::Ready
-                    && !mapped
-                    && misses.get(&t.id).copied().unwrap_or(0) >= DOWNGRADE_AFTER_MISSES;
-                let recover = t.status == DeploymentStatus::Failed && mapped;
-                if downgrade || recover {
-                    // ④ 只在锁内做微秒级台账状态同步；不做网络操作。
-                    {
-                        let gw = gateway.as_ref();
-                        if gw.refresh_deployment_mapping(&t.id, mapped).is_ok() {
-                            changed = true;
-                        }
-                    }
-                }
+                // 探测结果只更新 run_status（active/unactive），不修改 DeploymentStatus
+                let gw = gateway.as_ref();
+                let _ = gw.update_run_status(&t.id, mapped);
             }
             probe.store(snapshot);
 
-            // ⑤ 台账状态翻转后重建对话路由快照，让探测自愈立刻生效。
-            if changed {
-                crate::http::handlers::inference::rebuild_snapshot(&gateway, &backend_snapshot);
-            }
+            // 台账运行状态翻转后重建对话路由快照，让探测自愈立刻生效。
+            crate::http::handlers::inference::rebuild_snapshot(&gateway, &backend_snapshot);
 
             std::thread::sleep(PROBE_INTERVAL);
         }

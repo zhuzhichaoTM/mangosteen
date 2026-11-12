@@ -184,16 +184,9 @@ impl GatewayBuilder {
         let models = ModelStore::new(model_index_path, guard, self.config.storage.verify_hash);
         let state = StateStore::new(state_path);
 
-        // 启动时清理终态垃圾记录（destroyed/failed）。这些记录不占资源、
-        // 不参与复用，留着只会：① 让 UI 按模型匹配台账时误命中旧失败记录
-        // （instance_id 为空却优先），导致实例 ID / 登陆方式显示错误；
-        // ② 让台账随使用无限膨胀。stopped 记录必须保留——它是「下次部署
-        // 复用同一台机器」的唯一依据。清理失败不影响启动。
-        match state.prune_terminal() {
-            Ok(n) if n > 0 => eprintln!("[state] ✓ 已清理 {n} 条终态历史记录（destroyed/failed）"),
-            Err(e) => eprintln!("[state] 清理终态记录失败（忽略，不影响启动）：{e}"),
-            _ => {}
-        }
+        // 注意：不再在构建网关时自动清理终态记录。
+        // 状态查询（如 status）应当是只读操作，不修改 state.json 数据。
+        // 终态记录的清理由用户显式触发（如 stop --all 或专用清理命令）。
 
         // 首次启动把内置配置模板灌入用户配置（幂等：已存在的不覆盖）。
         //
