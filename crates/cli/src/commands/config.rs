@@ -315,7 +315,6 @@ fn init(args: Args) -> MnResult<i32> {
         )));
     }
 
-    let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
     let cfg = mangosteen_core::config::Config::sample();
     cfg.validate()?;
     let written = store.save(&cfg)?;
@@ -323,7 +322,10 @@ fn init(args: Args) -> MnResult<i32> {
     output::print_success(&format!("已生成配置文件：{}", written.display()));
     println!();
     println!("  {}", output::dim("接下来："));
-    println!("    1. 编辑该文件，填写云服务商凭证（推荐用 env 形式）");
+    println!(
+        "    1. 执行 {} 更新云服务商密钥",
+        output::bold("`mangosteen cloud key <厂商> --secret <密钥> --public-key <公钥>`")
+    );
     println!("    2. 执行 `mangosteen doctor` 自检");
     println!("    3. 执行 `mangosteen models add <path>` 登记模型");
     println!();

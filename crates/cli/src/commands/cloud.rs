@@ -335,6 +335,7 @@ fn key(args: Args) -> MnResult<i32> {
     }
 
     // 处理 secret 更新（私钥）
+    let mut secret_written = false;
     if let Some(secret) = args.get("secret") {
         let secret = secret.trim();
         if secret.is_empty() {
@@ -346,6 +347,7 @@ fn key(args: Args) -> MnResult<i32> {
         let path = dir.join(format!("cloud-{}", provider));
         mangosteen_platform::fs::write_private_file(&path, secret)?;
         provider_cfg.secret = mangosteen_core::config::SecretRef::File(path);
+        secret_written = true;
     }
 
     // 处理 public_key 更新（AccessKey ID，存储在 options 中）
@@ -355,6 +357,13 @@ fn key(args: Args) -> MnResult<i32> {
             return Err(mangosteen_core::MnError::bad_request("公钥不能为空"));
         }
         provider_cfg.options.insert("public_key".to_string(), public_key.to_string());
+    }
+
+    // 写入了私钥且未显式 --disable：自动启用该厂商。
+    // 「没配密钥默认禁用、配了密钥自动激活」是密钥管理的产品语义——
+    // 用户不需要再单独执行 --enable。
+    if secret_written && !args.has("disable") {
+        provider_cfg.enabled = true;
     }
 
     cfg.validate()?;
