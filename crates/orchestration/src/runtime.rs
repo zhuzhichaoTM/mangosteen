@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use mangosteen_base::state::{DeploymentRecord, DeploymentStatus, StateStore};
+use mangosteen_base::state::{DeploymentRecord, DeploymentStatus, RunStatus, StateStore};
 use mangosteen_base::{ConfigStore, ModelStore};
 use mangosteen_core::config::{Config, SchedulerConfig};
 use mangosteen_core::plan::ComputeOrigin;
@@ -93,13 +93,15 @@ pub struct ActiveDeployment {
     pub model: String,
     /// 算力来源
     pub origin: mangosteen_core::plan::ComputeOrigin,
-    /// 状态
+    /// 部署状态：Planned/Provisioning/Ready/Stopped/Failed/Destroyed
     pub status: mangosteen_base::state::DeploymentStatus,
+    /// 运行状态：active/unactive
+    pub run_status: mangosteen_base::state::RunStatus,
     /// 本地访问端口（网关映射端口）
     pub port: Option<u16>,
     /// 远端推理端口（云端实例上的 llama-server 端口）
     pub remote_port: Option<u16>,
-    /// 是否就绪
+    /// 是否就绪（基于 run_status）
     pub ready: bool,
 }
 

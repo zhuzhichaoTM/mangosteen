@@ -88,8 +88,15 @@ fn dedupe_by_model(records: Vec<DeploymentRecord>) -> (Vec<DeploymentRecord>, Ve
         match best.get(&mid) {
             Some(&cur) => {
                 let (cur_r, new_r) = (&records[cur], r);
-                let newer = (new_r.plan.created_at, new_r.updated_at)
-                    > (cur_r.plan.created_at, cur_r.updated_at);
+                // Ready 状态的记录优先保留（部署成功，正在服务中，绝不能被 stop）
+                let cur_ready = cur_r.status == DeploymentStatus::Ready;
+                let new_ready = new_r.status == DeploymentStatus::Ready;
+                let newer = match (cur_ready, new_ready) {
+                    (true, false) => false, // 已有 Ready，新记录不是 Ready，保留旧记录
+                    (false, true) => true,  // 新记录是 Ready，优先保留新记录
+                    _ => (new_r.plan.created_at, new_r.updated_at)
+                        > (cur_r.plan.created_at, cur_r.updated_at), // 都非 Ready，按时间戳比较
+                };
                 if newer {
                     best.insert(mid, idx);
                 }
@@ -128,6 +135,16 @@ impl Orchestrator {
     /// 因此「台账说 Ready」不等于「现在真的能服务」。
     pub fn refresh(&self) -> MnResult<Vec<ActiveDeployment>> {
         let records = self.state.list_active()?;
+        eprintln!(
+            "[refresh] list_active returned {} records",
+            records.len()
+        );
+        for r in &records {
+            eprintln!(
+                "[refresh] record: id={} status={:?} model={}",
+                r.plan.id, r.status, r.plan.model.name
+            );
+        }
         let mut out = Vec::new();
 
         // ---- 先收敛历史遗留的重复实例 ----
@@ -143,7 +160,16 @@ impl Orchestrator {
         // 刚部署成功的新记录反而被判成重复并被 `stop()`。
         // `refresh()` 挂在状态轮询上，所以故障在部署成功后第一次刷新就发生。
         let (keep, dup_ids) = dedupe_by_model(records);
+        eprintln!(
+            "[refresh] dedupe_by_model: keep={} dups={:?}",
+            keep.len(),
+            dup_ids
+        );
         for id in &dup_ids {
+            eprintln!(
+                "[refresh] stopping duplicate deployment id={}",
+                id
+            );
             // 尽力停止；失败也不阻断刷新（台账状态仍会被探活修正）
             let _ = self.stop(id);
         }
@@ -151,7 +177,7 @@ impl Orchestrator {
         for r in keep {
             let id = r.plan.id.clone();
             // 云端：只信台账状态（真实探测需要网络往返，放到推理时兜底）
-            let ready = r.status == DeploymentStatus::Ready;
+            let ready = r.run_status == mangosteen_base::state::RunStatus::Active;
 
             // 远端推理端口（云端实例上的 llama-server 监听端口）
             let remote_port = r.plan.cloud.as_ref().map(|c| c.engine_port);
@@ -168,6 +194,7 @@ impl Orchestrator {
                 ),
                 origin: r.plan.origin.clone(),
                 status: r.status,
+                run_status: r.run_status.clone(),
                 port: r.plan.local_access_port(),
                 remote_port,
                 ready,
@@ -350,20 +377,36 @@ impl Orchestrator {
         };
         orch.instance_metrics(Some(provider), instance_id)
     }
-    /// 状态快照。
+    /// 状态快照。（只读，不修改 state.json 数据）
     pub fn status(&self) -> MnResult<GatewayStatus> {
+        let records = self.state.list()?;
+        let active: Vec<ActiveDeployment> = records
+            .iter()
+            .filter(|r| matches!(r.status, DeploymentStatus::Provisioning | DeploymentStatus::Ready))
+            .map(|r| ActiveDeployment {
+                id: r.plan.id.clone(),
+                model: mangosteen_core::model::ModelEntry::derive_id(
+                    &r.plan.model.name,
+                    r.plan.model.quant,
+                ),
+                origin: r.plan.origin.clone(),
+                status: r.status,
+                run_status: r.run_status.clone(),
+                port: r.plan.local_access_port(),
+                remote_port: r.plan.cloud.as_ref().map(|c| c.engine_port),
+                ready: r.run_status == mangosteen_base::state::RunStatus::Active,
+            })
+            .collect();
         Ok(GatewayStatus {
             version: mangosteen_core::identity::VERSION.to_string(),
             hardware: self.assessor.hardware().describe(),
-            // 「已就绪」而非「已启用」：凭证缺失的服务商不能降级，
-            // 展示成已就绪会误导用户以为本地不足时一定能上云。
             providers: mangosteen_provider::build_registry(&self.config())
                 .registry
                 .names()
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            active: self.refresh()?,
+            active,
         })
     }
 }

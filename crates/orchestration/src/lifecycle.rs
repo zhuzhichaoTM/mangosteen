@@ -73,63 +73,40 @@ impl Orchestrator {
                 eprintln!("[restore] {id}：云端实例正在运行，恢复隧道和推理进程");
 
                 // 恢复隧道
-                // 优先使用台账中已保存的 local_port，如果为 0 则分配新端口
-                let local_port = if cloud_plan.local_port == 0 {
-                    self.scheduler().allocate_local_port()
-                } else {
-                    cloud_plan.local_port
-                };
-                let tunnel_result = if let Some(target) = self.device_target_for(&cloud_plan) {
+                // UI 重启或网关重启时，只建立 SSH 隧道映射，**不修改台账中的 local_port**。
+                // local_port 是 CLI 部署时分配的固定端口，由配置文件的固定范围分配，
+                // 不应随 UI 重启而改变。CLI 和 UI 共用同一套底层实现，端口分配必须一致。
+                let local_port = if let Some(target) = self.device_target_for(&cloud_plan) {
                     let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
                         &target,
                         cloud_plan.engine_port,
                         false,
-                        Some(local_port),
+                        Some(cloud_plan.local_port),
                     );
-                    self.tunnels()
-                        .establish(&spec, Duration::from_secs(30))
-                        .map(|t| t.local_port)
+                    match self.tunnels().establish(&spec, Duration::from_secs(30)) {
+                        Ok(t) => t.local_port,
+                        Err(e) => {
+                            errors.push(format!("{id}：恢复隧道失败：{e}"));
+                            continue;
+                        }
+                    }
                 } else {
                     let mut cloud = self.cloud();
                     let Some(orchestrator) = cloud.as_mut() else {
                         errors.push(format!("{id}：未配置云端能力，无法恢复隧道"));
                         continue;
                     };
-                    orchestrator
-                        .establish_tunnel(provider, instance_id, &cloud_plan)
-                        .and_then(|base| {
-                            base.rsplit(':')
-                                .next()
-                                .and_then(|p| p.trim_end_matches("/v1").parse::<u16>().ok())
-                                .ok_or_else(|| {
-                                    MnError::bad_request(format!("隧道地址无法解析：{base}"))
-                                })
-                        })
-                };
-
-                let local_port = match tunnel_result {
-                    Ok(p) => p,
-                    Err(e) => {
-                        errors.push(format!("{id}：恢复隧道失败：{e}"));
-                        continue;
-                    }
-                };
-
-                self.scheduler().reserve_port(local_port);
-
-                // 更新台账中的端口信息
-                match self.state.get(&id) {
-                    Ok(Some(mut current)) => {
-                        if let Some(c) = current.plan.cloud.as_mut() {
-                            c.local_port = local_port;
+                    match orchestrator.establish_tunnel(provider, instance_id, &cloud_plan) {
+                        Ok(base_url) => {
+                            // 从返回的 base URL 中解析本地端口
+                            base_url.rsplit(':').next().and_then(|p| p.trim_end_matches("/v1").parse::<u16>().ok()).unwrap_or(cloud_plan.local_port)
                         }
-                        if let Err(e) = self.state.upsert(current) {
-                            errors.push(format!("{id}：保存恢复端口失败：{e}"));
+                        Err(e) => {
+                            errors.push(format!("{id}：恢复隧道失败：{e}"));
+                            continue;
                         }
                     }
-                    Ok(None) => errors.push(format!("{id}：台账记录在恢复期间消失")),
-                    Err(e) => errors.push(format!("{id}：读取记录失败：{e}")),
-                }
+                };
 
                 // 检查并启动推理进程（如果进程未运行）
                 if let Some(target) = self.device_target_for(&cloud_plan) {
@@ -659,11 +636,21 @@ impl Orchestrator {
     ///
     /// 这是「实例删除由系统自行处理」的最终落点：删除节点、重复收敛与
     /// 网关关闭等系统侧清理走这里；面向用户的「卸载/取消」只停不删。
+    ///
+    /// 只能关闭状态为 `Ready` 的部署，切换为 `Stopped`。其他状态不变。
     pub fn stop(&self, id: &str) -> MnResult<()> {
         let record = self
             .state
             .get(id)?
             .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
+
+        // 只能关闭 Ready 状态的部署
+        if record.status != DeploymentStatus::Ready {
+            return Err(MnError::bad_request(format!(
+                "部署 `{id}` 当前状态为 {}，不能 stop。只有 ready 状态的部署可停止",
+                record.status.as_str()
+            )));
+        }
 
         match &record.plan.origin {
             ComputeOrigin::Cloud {
@@ -704,7 +691,31 @@ impl Orchestrator {
             }
         }
         self.state
-            .set_status(id, DeploymentStatus::Destroyed, None)?;
+            .set_status(id, DeploymentStatus::Stopped, None)?;
+        Ok(())
+    }
+
+    /// 更新部署的运行状态（active/unactive）。
+    ///
+    /// 仅由后台探测线程调用，不修改 DeploymentStatus，只更新 run_status。
+    /// 避免后台线程在 CLI 退出、SSH 隧道关闭后误把部署记录降级为 failed。
+    pub fn update_run_status(&self, id: &str, active: bool) -> MnResult<()> {
+        let mut state = self.state.load()?;
+        let rec = state
+            .deployments
+            .iter_mut()
+            .find(|r| r.plan.id == id)
+            .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
+        let next = if active {
+            RunStatus::Active
+        } else {
+            RunStatus::Unactive
+        };
+        if rec.run_status != next {
+            rec.run_status = next;
+            rec.updated_at = mangosteen_core::time::now_unix();
+            self.state.save(&state)?;
+        }
         Ok(())
     }
     /// **停止服务**（云端：停推理进程 + 关机实例）。
