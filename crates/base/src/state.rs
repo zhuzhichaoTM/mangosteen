@@ -68,8 +68,11 @@ impl DeploymentStatus {
 pub struct DeploymentRecord {
     /// 部署方案（不可变）
     pub plan: DeploymentPlan,
-    /// 当前状态
+    /// 部署状态：Planned/Provisioning/Ready/Stopped/Failed/Destroyed
     pub status: DeploymentStatus,
+    /// 运行状态：active（运行中）/unactive（未运行）
+    #[serde(default)]
+    pub run_status: RunStatus,
     /// 本地引擎 PID（本地链路）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
@@ -87,12 +90,30 @@ pub struct DeploymentRecord {
     pub config_template: Option<String>,
 }
 
+/// 运行状态：active（运行中）/unactive（未运行）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub enum RunStatus {
+    #[default]
+    Unactive,
+    Active,
+}
+
+impl RunStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RunStatus::Active => "active",
+            RunStatus::Unactive => "unactive",
+        }
+    }
+}
+
 impl DeploymentRecord {
     /// 由方案新建记录（初始状态 `Planned`）。
     pub fn from_plan(plan: DeploymentPlan) -> Self {
         Self {
             plan,
             status: DeploymentStatus::Planned,
+            run_status: RunStatus::Unactive,
             pid: None,
             error: None,
             updated_at: mangosteen_core::time::now_unix(),
@@ -138,6 +159,14 @@ impl DeploymentRecord {
             });
         }
         self.status = next;
+        // 部署状态变更时同步运行状态：Ready→Active，其它终止态→Unactive
+        match next {
+            DeploymentStatus::Ready => self.run_status = RunStatus::Active,
+            DeploymentStatus::Stopped | DeploymentStatus::Failed | DeploymentStatus::Destroyed => {
+                self.run_status = RunStatus::Unactive
+            }
+            _ => {}
+        }
         self.updated_at = mangosteen_core::time::now_unix();
         Ok(())
     }
@@ -226,12 +255,36 @@ impl StateStore {
     pub fn save(&self, state: &StateFile) -> MnResult<()> {
         let text = serde_json::to_string_pretty(state)
             .map_err(|e| MnError::config("state", format!("序列化失败：{e}")))?;
-        mangosteen_platform::fs::atomic_write_str(&self.path, &text)
+        eprintln!(
+            "[state] save: path={:?} deployments_count={} text_len={}",
+            self.path,
+            state.deployments.len(),
+            text.len()
+        );
+        let result = mangosteen_platform::fs::atomic_write_str(&self.path, &text);
+        match &result {
+            Ok(()) => {
+                eprintln!("[state] save: written OK path={:?}", self.path);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[state] save: WRITE FAILED path={:?} error={:?}",
+                    self.path, e
+                );
+            }
+        }
+        result.map_err(|e| MnError::config("state", format!("写入失败：{e}")))
     }
 
     /// 新增记录。同 ID 已存在则覆盖（重建部署场景）。
     pub fn upsert(&self, record: DeploymentRecord) -> MnResult<()> {
         let mut state = self.load()?;
+        let is_new = !state
+            .deployments
+            .iter()
+            .any(|r| r.plan.id == record.plan.id);
+        let id = record.plan.id.clone();
+        let status = record.status;
         match state
             .deployments
             .iter_mut()
@@ -241,7 +294,30 @@ impl StateStore {
             None => state.deployments.push(record),
         }
         state.deployments.sort_by(|a, b| a.plan.id.cmp(&b.plan.id));
-        self.save(&state)
+        eprintln!(
+            "[state] upsert: id={} is_new={} status={:?} path={:?} deployments_count={}",
+            id,
+            is_new,
+            status,
+            self.path,
+            state.deployments.len()
+        );
+        match self.save(&state) {
+            Ok(()) => {
+                eprintln!(
+                    "[state] upsert: saved OK id={} path={:?}",
+                    id, self.path
+                );
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!(
+                    "[state] upsert: SAVE FAILED id={} error={:?} path={:?}",
+                    id, e, self.path
+                );
+                Err(e)
+            }
+        }
     }
 
     /// 只更新部署方案，保留记录当前的状态、PID 和错误信息。
@@ -265,7 +341,26 @@ impl StateStore {
         }
         rec.plan = plan;
         rec.updated_at = mangosteen_core::time::now_unix();
-        self.save(&state)
+        eprintln!(
+            "[state] update_plan: id={} path={:?}",
+            id, self.path
+        );
+        match self.save(&state) {
+            Ok(()) => {
+                eprintln!(
+                    "[state] update_plan: saved OK id={} path={:?}",
+                    id, self.path
+                );
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!(
+                    "[state] update_plan: SAVE FAILED id={} error={:?} path={:?}",
+                    id, e, self.path
+                );
+                Err(e)
+            }
+        }
     }
 
     /// 按 ID 取记录。
@@ -305,6 +400,11 @@ impl StateStore {
             .iter_mut()
             .find(|r| r.plan.id == id)
             .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 未登记")))?;
+        let old_status = rec.status;
+        eprintln!(
+            "[state] set_status: id={id} old={:?} new={:?} error={:?} path={:?}",
+            old_status, next, error, self.path
+        );
         rec.transition(next)?;
         rec.error = error;
         if next != DeploymentStatus::Ready {
@@ -317,7 +417,20 @@ impl StateStore {
             }
         }
         let out = rec.clone();
-        self.save(&state)?;
+        match self.save(&state) {
+            Ok(()) => {
+                eprintln!(
+                    "[state] set_status: saved OK id={id} old={:?} new={:?} path={:?}",
+                    old_status, next, self.path
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[state] set_status: SAVE FAILED id={id} old={:?} new={:?} error={:?} path={:?}",
+                    old_status, next, e, self.path
+                );
+            }
+        }
         Ok(out)
     }
 
@@ -375,11 +488,23 @@ impl StateStore {
     pub fn prune_terminal(&self) -> MnResult<usize> {
         let mut state = self.load()?;
         let before = state.deployments.len();
+        let removed_records: Vec<_> = state
+            .deployments
+            .iter()
+            .filter(|r| matches!(r.status, DeploymentStatus::Destroyed | DeploymentStatus::Failed))
+            .map(|r| (r.plan.id.clone(), r.status.as_str().to_string(), r.plan.model.name.clone()))
+            .collect();
         state
             .deployments
             .retain(|r| !matches!(r.status, DeploymentStatus::Destroyed | DeploymentStatus::Failed));
         let removed = before - state.deployments.len();
         if removed > 0 {
+            eprintln!(
+                "[state] prune_terminal: removed {} records: {:?} path={:?}",
+                removed,
+                removed_records,
+                self.path
+            );
             self.save(&state)?;
         }
         Ok(removed)
