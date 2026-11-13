@@ -354,6 +354,44 @@ fn first_line(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 不可达类 stderr 必须快速失败（不重试）：TCP 没建立时重试每次都要
+    /// 烧满 ConnectTimeout，把「节点已关机」拖成假死（用户实测 stop 卡住）。
+    #[test]
+    fn unreachable_errors_are_fatal() {
+        for line in [
+            "ssh: connect to host 117.50.131.174 port 23: Connection timed out",
+            "ssh: connect to host 10.0.0.1 port 22: Operation timed out",
+            "ssh: connect to host 1.2.3.4 port 22: No route to host",
+            "ssh: connect to host 1.2.3.4 port 22: Network is unreachable",
+            "ssh: connect to host 127.0.0.1 port 23: Connection refused",
+            "ssh: Could not resolve hostname example.com: nodename nor servname provided",
+        ] {
+            assert!(is_deterministic_ssh_error(line), "应快速失败：{line}");
+        }
+    }
+
+    /// 可达但被远端断链必须可重试：网络是通的，只是对端瞬断。
+    #[test]
+    fn remote_closed_links_are_transient() {
+        for line in [
+            "Connection closed by remote host",
+            "Connection reset by peer",
+            "Connection to 117.50.131.174 closed by remote host.",
+            "Connection closed by 117.50.131.174 port 23",
+            "Broken pipe",
+        ] {
+            assert!(!is_deterministic_ssh_error(line), "应重试：{line}");
+        }
+    }
+
+    /// 认证类仍是致命错误（重试无意义）。
+    #[test]
+    fn auth_errors_are_fatal() {
+        assert!(is_deterministic_ssh_error(
+            "root@1.2.3.4: Permission denied (publickey,password)."
+        ));
+    }
+
     #[test]
     fn normalize_tag_adds_latest() {
         assert_eq!(normalize_tag("qwen2.5"), "qwen2.5:latest");
@@ -535,13 +573,16 @@ impl SshTarget {
             "-o".to_string(),
             "LogLevel=ERROR".to_string(),
             "-o".to_string(),
-            "ConnectTimeout=15".to_string(),
+            // 连接超时 5s + 内部重试 2 次：实例不可达时快速失败
+            // （实测：手动关闭节点后 SSH 探测会把 stop/deploy 拖成假死）。
+            // 「可达但被远端断链」由应用层重试覆盖。
+            "ConnectTimeout=5".to_string(),
             // 连接级重试：厂商 SSH 入口是共享转发网关，转发重建期间会
             // 出现「连上即被关闭」和「端口拒绝」的秒级窗口。这组参数让
             // ssh 在建立 TCP 连接阶段自己重试，与应用层重试形成双保险
             // （应用层还负责被远端关闭之后的重新建连）。
             "-o".to_string(),
-            "ConnectionAttempts=5".to_string(),
+            "ConnectionAttempts=2".to_string(),
             // 应用层保活：长命令（apt-get、解压、启动等待循环）可能几十秒
             // 没有任何输出，中间 NAT/网关会把静默连接掐掉。SSP 每 15 秒发
             // 一次心跳，连续 4 次无响应才判定断连——既保活又能及时发现真断。
@@ -807,7 +848,10 @@ pub fn ssh_probe(target: &SshTarget, timeout_secs: u64) -> MnResult<bool> {
 }
 
 pub fn ssh_exec(target: &SshTarget, cmd: &str, timeout_secs: u64) -> MnResult<String> {
-    const MAX_ATTEMPTS: u32 = 5;
+    // 重试 2 次（总尝试 2）：连接层瞬时中断重发一次通常即可恢复；
+    // 5 次会把「实例已关机/失联」的场景拖成数分钟假死（用户实测 stop
+    // 卡在 SSH 重试上），而真正不可达的节点重试几次都一样。
+    const MAX_ATTEMPTS: u32 = 2;
     let mut last: Option<SshFailure> = None;
     for attempt in 1..=MAX_ATTEMPTS {
         match ssh_exec_once(target, cmd) {
@@ -981,12 +1025,23 @@ fn ssh_exec_once_opts(
 
 /// 判断某行 stderr 是否表示**确定性失败**（重试无意义）。
 ///
-/// 只列举认证与配置类错误：这些重试一百次也是同样结果，立即报错才能
-/// 让用户看到真正的原因。其余 255 一律按连接层中断处理——包括
-/// `Connection closed by remote host` 这种「看起来像错误、其实是瞬时
-/// 网络中断」的提示，它恰恰是最该重试的一类。
+/// 两类确定性失败：
+///
+/// 1. **认证/配置类**（任何阶段重试都没用）：Permission denied、
+///    host key 变更、DNS 解析失败等；
+/// 2. **TCP 不可达类**（快速失败：`ssh: connect to host ...` 阶段的
+///    timeout/refused/unreachable——重试每次都要烧满 ConnectTimeout，
+///    把「节点已关机」的场景拖成假死。实测用户手动关闭 GPU 节点后
+///    stop/deploy 卡在 SSH 重试上）。
+///
+/// 注意区分：「connect to host 阶段超时」（TCP 没建立）快速失败；
+/// 「banner exchange 超时」（TCP 已建立，sshd 响应慢/负载高）仍可
+/// 重试。只有「TCP 已建立、会话被远端拆掉」和「握手阶段超时」属于
+/// 瞬态：`Connection closed by remote host` / `Connection reset by
+/// peer` / `Connection to <IP> closed by <...>` / `Broken pipe`。
 fn is_deterministic_ssh_error(line: &str) -> bool {
-    const FATAL_HINTS: [&str; 6] = [
+    // 认证/配置类（任何阶段都致命）
+    const AUTH_HINTS: [&str; 6] = [
         "Permission denied",
         "Too many authentication failures",
         "Host key verification failed",
@@ -994,7 +1049,21 @@ fn is_deterministic_ssh_error(line: &str) -> bool {
         "Could not resolve hostname",
         "No such file or directory",
     ];
-    FATAL_HINTS.iter().any(|h| line.contains(h))
+    if AUTH_HINTS.iter().any(|h| line.contains(h)) {
+        return true;
+    }
+    // TCP 连接阶段失败（ssh: connect to host ...）：不可达类快速失败
+    if line.contains("connect to host") || line.contains("Connecting to") {
+        const UNREACHABLE_HINTS: [&str; 5] = [
+            "Connection timed out",
+            "Operation timed out",
+            "No route to host",
+            "Network is unreachable",
+            "Connection refused",
+        ];
+        return UNREACHABLE_HINTS.iter().any(|h| line.contains(h));
+    }
+    false
 }
 
 /// 把本地文件传到远端（用 `scp`）。
@@ -2257,12 +2326,16 @@ mod ssh_failure_tests {
     /// 这组文案是厂商共享网关在实例重启/迁移期间的典型输出。旧实现
     /// 把「有 stderr」一律当成致命错误，导致这些最该重试的失败反而
     /// 直接终结部署——线上「相同问题重复出现」正是这么来的。
+    ///
+    /// 注：`ssh: connect to host ...: Connection refused`（TCP 层拒绝）
+    /// 已移至「快速失败」组——用户要求不可达快速失败，见
+    /// `unreachable_errors_are_fatal`；banner exchange 超时（TCP 已
+    /// 建立）仍保留可重试。
     #[test]
     fn transient_network_errors_are_retryable() {
         for line in [
             "Connection to 117.50.190.191 closed by remote host.",
             "Connection closed by remote host",
-            "ssh: connect to host 117.50.190.191 port 23: Connection refused",
             "Connection reset by peer",
             "Connection timed out during banner exchange",
             "client_loop: send disconnect: Broken pipe",

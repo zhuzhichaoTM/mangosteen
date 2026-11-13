@@ -248,7 +248,59 @@ impl Orchestrator {
     /// 3. 真正销毁交给系统按策略回收，或在删除自定义节点时处理。
     ///
     /// 自定义节点是用户自己的机器，**只停进程，不关机**。
+    ///
+    /// ## 连接类失败直接删台账（用户要求）
+    ///
+    /// 「远端无法建立连接（非认证）」——实例被手动关闭、被回收、网络
+    /// 不可达——时，远端已经没有可复用的现场，残留的台账只会让下次
+    /// 部署继续连一个死节点。此时删除台账记录，用户重新执行 deploy
+    /// 即从零开始。认证失败（Permission denied）保留台账：机器活着，
+    /// 修好密钥即可重试。
     fn park_failed_instance(&self, id: &str, err: &MnError) {
+        // 连接类失败（非认证）→ 删除台账，重新开始
+        let err_text = err.to_string();
+        let auth_failure = err_text.contains("Permission denied")
+            || err_text.contains("Too many authentication failures");
+        let connect_failure = !auth_failure
+            && matches!(err, MnError::Network { .. })
+            && (err_text.contains("连接")
+                || err_text.contains("隧道")
+                || err_text.contains("失联")
+                || err_text.contains("不可达")
+                || err_text.contains("timed out")
+                || err_text.contains("refused")
+                || err_text.contains("unreachable")
+                || err_text.contains("closed by")
+                || err_text.contains("No route"));
+        if connect_failure {
+            // 清理本部署的隧道（尽力而为），再删台账
+            if let Some(rec) = self.state.get(id).ok().flatten() {
+                if let Some(cloud) = rec.plan.cloud.as_ref() {
+                    if let Some(host) = cloud.node_ip.clone() {
+                        let ssh = SshTarget {
+                            host,
+                            port: cloud.node_ssh_port.unwrap_or(22),
+                            user: cloud.node_ssh_user.clone().unwrap_or_else(|| "root".into()),
+                            password: None,
+                            identity_file: None,
+                        };
+                        let spec = mangosteen_provider::orchestrator::tunnel_spec_for(
+                            &ssh,
+                            cloud.engine_port,
+                            false,
+                            Some(cloud.engine_port),
+                        );
+                        let _ = self.cloud().as_ref().map(|o| o.tunnels().close(&spec));
+                    }
+                }
+            }
+            let _ = self.state.remove(id);
+            eprintln!(
+                "[state] 远端无法建立连接（非认证失败），已清理台账 {id}，可直接重新执行 deploy"
+            );
+            return;
+        }
+
         let Some(rec) = self.state.get(id).ok().flatten() else {
             return;
         };

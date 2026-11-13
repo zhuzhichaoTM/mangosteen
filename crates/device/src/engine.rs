@@ -394,6 +394,7 @@ mod tests {
     use mangosteen_core::estimate::{AssessRequest, KvCacheType};
     use mangosteen_core::hardware::{Accelerator, AcceleratorVendor, HardwareProfile, HostProfile};
     use mangosteen_core::model::{ModelSpec, Quantization};
+    use mangosteen_core::plan::LocalPlan;
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mn-engine-{tag}-{}", std::process::id()));

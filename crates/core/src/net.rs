@@ -235,13 +235,14 @@ impl TunnelSpec {
             // 就是端口转发重建中的 `Connection refused`。
             //
             // 这属于**秒级瞬时故障**，但 ssh 默认只连一次：一次失败就退出
-            // 255，整个部署随之报废。ConnectionAttempts=5 + ConnectTimeout=10
-            // 让 ssh 在内部重试约 50 秒，天然跨过这个窗口——比在应用层
-            // 重试整个 establish 更轻，且不会泄漏端口与进程。
+            // 255，整个部署随之报废。ConnectionAttempts=2 + ConnectTimeout=5
+            // 让 ssh 在内部重试约 10 秒。窗口恢复由应用层重试（仅对「可达
+            // 但被远端断链」）继续覆盖；实例不可达时快速失败，不把用户
+            // 拖在连接超时上（实测：手动关闭节点后 stop/deploy 卡住）。
             "-o".to_string(),
-            "ConnectionAttempts=5".to_string(),
+            "ConnectionAttempts=2".to_string(),
             "-o".to_string(),
-            "ConnectTimeout=10".to_string(),
+            "ConnectTimeout=5".to_string(),
             "-o".to_string(),
             "StrictHostKeyChecking=accept-new".to_string(),
             "-p".to_string(),
@@ -541,12 +542,12 @@ mod tests {
         };
         let args = t.to_ssh_args();
         assert!(
-            args.contains(&"ConnectionAttempts=5".to_string()),
+            args.contains(&"ConnectionAttempts=2".to_string()),
             "缺少连接级重试：{args:?}"
         );
         assert!(
-            args.contains(&"ConnectTimeout=10".to_string()),
-            "缺少连接超时：{args:?}"
+            args.contains(&"ConnectTimeout=5".to_string()),
+            "缺少连接超时（快速失败）：{args:?}"
         );
 
         // ControlMaster 系列参数必须消失：厂商网关按 host:port 区分实例，
