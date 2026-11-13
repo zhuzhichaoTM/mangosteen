@@ -902,6 +902,14 @@ pub struct WhitelistedModel {
     /// * 部署请求把 `(模型名, 模板名)` 对应的正文发给后端解析。
     ///
     /// `default` 只是其中一种方案，不再是隐式兜底。
+    ///
+    /// ## 序列化形态
+    ///
+    /// 模板正文在 `Config::to_toml` 中后处理为**单行字符串**：换行写成
+    /// `\n` 转义序列（`default = "template: default\nmodel_id: ..."`），
+    /// 而不是 toml crate 默认的多行 `"""` 形式。反序列化侧 TOML 解析器
+    /// 把 `\n` 还原为真实换行，内容完全等价；好处是生成的配置结构扁平、
+    /// 便于脚本处理与 diff。老配置文件里的 `"""` 多行形式仍可正常读取。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub templates: BTreeMap<String, String>,
 }
@@ -1063,8 +1071,9 @@ impl Config {
 
     /// 序列化为 TOML（密钥按引用形式输出，不泄露明文）。
     pub fn to_toml(&self) -> MnResult<String> {
-        toml::to_string_pretty(self)
-            .map_err(|e| MnError::config("toml", format!("序列化失败：{e}")))
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| MnError::config("toml", format!("序列化失败：{e}")))?;
+        Ok(collapse_multiline_strings(&text))
     }
 
     /// 从文件加载。
@@ -1161,6 +1170,53 @@ impl Config {
             remote_inferences: Vec::new(),
         }
     }
+}
+
+/// 把 TOML 多行字符串（`"""..."""`）折叠为单行转义形式（`"..."`）。
+///
+/// ## 为什么需要
+///
+/// 模板正文含大量换行，toml crate 的 `to_string_pretty` 会输出多行
+/// `"""` 块，生成的配置段落很长、不利于阅读与 diff。折叠后每个模板是
+/// 一行：换行写为 `\n` 转义序列（TOML 基本字符串合法转义，解析后还原
+/// 为真实换行），内容与原多行形式**完全等价**。
+///
+/// ## 安全性
+///
+/// 只折叠 toml 序列化器实际输出的 `"""` 块——块内容由 toml 保证不含
+/// `"""`（含则序列化器会改用逐字符转义的基本字符串）。内容中的反斜杠、
+/// 双引号、换行统一转义，roundtrip 内容一致。
+fn collapse_multiline_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\"\"\"") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 3..];
+        let Some(end_rel) = after.find("\"\"\"") else {
+            // 无闭合（不应发生），原样输出剩余
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let content = &after[..end_rel];
+        // toml pretty 输出形如 """\ncontent——去掉紧邻起始引号的首个换行
+        let content = content.strip_prefix('\n').unwrap_or(content);
+        // 转义：\ → \\，" → \"，换行 → \n（先反斜杠，避免二次转义）
+        let mut escaped = String::with_capacity(content.len() + 16);
+        for c in content.chars() {
+            match c {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                _ => escaped.push(c),
+            }
+        }
+        out.push('"');
+        out.push_str(&escaped);
+        out.push('"');
+        rest = &after[end_rel + 3..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// 配置文件的候选路径。
