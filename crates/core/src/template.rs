@@ -316,7 +316,8 @@ batch: 512
 ubatch: 128
 cache_k: q4_0
 cache_v: q4_0
-alias: qwen2.5-0.5b"#,
+alias: qwen2.5-0.5b
+"#,
     ),
     (
         "qwen3.8-27b",
@@ -357,7 +358,8 @@ multimodal:
   mmproj: mmproj-BF16.gguf
 host: 0.0.0.0
 alias: qwen3.8-27b
-# port: 由部署调度器按节点占用情况动态分配"#,
+# port: 由部署调度器按节点占用情况动态分配
+"#,
     ),
     (
         "qwen3.8-27b",
@@ -396,7 +398,8 @@ alias: qwen3.8-27b
 # port: 由部署调度器按节点占用情况动态分配
 # 注：本模板**不使用外置草稿模型**。
 # 主权重 GGUF 自带 Qwen3.8 原生内嵌 MTP 头，只传 --spec-type draft-mtp
-# 即可获得投机解码加速，无需任何额外文件。"#,
+# 即可获得投机解码加速，无需任何额外文件。
+"#,
     ),
 ];
 

@@ -1071,11 +1071,9 @@ impl Config {
 
     /// 序列化为 TOML（密钥按引用形式输出，不泄露明文）。
     pub fn to_toml(&self) -> MnResult<String> {
-        // 模板正文用 toml 原生多行 """ 形式：单行双引号字符串不能包含真实
-        // 换行（TOML 语法限制，行尾反斜杠续行 toml 0.8 解析器不接受），
-        // 多行字符串是「每个参数独立一行」的唯一标准形式。
-        toml::to_string_pretty(self)
-            .map_err(|e| MnError::config("toml", format!("序列化失败：{e}")))
+        let text = toml::to_string_pretty(self)
+            .map_err(|e| MnError::config("toml", format!("序列化失败：{e}")))?;
+        Ok(newline_before_closing(&text))
     }
 
     /// 从文件加载。
@@ -1172,6 +1170,42 @@ impl Config {
             remote_inferences: Vec::new(),
         }
     }
+}
+
+/// 让多行字符串的闭合 `"""` 独立成行：`alias: x"""` → `alias: x\n"""`。
+///
+/// ## 为什么需要
+///
+/// 模板正文以 `alias: qwen2.5-0.5b` 等内容结尾时，toml 序列化会把闭合
+/// 三引号紧跟在最后一行内容后面，最后一行变成 `alias: x"""`，可读性差。
+/// 在闭合引号前补一个换行，内容行与结束符分离——解析后字符串仅在末尾
+/// 多一个换行（解析器忽略尾部空行，功能等价）。
+///
+/// ## 起始/闭合区分
+///
+/// 状态机扫描：`"""` 交替出现，第一个是起始（不处理），第二个是闭合
+/// （前插换行），依次类推。toml 序列化器保证字符串内容不含 `"""`，
+/// 状态机不会误判。
+fn newline_before_closing(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut rest = text;
+    let mut in_string = false;
+    while let Some(pos) = rest.find("\"\"\"") {
+        out.push_str(&rest[..pos]);
+        if in_string {
+            // 闭合：前补换行（若前不是换行）
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            in_string = false;
+        } else {
+            in_string = true;
+        }
+        out.push_str("\"\"\"");
+        rest = &rest[pos + 3..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// 配置文件的候选路径。
