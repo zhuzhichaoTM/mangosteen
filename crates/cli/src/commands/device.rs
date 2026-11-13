@@ -23,6 +23,9 @@ use crate::output;
 use mangosteen_platform::paths;
 
 /// 允许的选项。
+///
+/// 已移除的死选项（无任何执行分支，纯占位）：
+/// `--env`（环境变量读密码）、`--enable` / `--disable`（节点启停）。
 const ALLOWED: &[&str] = &[
     "config",
     "json",
@@ -32,9 +35,6 @@ const ALLOWED: &[&str] = &[
     "workdir",
     "password",
     "name",
-    "env",
-    "enable",
-    "disable",
 ];
 
 /// 入口。
@@ -330,9 +330,6 @@ fn print_device_help() {
     println!("  {:<w$}  {}", "--workdir <目录>", "远端工作目录（默认 /root/mangosteen）", w = 22);
     println!("  {:<w$}  {}", "--password <密码>", "SSH 登录密码", w = 22);
     println!("  {:<w$}  {}", "--name <名称>", "节点显示名称", w = 22);
-    println!("  {:<w$}  {}", "--env", "从环境变量读取密码", w = 22);
-    println!("  {:<w$}  {}", "--enable", "启用节点", w = 22);
-    println!("  {:<w$}  {}", "--disable", "禁用节点", w = 22);
     println!();
     println!("{}", output::bold("示例"));
     println!("  mangosteen device list");
