@@ -693,12 +693,106 @@ impl Orchestrator {
         Ok(stopped)
     }
 
+    /// 查询共享同一 `provider/instance_id` 的其他部署（排除自身与终态）。
+    ///
+    /// ## 为什么需要
+    ///
+    /// 实例按 GPU 型号复用（`provision_resources` 的复用分支），同一实例
+    /// 上可以并存多个部署的模型文件与推理进程（实测：qwen2.5-0.5b 与
+    /// qwen3.8-27b 复用同一台 V100S）。`stop`/`stop_service` 若无检查地
+    /// `teardown`/`power_off` 整个实例，会把共享它的其他部署一起关掉
+    /// ——台账里那些部署仍是 ready，实际节点已经没了。
+    ///
+    /// 返回非空即表示「实例是共享的，不能关机，只能停本部署的进程」。
+    /// 终态（Stopped/Destroyed）不占实例，不算在内；
+    /// Failed/Provisioning/Ready/Planned 都算。
+    fn other_deployments_on_instance(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        exclude_id: &str,
+    ) -> Vec<(String, String)> {
+        let state = match self.state.load() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        // 台账记录 → 实例占用视图（回退规则与 stop 一致）
+        let refs: Vec<InstanceRef> = state
+            .deployments
+            .iter()
+            .map(|r| {
+                let (p, i) = match &r.plan.origin {
+                    ComputeOrigin::Cloud {
+                        provider,
+                        instance_id,
+                    } => (provider.clone(), instance_id.clone()),
+                    _ => (String::new(), String::new()),
+                };
+                let p = if p.trim().is_empty() {
+                    r.plan
+                        .cloud
+                        .as_ref()
+                        .map(|c| c.provider.clone())
+                        .unwrap_or_default()
+                } else {
+                    p
+                };
+                InstanceRef {
+                    id: r.plan.id.clone(),
+                    provider: p,
+                    instance_id: i,
+                    status: r.status.as_str().to_string(),
+                }
+            })
+            .collect();
+        filter_other_deployments_on_instance(&refs, provider, instance_id, exclude_id)
+    }
+
+    /// 共享实例时的统一停止路径：**只按端口停本部署的推理进程，绝不关机**。
+    ///
+    /// 供 `stop`/`stop_service` 在「实例上还有其他部署或未知进程」时调用。
+    /// 失败不致命（实例可能本来就是关机状态，SSH 不可达），记入 warnings
+    /// 由调用方决定如何提示。
+    ///
+    /// 台账缺少引擎端口时**不盲停**：旧实现会退回无差别杀全部
+    /// llama-server，误伤同节点其它模型。
+    fn stop_shared_instance_service(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        engine_port: Option<u16>,
+        warnings: &mut Vec<String>,
+    ) {
+        let Some(port) = engine_port else {
+            warnings.push("台账缺少引擎端口，无法精确停止推理进程（拒绝无差别停止）".into());
+            return;
+        };
+        if let Some(o) = self.cloud().as_ref() {
+            if let Err(e) = o.stop_service_on_port(provider, instance_id, port) {
+                warnings.push(format!("停止推理进程：{e}"));
+            }
+        }
+    }
+
     /// 停止部署（释放本地进程 / 销毁云端实例）。
     ///
     /// 这是「实例删除由系统自行处理」的最终落点：删除节点、重复收敛与
     /// 网关关闭等系统侧清理走这里；面向用户的「卸载/取消」只停不删。
     ///
     /// 只能关闭状态为 `Ready` 的部署，切换为 `Stopped`。其他状态不变。
+    ///
+    /// ## 共享实例保护（实测踩坑后新增）
+    ///
+    /// 实例按 GPU 型号复用，一个实例可并存多个部署。旧实现无条件
+    /// `teardown` 整个实例——stop 其中一个部署会把共享它的其他部署
+    /// 一起关机（实测：stop qwen2.5-0.5b 把同实例的 qwen3.8-27b 节点
+    /// 关机，台账却仍显示 ready）。现在关实例前做两道检查：
+    ///
+    /// 1. 台账：是否还有其他部署引用同一实例（`other_deployments_on_instance`）；
+    /// 2. 远端进程：是否有非本部署的 llama-server 在跑
+    ///    （`has_foreign_service_process`，覆盖手工启动等台账外来源）。
+    ///
+    /// 任一命中 → 只按端口停本部署进程，实例保留，台账备注说明原因。
     pub fn stop(&self, id: &str) -> MnResult<()> {
         let record = self
             .state
@@ -739,6 +833,59 @@ impl Orchestrator {
                 // 仍然为空（自建设备/无远端）：没有厂商资源可销毁，
                 // 直接销毁台账即可。
                 if !provider.trim().is_empty() {
+                    let engine_port = record.plan.cloud.as_ref().map(|c| c.engine_port);
+                    let mut warnings = Vec::new();
+
+                    // 1) 台账检查：同实例是否还有其他部署
+                    let others =
+                        self.other_deployments_on_instance(&provider, instance_id, id);
+                    // 2) 远端进程检查：是否有台账外的 llama-server 在跑
+                    let mut foreign = false;
+                    if let Some(o) = self.cloud().as_ref() {
+                        match o.has_foreign_service_process(&provider, instance_id, engine_port)
+                        {
+                            Ok(true) => foreign = true,
+                            Ok(false) => {}
+                            // SSH 不可达（实例已关机等）：无法判断，不阻止
+                            // 关机——已关机的实例上不可能有进程在跑。
+                            Err(e) => warnings.push(format!("远端进程检查跳过：{e}")),
+                        }
+                    }
+
+                    if !others.is_empty() || foreign {
+                        // 共享实例：只停本部署进程，实例保留
+                        self.stop_shared_instance_service(
+                            &provider,
+                            instance_id,
+                            engine_port,
+                            &mut warnings,
+                        );
+                        let mut note = String::from("实例保留（未关机）：");
+                        if !others.is_empty() {
+                            note.push_str(&format!(
+                                "同实例仍有其他部署 {}；",
+                                others
+                                    .iter()
+                                    .map(|(did, st)| format!("{did}({st})"))
+                                    .collect::<Vec<_>>()
+                                    .join("、")
+                            ));
+                        }
+                        if foreign {
+                            note.push_str("实例上有非本部署的推理进程在运行；");
+                        }
+                        note.push_str("如需彻底释放，先停掉同实例的其他部署");
+                        let note = if warnings.is_empty() {
+                            Some(note)
+                        } else {
+                            Some(format!("{note}（但：{}）", warnings.join("；")))
+                        };
+                        self.state
+                            .set_status(id, DeploymentStatus::Stopped, note)?;
+                        return Ok(());
+                    }
+
+                    // 独占实例：原逻辑（关隧道 + 关机保留）
                     if let Some(o) = self.cloud().as_mut() {
                         let errors = o.teardown(&provider, instance_id);
                         if !errors.is_empty() {
@@ -835,11 +982,71 @@ impl Orchestrator {
                 let o = cloud.as_mut().ok_or_else(|| {
                     MnError::bad_request("未配置云端能力，无法操作云端部署".to_string())
                 })?;
-                // 1) 先停推理进程。失败不致命——它可能本来就没跑（上次已停），
-                //    但**要记下来**，因为「进程停不掉」意味着关机时可能丢数据。
+
+                // ## 共享实例保护（与 stop 同一规则）
+                //
+                // power_off 关掉的是整个实例。实例按 GPU 型号复用，台账里
+                // 可能还有别的部署引用它，远端还可能有台账外的推理进程
+                // （手工启动等）。任一命中 → 只按端口停本部署进程，不关机。
+                let engine_port = record.plan.cloud.as_ref().map(|c| c.engine_port);
+                let others = self.other_deployments_on_instance(&provider, instance_id, id);
                 let mut warnings = Vec::new();
-                if let Err(e) = o.stop_service(&provider, instance_id) {
-                    warnings.push(format!("停止推理进程：{e}"));
+                let mut foreign = false;
+                match o.has_foreign_service_process(&provider, instance_id, engine_port) {
+                    Ok(true) => foreign = true,
+                    Ok(false) => {}
+                    Err(e) => warnings.push(format!("远端进程检查跳过：{e}")),
+                }
+                if !others.is_empty() || foreign {
+                    let mut ws = warnings;
+                    // 只按端口停本部署进程；台账缺端口时不盲停
+                    // （旧实现无差别杀全部 llama-server，误伤同节点其它模型）
+                    match engine_port {
+                        Some(p) => {
+                            if let Err(e) = o.stop_service_on_port(&provider, instance_id, p) {
+                                ws.push(format!("停止推理进程：{e}"));
+                            }
+                        }
+                        None => ws.push(
+                            "台账缺少引擎端口，无法精确停止推理进程（拒绝无差别停止）".into(),
+                        ),
+                    }
+                    let mut note = String::from("实例保留（未关机）：");
+                    if !others.is_empty() {
+                        note.push_str(&format!(
+                            "同实例仍有其他部署 {}；",
+                            others
+                                .iter()
+                                .map(|(did, st)| format!("{did}({st})"))
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        ));
+                    }
+                    if foreign {
+                        note.push_str("实例上有非本部署的推理进程在运行；");
+                    }
+                    note.push_str("如需彻底释放，先停掉同实例的其他部署");
+                    let note = if ws.is_empty() {
+                        Some(note)
+                    } else {
+                        Some(format!("{note}（但：{}）", ws.join("；")))
+                    };
+                    self.state.set_status(id, DeploymentStatus::Stopped, note)?;
+                    return Ok(());
+                }
+
+                // 1) 先停推理进程（按端口精确停，失败不致命——它可能本来
+                //    就没跑）。台账缺端口时不盲停：无差别杀全部
+                //    llama-server 会误伤同节点其它模型。
+                match engine_port {
+                    Some(p) => {
+                        if let Err(e) = o.stop_service(&provider, instance_id, p) {
+                            warnings.push(format!("停止推理进程：{e}"));
+                        }
+                    }
+                    None => warnings.push(
+                        "台账缺少引擎端口，跳过停止推理进程（拒绝无差别停止）".into(),
+                    ),
                 }
                 // 2) 再关机。这一步失败必须报错——机器还在跑就意味着继续计费。
                 o.power_off(&provider, instance_id)?;
@@ -1600,5 +1807,93 @@ impl Orchestrator {
     /// 关闭网关：停止全部部署，释放资源。
     pub fn shutdown(&self) -> Vec<(String, String)> {
         self.stop_all()
+    }
+}
+
+/// 台账记录的「实例占用视图」：过滤共享部署所需的最小投影。
+struct InstanceRef {
+    id: String,
+    provider: String,
+    instance_id: String,
+    status: String,
+}
+
+/// 从实例占用视图中筛出共享同一 `provider/instance_id` 的其他部署（纯函数）。
+///
+/// 判据与 [`Orchestrator::stop`] 一致；终态（stopped/destroyed）不占实例。
+fn filter_other_deployments_on_instance(
+    records: &[InstanceRef],
+    provider: &str,
+    instance_id: &str,
+    exclude_id: &str,
+) -> Vec<(String, String)> {
+    records
+        .iter()
+        .filter(|r| r.id != exclude_id)
+        .filter(|r| r.provider == provider && r.instance_id == instance_id)
+        .filter(|r| !matches!(r.status.as_str(), "stopped" | "destroyed"))
+        .map(|r| (r.id.clone(), r.status.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 实例占用视图构造（字段与台账投影一致）。
+    fn iref(id: &str, provider: &str, instance_id: &str, status: &str) -> InstanceRef {
+        InstanceRef {
+            id: id.into(),
+            provider: provider.into(),
+            instance_id: instance_id.into(),
+            status: status.into(),
+        }
+    }
+
+    /// 实测踩坑场景：qwen2.5-0.5b 与 qwen3.8-27b 共享同一台 V100S。
+    /// stop 其中一个时，另一个必须被识别为「共享部署」。
+    #[test]
+    fn shared_instance_detected() {
+        let records = vec![
+            iref("dep-a", "compshare", "uhost-1", "stopped"),
+            iref("dep-b", "compshare", "uhost-1", "ready"),
+            iref("dep-c", "compshare", "uhost-2", "ready"),
+        ];
+        let others = filter_other_deployments_on_instance(&records, "compshare", "uhost-1", "dep-a");
+        assert_eq!(others.len(), 1, "同实例其他部署应被识别：{others:?}");
+        assert_eq!(others[0].0, "dep-b");
+        assert_eq!(others[0].1, "ready");
+    }
+
+    /// 终态（Stopped/Destroyed）不占实例，不算共享。
+    #[test]
+    fn terminal_status_not_counted() {
+        let records = vec![
+            iref("dep-a", "compshare", "uhost-1", "ready"),
+            iref("dep-b", "compshare", "uhost-1", "stopped"),
+            iref("dep-c", "compshare", "uhost-1", "destroyed"),
+        ];
+        let others = filter_other_deployments_on_instance(&records, "compshare", "uhost-1", "dep-a");
+        assert!(others.is_empty(), "终态不应算共享：{others:?}");
+    }
+
+    /// Failed/Provisioning 等非终态仍占实例（可能重试/恢复），必须算共享。
+    #[test]
+    fn failed_and_provisioning_count_as_shared() {
+        let records = vec![
+            iref("dep-a", "compshare", "uhost-1", "ready"),
+            iref("dep-b", "compshare", "uhost-1", "failed"),
+            iref("dep-c", "compshare", "uhost-1", "provisioning"),
+        ];
+        let others = filter_other_deployments_on_instance(&records, "compshare", "uhost-1", "dep-a");
+        assert_eq!(others.len(), 2, "非终态应算共享：{others:?}");
+    }
+
+    /// 空 instance_id（origin 非云端且 cloud 也为空）不会误匹配真实实例。
+    #[test]
+    fn empty_instance_id_not_matched() {
+        let records = vec![iref("dep-b", "compshare", "", "ready")];
+        let others = filter_other_deployments_on_instance(&records, "compshare", "uhost-1", "dep-a");
+        assert!(others.is_empty(), "空实例号不应命中：{others:?}");
     }
 }

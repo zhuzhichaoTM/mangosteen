@@ -276,8 +276,10 @@ impl Orchestrator {
             && !instance_id.trim().is_empty()
         {
             if let Some(o) = self.cloud().as_mut() {
-                // 先停进程（可能已起来），再关机
-                let _ = o.stop_service(provider, instance_id);
+                // 先按端口停本部署的进程（可能已起来），再关机。
+                // 绝不无差别杀：共享节点保护已在上面判过，但同端口精确
+                // 停止是双保险，避免误伤同实例其它模型。
+                let _ = o.stop_service(provider, instance_id, cloud.engine_port);
                 if let Err(e) = o.power_off(provider, instance_id) {
                     note = format!("{err}；且实例 {instance_id} 关机失败，可能仍在计费：{e}");
                 } else {

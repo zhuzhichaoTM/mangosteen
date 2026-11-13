@@ -692,21 +692,41 @@ impl CloudOrchestrator {
         ensure_key_target(&inst, &self.config, Some("1qaz@WSX"))
     }
 
-    /// **停止服务**：停掉远端 `llama-server`，保留实例。
+    /// **停止服务**：只停指定部署端口对应的 `llama-server`，保留实例。
     ///
     /// 与 [`Self::teardown`] 的区别见 `remote::stop_llama_server` 的说明——
     /// 这里**不销毁实例**，所以仍在计费。上层必须把这一点告诉用户。
-    pub fn stop_service(&self, provider: &str, instance_id: &str) -> MnResult<()> {
+    ///
+    /// ## 为什么必须带端口（实测踩坑）
+    ///
+    /// 实例按 GPU 型号复用，同节点可并存多个部署。旧签名不带端口，
+    /// 内部走 `stop_llama_server`（三路并集 + `pkill -x llama-server`
+    /// 兜底）——**整机全部 llama-server 一起杀**。stop 其中一个模型
+    /// 会误杀同节点其它模型。现在按端口精确停止：pid 文件
+    /// （`llama-server-<port>.pid`）+ 命令行含 `--port <p>` + 监听该端口
+    /// 的进程，三者取并集，绝不 `pkill` 兜底。
+    pub fn stop_service(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        engine_port: u16,
+    ) -> MnResult<()> {
         let target = self.service_target(provider, instance_id)?;
-        let result = mangosteen_device::remote::stop_llama_server(&target, &self.config.remote_workdir);
+        let result = mangosteen_device::remote::stop_llama_server_on_port(
+            &target,
+            &self.config.remote_workdir,
+            Some(engine_port),
+        );
         match &result {
             Ok(()) => eprintln!(
-                "[cloud] ✓ 实例 {} 停止服务成功（llama-server 已关闭）",
-                instance_id
+                "[cloud] ✓ 实例 {} 端口 {} 的 llama-server 已停止（不影响同节点其它模型）",
+                instance_id,
+                engine_port
             ),
             Err(e) => eprintln!(
-                "[cloud] ⚠ 实例 {} 停止服务失败：{e}",
-                instance_id
+                "[cloud] ⚠ 实例 {} 端口 {} 停止服务失败：{e}",
+                instance_id,
+                engine_port
             ),
         }
         result
@@ -729,6 +749,40 @@ impl CloudOrchestrator {
             &self.config.remote_workdir,
             Some(engine_port),
         )
+    }
+
+    /// 检查远端是否还有**非本部署**的 llama-server 进程在运行。
+    ///
+    /// ## 为什么需要
+    ///
+    /// stop/teardown 关机前，除了台账里可见的其他部署，还要看远端进程
+    /// 表：手工启动或其他来源的服务不在台账里，关机就会把它们一起中断。
+    /// `own_port` 指定的本部署进程不算 foreign（它随后会被精确停掉）。
+    ///
+    /// SSH 不可达（实例已关机等）时返回 Err——调用方应视为「无法判断，
+    /// 不阻止关机」，因为已关机的实例上不可能有进程在跑。
+    pub fn has_foreign_service_process(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        own_port: Option<u16>,
+    ) -> MnResult<bool> {
+        let target = self.service_target(provider, instance_id)?;
+        let out = mangosteen_device::remote::ssh_exec(
+            &target,
+            "pgrep -af llama-server 2>/dev/null || true",
+            60,
+        )?;
+        let own = own_port.map(|p| format!("--port {p}"));
+        let foreign = out.lines().any(|l| {
+            let l = l.trim();
+            !l.is_empty()
+                && match &own {
+                    Some(p) => !l.contains(p.as_str()),
+                    None => true,
+                }
+        });
+        Ok(foreign)
     }
 
     /// 检查指定端口的推理服务是否在运行。
