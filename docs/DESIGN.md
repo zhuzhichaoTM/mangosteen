@@ -1,7 +1,7 @@
 # Mangosteen 系统设计文档
 
-> 本文是 Mangosteen（山竹）的技术基线。所有实现必须与此对齐；  
-> 需要偏离时必须先改本文，再改代码。
+> 本文是 Mangosteen（山竹）的技术基线，与代码仓当前实现严格对齐。  
+> 所有实现必须与本文一致；需要偏离时先改本文、再改代码。
 
 ## 目录
 
@@ -13,15 +13,16 @@
 6. [多云统一抽象](#6-多云统一抽象)
 7. [后端节点选择器](#7-后端节点选择器)
 8. [云端网络工具集](#8-云端网络工具集)
-9. [统一协议适配层](#9-统一协议适配层)
-10. [会话管理](#10-会话管理)
-11. [基础能力层](#11-基础能力层)
-12. [平台适配层](#12-平台适配层)
-13. [配置体系](#13-配置体系)
-14. [错误处理与降级](#14-错误处理与降级)
-15. [安全设计](#15-安全设计)
-16. [测试策略](#16-测试策略)
-17. [架构约束的自动化守护](#17-架构约束的自动化守护)
+9. [部署编排与生命周期](#9-部署编排与生命周期)
+10. [统一协议适配层](#10-统一协议适配层)
+11. [会话管理](#11-会话管理)
+12. [基础能力层](#12-基础能力层)
+13. [平台适配层](#13-平台适配层)
+14. [配置体系](#14-配置体系)
+15. [错误处理与降级](#15-错误处理与降级)
+16. [安全设计](#16-安全设计)
+17. [测试策略](#17-测试策略)
+18. [架构约束的自动化守护](#18-架构约束的自动化守护)
 
 ---
 
@@ -29,30 +30,30 @@
 
 ### 目标
 
-| 目标          | 衡量方式                            |
-| ----------- | ------------------------------- |
-| 用户无需理解算力来源  | 上层只面对一个 OpenAI 兼容 base URL      |
-| 自动选择最优GPU节点 | 云端方案必带非空降级轨迹；四维打分（价格/延迟/可用性/硬件）          |
-| 云端行为一致   | 同一套 llama.cpp 参数语义；同一份资源估算公式    |
-| 新增云厂商不改上层代码 | 配置化驱动；`ProviderDriver` 接口稳定     |
-| 三平台原生可用     | 所有平台差异收敛到 `mangosteen-platform` |
+| 目标 | 衡量方式 |
+|------|---------|
+| 用户无需理解算力来源 | 上层只面对一个 OpenAI 兼容 base URL |
+| 自动选择最优 GPU 节点 | 纯价格序或四维打分；云端方案必带非空降级轨迹 |
+| 云端行为一致 | 同一套 llama.cpp 参数语义；同一份资源估算公式 |
+| 新增云厂商不改上层代码 | 配置化驱动；`ProviderDriver` 接口稳定 |
+| 三平台原生可用 | 所有平台差异收敛到 `mangosteen-platform`（本地支持 macOS / Windows / Linux） |
 
 ### 明确不做
 
 - 集群、多租户、分布式推理
 - Agent 框架
+- 本地模型推理部署（`target=local` 被调度器明确拒绝，本地推理交由 Ollama 承担）
+- 远端节点非 Linux 系统（镜像选择强制 Linux，见 §6.6）
 
-理由：这些能力会显著增加复杂度，却不服务于"个人开发者跑模型"这个单一场景。
+理由：这些能力会显著增加复杂度，却不服务于「个人开发者把大模型部署到云端 GPU」这个单一场景。
 
 ### 已调整的边界（记录变更，避免照旧基线改回去）
 
 | 原边界 | 现基线 | 调整原因 |
 |--------|--------|----------|
-| 不内置对话界面 | UI 提供完整对话窗口 | 用户要求「部署 + 使用一体」：部署完就在同一个客户端里对话，不用另开工具 |
-| 推理引擎唯一 llama.cpp | 可配置多引擎，默认 llama.cpp | 用户已有不同栈（llama.cpp / Ollama / vLLM…），强制单一引擎会把人挡在门外 |
+| 不内置对话界面 | UI 提供完整对话窗口 | 部署 + 使用一体：部署完就在同一个客户端里对话 |
+| 推理引擎唯一 llama.cpp | 引擎插件化（llama.cpp + Ollama 已实现） | 用户已有不同栈；差异收敛在 `EnginePlugin`，新增引擎不改调度主链路 |
 | 模型格式只用 GGUF | 下载不限格式，只标识类型 | 非 GGUF 是别的引擎要用的；替他决定「只能下 GGUF」是错的 |
-
-三条调整都**不改变**网关唯一收口这条核心原则。
 
 ---
 
@@ -60,116 +61,102 @@
 
 ### 2.1 五层
 
-严格对齐基线的自上而下链路：**用户会话管理 → API Server → 引擎管理 →
-模型评估 → 节点选择 → 节点配置 → 模型下载 → 加载执行**。
+自上而下：**用户会话与交互 → API 网关 → 编排调度核心 → 设备执行与节点供应 → 基础支撑与平台适配**。
 
 ```
 ┌─ 第一层  用户会话与交互层 ─────────────────────────────────┐
-│  mangosteen-session   用户会话管理                          │
-│      · 推理会话（对话上下文）                                │
-│      · 部署任务会话（状态 + 操作记录）                       │
-│  交互入口：mangosteen-cli（CLI/TUI）                         │
-│            mangosteen-webui（独立 Web 控制台静态资源）       │
+│  mangosteen-session   会话领域模型 + 持久化                  │
+│  交互入口：mangosteen-cli（命令行 + ui 启动 Web 控制台）      │
+│            mangosteen-webui（单文件 Web 控制台静态资源）      │
 └──────────────────────┬────────────────────────────────────┘
-                       │ 只与 API Server 通信
+                       │ 只与 API 网关通信
 ┌──────────────────────▼────────────────────────────────────┐
-│ 第二层  API 网关层                                          │
-│  mangosteen-gateway   唯一收口                              │
-│      · [OI] 兼容接口（/v1/*）                               │
-│      · 部署管理接口（/api/*）                               │
-│      · 鉴权、协议解析、请求路由、状态回传                    │
+│ 第二层  API 网关层（mangosteen-gateway）                    │
+│  唯一功能收口：HTTP 服务（标准库手写，8 worker 线程池）        │
+│  · 统一协议适配层（/v1/*：OpenAI + Anthropic 兼容）           │
+│  · 部署管理接口（/api/*，54 条路由）                          │
+│  · 鉴权、协议解析、请求路由、状态回传                         │
+│  · 四个后台线程：runprobe / sshmon / cloudmon / pull_worker   │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
 │ 第三层  编排调度核心层（mangosteen-orchestration）            │
-│  ① 模型评估    orchestration::assess                        │
-│  ② 模式决策    orchestration::scheduler（云端候选打分）           │
-│  ③ 节点优选    orchestration::scheduler + core::policy       │
-│  ④ 节点配置    core::plan（本地/云端两套 + EngineLaunchConfig）│
-│  ⑤ 部署编排    orchestration::orchestrator（评估→决策→执行）  │
-│  ⑥ 运行生命周期 停止服务 / 恢复服务 / 回滚 / 探活            │
+│  ① 模型评估    assess（Assessor，纯估算 + 文件头解析）         │
+│  ② 模式决策    scheduler::decide（四条不变量 I1–I4）           │
+│  ③ 部署编排    deploy / provision（阶段划分 + perf 计时）      │
+│  ④ 运行生命周期 lifecycle（stop / stop_service / unload /      │
+│     恢复 / 中止回滚；关实例判据 = 引擎端口占用制）              │
+│  ⑤ 节点选择    cloud / 复用（按 GPU 型号复用实例）              │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
 │ 第四层  设备执行与节点供应                                    │
-│  device（本地/云端共用）：模型下载、格式适配、引擎插件、      │
-│         远端 SSH 执行、模型加载、探活、停止                   │
-│  provider（仅节点供应）：GPU 实例 CRUD、厂商驱动、            │
-│         SSH 隧道、节点连接（不运行模型）                      │
-│  base：模型/部署台账、配置存储、文件访问控制（可选量化）       │
+│  mangosteen-device（本地/云端共用）：引擎插件、本地/远端拉起、  │
+│    探活、停止、远端模型下载（aria2c/curl）                     │
+│  mangosteen-provider（仅节点供应）：GPU 实例 CRUD、厂商驱动、   │
+│    SSH 隧道、远端执行（不运行模型）                             │
+│  mangosteen-base：模型/部署台账、配置存储、下载、文件访问控制    │
 └──────────────────────┬────────────────────────────────────┘
                        │
 ┌──────────────────────▼────────────────────────────────────┐
 │ 第五层  基础支撑层                                           │
-│  core（领域类型 / 配置结构 / 错误 / SPI / 纯算法）            │
-│  platform（平台适配：路径 / 进程 / 硬件 / 动态库）            │
+│  mangosteen-core（领域类型 / 配置 / 错误 / SPI / 纯算法）      │
+│  mangosteen-platform（路径 / 进程 / 硬件 / 信号 / docconv）    │
 └───────────────────────────────────────────────────────────┘
+```
 
 ### 2.2 crate 与层的对应关系
 
-层是**逻辑划分**，crate 是**编译单元**。当前按职责一个 crate 只归一层。
+层是**逻辑划分**，crate 是**编译单元**。共 10 个 crate，约 6.3 万行（src）。
 
-| 层 | crate | 说明 |
-|----|-------|------|
-| 一 | `mangosteen-session` | 会话领域模型 + 持久化 |
-| 一 | `mangosteen-cli` | 交互入口（参数解析、TUI） |
-| 一 | `mangosteen-webui` | 单文件 Web 控制台静态资源 |
-| 二 | `mangosteen-gateway` | HTTP 服务、路由、OpenAI 协议、唯一收口（薄门面） |
-| 三 | `mangosteen-orchestration` | 模型评估、模式决策、节点优选、部署编排、运行生命周期 |
-| 三 | `mangosteen-core::plan` | 节点配置（本地 / 云端 / EngineLaunchConfig） |
-| 四 | `mangosteen-device` | 本地与云端共用的模型资产、引擎与运行时 |
-| 四 | `mangosteen-provider` | GPU 节点供应、厂商驱动、隧道与节点连接 |
-| 四 | `mangosteen-base` | 模型/部署台账、配置存储、文件访问控制 |
-| 五 | `mangosteen-core` / `mangosteen-platform` | 领域契约与平台适配 |
+| 层 | crate | 规模 | 说明 |
+|----|-------|------|------|
+| 一 | `mangosteen-session` | ~560 行 | 会话领域模型 + 持久化 |
+| 一 | `mangosteen-cli` | ~5,300 行 | 命令行入口（含 layering 架构守护测试 1,031 行） |
+| 一 | `mangosteen-webui` | 单文件 | 内嵌 Web 控制台（index.html ~2,600 行，无 CDN） |
+| 二 | `mangosteen-gateway` | ~8,100 行 | HTTP 服务、路由、协议、唯一收口 |
+| 三 | `mangosteen-orchestration` | ~8,500 行 | 评估、决策、部署编排、生命周期 |
+| 四 | `mangosteen-device` | ~3,700 行 | 引擎插件、进程运行时、远端执行 |
+| 四 | `mangosteen-provider` | ~17,500 行 | 云驱动（compshare 专用 + REST 通用）、隧道 |
+| 四 | `mangosteen-base` | ~5,400 行 | 配置、台账、下载、量化、提取、联网抓取 |
+| 五 | `mangosteen-core` | ~10,800 行 | 领域契约与纯算法 |
+| 五 | `mangosteen-platform` | ~3,500 行 | 跨平台唯一落地点 |
 
-**为什么 device 同时服务本地与云端**：云端部署也必须在目标机上完成
-「下载模型 → 准备引擎 → 启动 → 探活 → 停止」。把这些能力放在 provider 会
-让同一套模型/引擎语义出现两份实现。因此 device 持有执行语义，provider 只
-负责「把机器准备好、把连接建好」。
+`Gateway` 是 `Orchestrator` 的类型别名（gateway.rs），网关不持有执行状态——编排实体在第三层，网关只做转发与收口。
 
 ### 2.3 依赖方向
 
-严格自上而下。`core` 是最底层，不依赖任何自家 crate。
+严格自上而下，`core` 不依赖任何自家 crate。
 
 ```
 core ←── platform ←── base ←── session
   ↑         ↑         ↑    ←── device
   ↑         ↑         └────── provider（同层组合，复用 device 远端运行时）
   ↑         └──────────────── orchestration（评估/调度/部署编排/生命周期）
-  └─────────────────────────── gateway（唯一 HTTP 收口，持有 Orchestrator）
-                              cli / webui（第一层交互）
+  └─────────────────────────── gateway（唯一 HTTP 收口）
+                              cli（core/platform/base/gateway）
 ```
 
-**为什么 `device` / `provider` 不依赖 `base`**：它们只负责"把方案变成运行中
-的服务"与"把节点准备好"，不需要台账/配置能力。台账由编排/网关调用 `base`
-完成，这样执行层可以脱离存储独立测试。
+**为什么 device / provider 不依赖 base**：它们只负责「把方案变成运行中的服务」与「把节点准备好」，不需要台账/配置能力。台账由编排/网关调用 `base` 完成，执行层可脱离存储独立测试。
 
-**为什么 `provider` 可以依赖 `device`**：云端部署同样需要下载模型、安装并
-启动推理引擎。这些执行语义由 device 统一持有，provider 只负责创建 GPU 节点
-与建立连接；这是同层内的能力复用，不是反向依赖。
+**为什么 provider 可以依赖 device**：云端部署同样需要下载模型、安装并启动推理引擎；执行语义由 device 统一持有，provider 只负责创建 GPU 节点与建立连接。
 
-**为什么 `session` 只依赖 `core` + `platform`**：会话层是第一层的状态载体，
-它**不感知算力来源**——不判断能不能部署、不启动引擎、不访问云厂商。
-这条由 `c6_session_layer_does_not_know_about_compute` 守护。
-
-**为什么 `backend` 已不存在**：优云智算的专用协议驱动并入
-`mangosteen-provider::compshare`，避免同层出现两个平行的云厂商适配入口。
+**为什么 session 只依赖 core + platform**：会话层不感知算力来源——不判断能不能部署、不启动引擎、不访问云厂商。由 `c6_session_layer_does_not_know_about_compute` 守护。
 
 ### 2.4 各层职责与禁止事项
 
 | 层 | crate | 可以做 | 不可以做 |
 |----|-------|--------|----------|
-| 一·会话 | `session` | 会话 CRUD、消息追加、操作记录、持久化 | 判断可部署性、启动引擎、访问云 API |
-| 一·交互 | `cli` / `webui` | 解析参数、格式化输出、调用 `/api` 与 `/v1` | 直连引擎、直连云厂商 API |
-| 二 | `gateway` | 鉴权、路由、协议转换、状态回传 | 写平台专属代码、自己实现推理、持有运行状态 |
-| 三·评估 | `orchestration::assess` | 采集硬件、估算显存/内存、判定可行性 | 决定用本地还是云端 |
-| 三·选点 | `orchestration::scheduler` | 云端候选打分与排序 | 调厂商 API |
-| 三·编排 | `orchestration::orchestrator` | 部署编排、生命周期、活跃后端判定 | 解析 HTTP、做协议转换 |
-| 三·配置 | `core::plan` | 生成本地参数 / 云端规格与隧道配置 | 执行部署 |
+| 一·会话 | `session` | 会话 CRUD、消息追加、操作记录 | 判断可部署性、启动引擎、访问云 API |
+| 一·交互 | `cli` / `webui` | 解析参数、格式化输出、调用 `/api` 与 `/v1` | 直连引擎、直连云厂商 API、写平台分支 |
+| 二 | `gateway` | 鉴权、路由、协议转换、状态回传 | 写平台专属代码、自己实现推理、在锁内做网络调用 |
+| 三·评估 | `assess` | 采集硬件、估算显存/内存、判定可行性 | 决定用本地还是云端 |
+| 三·选点 | `scheduler` | 云端候选打分与排序 | 调厂商 API |
+| 三·编排 | `deploy` / `provision` | 部署编排、生命周期、阶段推进 | 解析 HTTP、做协议转换 |
+| 三·配置 | `core::plan` | 生成云端规格与 `EngineLaunchConfig` | 执行部署 |
 | 三·引擎 | `device::plugin` | 引擎插件注册与分发 | 决定是否该用本地 |
 | 四·节点 | `provider` | 实例 CRUD、隧道、端口映射、厂商签名 | 下载模型、启停推理服务、决定选哪家 |
-| 四·资产 | `base::download` / `quantize` | 下载、校验、缓存、量化 | 决定部署策略 |
-| 四·执行 | `device::engine` / `device::remote` | 本地/远端拉起进程、探活、终止、模型准备 | 暴露 HTTP 给上层 |
+| 四·执行 | `device::remote` | 远端拉起进程、探活、终止、模型下载 | 暴露 HTTP 给上层 |
 | 五 | `core` / `platform` | 类型、纯算法、平台能力 | 含业务调度逻辑 |
 
 ---
@@ -182,91 +169,60 @@ core ←── platform ←── base ←── session
 
 ```rust
 pub struct ModelSpec {
-    pub name: String,          // "qwen2.5-7b-instruct"
+    pub name: String,          // "qwen2.5-0.5b-instruct"
+    pub alias: Option<String>, // API 模型别名（如 qwen2.5-0.5b）
     pub params_b: f64,         // 7.615
-    pub quant: Quantization,   // Q4KM
-    pub n_layers: u32,         // 28
-    pub n_heads: u32,          // 28
-    pub n_kv_heads: u32,       // 4   ← GQA 的关键
-    pub embedding_dim: u32,    // 3584
-    pub vocab_size: u32,       // 152064
-    pub native_context: u32,   // 32768
-    pub file_size_bytes: u64,  // 4683073024
+    pub quant: Quantization,   // Q4_K_M
+    pub n_layers: u32,
+    pub n_heads: u32,
+    pub n_kv_heads: u32,       // GQA 的关键
+    pub embedding_dim: u32,
+    pub vocab_size: u32,
+    pub native_context: u32,
+    pub file_size_bytes: u64,  // 实测优先
 }
 ```
 
-**为什么这些字段**：KV Cache 估算需要 `n_layers × n_kv_heads × head_dim`；  
-`head_dim = embedding_dim / n_heads`。少了任何一个，估算误差会到一个数量级。
-
-**来源优先级**：GGUF 文件头解析（首选）> 台账已有记录 > 用户显式指定。
+来源优先级：GGUF 文件头解析（首选）> 台账已有记录 > 用户显式指定。
 
 ### 3.2 硬件画像 `HardwareProfile`
 
 ```rust
 pub struct HardwareProfile {
-    pub os: String,                       // "macos"
-    pub arch: String,                     // "aarch64"
-    pub host: HostProfile,                // 内存 + CPU
-    pub accelerators: Vec<Accelerator>,   // GPU（可多卡）
-}
-
-pub struct Accelerator {
-    pub name: String,
-    pub vendor: AcceleratorVendor,        // Nvidia / Apple / Amd / Intel / None
-    pub vram_bytes: u64,                  // 独显显存
-    pub unified_memory_bytes: u64,        // Apple Silicon 统一内存
-    pub compute_capability: Option<String>, // "sm_89"
-    pub fp16_tflops: Option<f32>,
-    pub memory_bandwidth_gbps: Option<f32>,
+    pub os: String,                     // "macos" / "linux" / "windows"
+    pub arch: String,
+    pub host: HostProfile,              // 内存 + CPU
+    pub accelerators: Vec<Accelerator>, // GPU（可多卡）
 }
 ```
 
-**关键派生规则**：
-
-| 量    | 计算                              | 依据                                   |
-| ---- | ------------------------------- | ------------------------------------ |
-| 可用显存 | 独显取 `vram_bytes`；统一内存取 `× 0.70` | macOS `recommendedMaxWorkingSetSize` |
-| 可用内存 | `total - max(total×0.25, 1GiB)` | llama.cpp 内存不足会 swap，吞吐塌一个数量级        |
-| 建议线程 | `physical_cores`（不是逻辑核）         | 超线程在 llama.cpp 线程池里争用，吞吐反而下降         |
+| 量 | 计算 | 依据 |
+|----|------|------|
+| 可用显存 | 独显取 `vram_bytes`；Apple 统一内存取 `× 0.70` | 统一内存与系统共享 |
+| 可用内存 | `total − max(total×0.25, 1GiB)` | llama.cpp 内存不足会 swap，吞吐塌一个数量级 |
+| 建议线程 | `physical_cores`（不是逻辑核） | 超线程在 llama.cpp 线程池里争用 |
 
 ### 3.3 部署方案 `DeploymentPlan`
 
-网关内部的"唯一真相"，也是台账持久化实体。
+网关内部「唯一真相」，也是台账持久化实体。
 
 ```rust
 pub struct DeploymentPlan {
     pub id: String,
     pub model: ModelSpec,
-    pub origin: ComputeOrigin,           // Local | Cloud{provider, instance_id}
-    pub local: Option<LocalPlan>,        // 本地方案
-    pub cloud: Option<CloudPlan>,        // 云端方案
+    pub origin: ComputeOrigin,           // 当前唯一变体：Cloud{provider, instance_id}
+    pub cloud: Option<CloudPlan>,
     pub assessment: Assessment,          // 评估快照（审计）
     pub created_at: i64,
-    pub fallback_trail: Vec<String>,     // ["local:...", "cloud:..."]
+    pub fallback_trail: Vec<String>,     // 必非空（I2）
 }
 ```
 
-**不变量**：`origin == Cloud` 时 `fallback_trail` 必须非空。
-由 `DeploymentPlan::respects_cloud_first()` 提供运行时检查，
-`assemble_plan()` 在轨迹为空时自动补 `"cloud:unspecified"` 兜底。
+**不变量**：`origin == Cloud` 时 `fallback_trail` 必须非空（I2）；空轨迹由 `assemble_plan()` 补 `"cloud:unspecified"`。
 
-`LocalPlan` 字段与 llama.cpp 参数一一对应：
+`LocalPlan`（结构保留）字段与 llama.cpp 参数一一对应：`model_path → --model`、`context_size → --ctx-size`、`threads → --threads`、`batch_size → --batch-size`、`gpu_layers → --n-gpu-layers`、`kv_cache_type_k/v → --cache-type-k/v`、`flash_attention → --flash-attn`、`use_mlock → --mlock`、`host/port → --host/--port`。
 
-| 字段                  | llama-server 参数                     |
-| ------------------- | ----------------------------------- |
-| `model_path`        | `--model`                           |
-| `context_size`      | `--ctx-size`                        |
-| `threads`           | `--threads`                         |
-| `batch_size`        | `--batch-size`                      |
-| `gpu_layers`        | `--n-gpu-layers`                    |
-| `kv_cache_type_k/v` | `--cache-type-k` / `--cache-type-v` |
-| `flash_attention`   | `--flash-attn`                      |
-| `use_mmap`          | `--mmap`                            |
-| `use_mlock`         | `--mlock`                           |
-| `host` / `port`     | `--host` / `--port`                 |
-
-`CloudPlan.engine_args()` 强制 `host = 0.0.0.0`（实例内需监听网卡，由 SSH 隧道  
-暴露到本机 `127.0.0.1`），其余参数语义与本地**完全相同**。
+`CloudPlan` 云端方案：`engine_port`（远端监听端口，默认 8080，多模型节点分配 8080–8191）、`model_path`（远端模型文件路径）、`download_url/download_bytes`（远端直连下载）、`node_ip/node_ssh_port/node_ssh_user`（部署成功后回填，供 UI 展示）、`local_port`（隧道建立后本地映射端口）、`engine: LocalPlan`（云端参数语义与本地完全一致）。
 
 ### 3.4 云实例 `Instance`
 
@@ -285,9 +241,7 @@ pub struct Instance {
 }
 ```
 
-状态机迁移由 `InstanceState::can_transition_to()` 集中定义，  
-**驱动实现不得自行发明状态**。刻意保守：`Created` 不能直接跳 `Running`  
-（必须先经 `Starting`），保证"探测就绪"这一步不被跳过。
+状态机迁移由 `InstanceState::can_transition_to()` 集中定义（21 条合法迁移），**驱动不得自行发明状态**。`is_billing_compute()` = `Starting|Running|Stopping|Creating`。
 
 ---
 
@@ -299,99 +253,76 @@ pub struct Instance {
 总需求 = weights + kv_cache + compute_buffer + runtime_overhead
 ```
 
-| 项                | 公式                                                                       | 说明                            |
-| ---------------- | ------------------------------------------------------------------------ | ----------------------------- |
-| weights          | `file_size_bytes`（有实测）否则 `params × bpw / 8`                              | 实测优先，因为 GGUF 含元数据与对齐          |
-| kv_cache         | `2 × n_layers × n_kv_heads × (embed_dim/n_heads) × ctx × kv_type_factor` | f16=1.0, q8_0≈0.53, q4_0≈0.28 |
-| compute_buffer   | `batch × embed_dim × 8 × 2 / 4`，夹在 `[192MiB, 4GiB]`                      | 保守值（未启用 FlashAttention 的量级）   |
-| runtime_overhead | NVIDIA/AMD 400MiB；Intel 320MiB；Apple 250MiB；CPU 64MiB                    | 实测经验值                         |
+| 项 | 公式 | 说明 |
+|----|------|------|
+| weights | `file_size_bytes`（实测优先）否则 `params × bpw / 8` | GGUF 含元数据与对齐 |
+| kv_cache | `2 × n_layers × n_kv_heads × head_dim × ctx × kv_type_factor` | f16=1.0, q8_0≈0.53, q4_0≈0.28 |
+| compute_buffer | `batch × embed_dim × 8 × 2 / 4`，夹在 `[192MiB, 4GiB]` | 保守值 |
+| runtime_overhead | NVIDIA/AMD 400MiB；Intel 320MiB；Apple 250MiB；CPU 64MiB | 经验值 |
 
 ### 4.2 落位形态判定顺序
 
 ```
-1. 全量 GPU 卸载（gpu_layers = n_layers + 1）    ← 最优
-2. 部分卸载（gpu_layers 由预算反算）             ← 吞吐下降 40%~70%
+1. 全量 GPU 卸载（gpu_layers = n_layers + 1）   ← 最优
+2. 部分卸载（gpu_layers 由预算反算）            ← 吞吐下降 40%~70%
 3. 纯 CPU（allow_cpu_fallback 时可接受）        ← 极慢
-4. Impossible                                   ← 本地不可行 → 云端
+4. Impossible                                  ← 本地不可行 → 云端
 ```
 
-**「尽可能大上下文」模式**（请求未指定 `context_len`）：  
-先在 `native_context` 下按 2 的幂收敛找最大可用 ctx，  
-逐级尝试 KV 精度 f16 → q8_0 → q4_0；仍放不下则回退到 4K 并尝试部分卸载。
+「尽可能大上下文」模式（请求未指定 `context_len`）：先在 `native_context` 下按 2 的幂收敛找最大可用 ctx（对齐 256 整数倍），逐级尝试 KV 精度 F16 → Q8_0 → Q4_0（`DOWNGRADE_CHAIN`）；仍放不下则回退到 4K 并尝试部分卸载。
 
 ### 4.3 量化选档
 
-`best_quant_within(spec, hw, req, budget)` 从 `F32` 向 `IQ1_S` 遍历  
-`Quantization::ALL_DESCENDING`，返回第一个能塞进预算的档位。  
-用于回答"我这个显卡跑 32B 该用什么量化"。
+`best_quant_within()` 从 `F32` 向 `IQ1_S` 遍历 `Quantization::ALL_DESCENDING`，返回第一个能塞进预算的档位。
 
 ### 4.4 告警而非失败
 
-评估过程产生的非致命问题记为 `Warning`，不中断流程：
-
-| Warning                   | 触发条件               |
-| ------------------------- | ------------------ |
-| `QuantMismatch`           | 声明位宽与实测偏差 > 15%    |
-| `ContextClamped`          | 请求 ctx 超过模型原生上限    |
-| `KvCacheDowngraded`       | 因显存紧张降了 KV 精度      |
-| `PartialOffloadPenalty`   | 只能部分卸载             |
-| `CpuFallback`             | 无加速卡               |
+| Warning | 触发条件 |
+|---------|---------|
+| `QuantMismatch` | 声明位宽与实测偏差 > 15% |
+| `ContextClamped` | 请求 ctx 超过模型原生上限 |
+| `KvCacheDowngraded` | 因显存紧张降了 KV 精度 |
+| `PartialOffloadPenalty` | 只能部分卸载 |
+| `CpuFallback` | 无加速卡 |
 | `UnifiedMemoryContention` | Apple Silicon 统一内存 |
+
+### 4.5 粗估兜底
+
+无 GGUF 元数据时（如仅给下载地址），`evaluate_estimated` 按「32 层 / 32 头 / 8 KV 头 / 4096 维 / 151936 词表 / 32768 原生上下文」的 7B 级典型值估算（误差 2 倍内），下载完成后用真实文件重估。
 
 ---
 
 ## 5. 调度决策器
 
-### 5.1 决策流程
+### 5.1 决策流程（纯云端）
 
 ```
-                  ┌──────────────────────┐
-  部署请求 ───────▶│ ① 评估本地可行性      │
-                  └──────────┬───────────┘
-                             │
-               ┌─────────────┴─────────────┐
-          本地可行                      本地不可行
-               │                            │
-               ▼                            │
-     ┌──────────────────┐                   │
-     │ ② 下发本地部署    │                   │
-     └────────┬─────────┘                   │
-              │                             │
-         ┌────┴────┐                        │
-       成功      失败                       │
-         │        └──────────┬──────────────┘
-         ▼                   ▼
-     返回方案        ┌─────────────────────┐
-                    │ ③ 云端调度           │
-                    │  NodeSelector 打分   │
-                    └─────────┬───────────┘
+部署请求 ──▶ Scheduler::decide
+               │
+               ├─ forces_local 或 allow_cloud=false ──▶ Reject（明确拒绝）
+               │
+               └─ 其余 ──▶ build_cloud_plan
                               │
-                     成功 / 重试耗尽 / 禁止云端
+                              ▼
+                   云端候选打分 / 价格序 → provision
 ```
+
+**产品的定位是「只部署到远端 GPU 节点」**：`target=local` 必须被**明确拒绝**（I3），绝不静默上云产生计费实例；本地推理交由 Ollama 承担。本地失败后的降级路径已废弃（仅保留错误消息生成）。
 
 ### 5.2 四条不变量
 
-| 编号 | 内容                              | 守护方式                                  |
-| -- | ------------------------------- | ------------------------------------- |
-| I1 | `allow_cloud = false` 时绝不产生云端方案 | `scheduler::tests::invariant_i1_*`    |
-| I2 | 云端方案必然带非空 `fallback_trail`      | `invariant_i2_*` + `assemble_plan` 兜底 |
-| I3 | 所有部署都走云端节点（本地推理交由 Ollama 承担）           | `invariant_i3_*`                      |
-| I4 | 降级重试次数 ≤ `max_fallbacks`        | `invariant_i4_*`                      |
-
-**I3 的深意**：产品的定位是「只部署到远端 GPU 节点」，本地推理交由 Ollama 承担。
-因此 `target=local` 必须**明确拒绝**，绝不静默上云（那会产生
-用户不知情的计费实例）。
+| 编号 | 内容 | 守护方式 |
+|------|------|---------|
+| I1 | `allow_cloud = false` 时绝不产生云端方案 | `scheduler::tests::invariant_i1_*` |
+| I2 | 云端方案必然带非空 `fallback_trail` | `invariant_i2_*` + `assemble_plan` 兜底 |
+| I3 | `target = local` 必然被拒绝（不会自动改用云端） | `invariant_i3_*` |
+| I4 | 降级重试次数 ≤ `max_fallbacks`（默认 2，上限 10） | `invariant_i4_*` |
 
 ### 5.3 端口分配
 
-- 区间由 `local.port_range_start/end` 给出
-- 网关构造时把台账里**活跃部署**的端口灌入 `reserved`
-- 每次分配跳过 `reserved` 与不可绑定的端口，并立即记入 `reserved`
-- 区间耗尽时返回起点（让失败发生在引擎启动阶段，而非分配阶段）
-
-### 5.4 本地失败后的降级
-
-**已废弃**：本地部署已不再支持，此函数仅保留用于错误消息生成。
+- 本地端口区间 `local.port_range_start/end`（默认 11435–11999），由 `Scheduler` 内嵌分配器管理；网关构造时把台账活跃部署端口灌入 `reserved`；每次分配跳过 `reserved` 与不可绑定端口；拒绝 <1024 特权端口
+- 远端引擎端口 `allocate_remote_engine_port`：范围 8080–8191，只看**活跃**部署（stopped/failed 不参与，否则首台机器第一个模型会从 8081 起）
+- 分配器抽成独立结构 `PortAllocator`（core::net）以便单测
 
 ---
 
@@ -401,6 +332,7 @@ pub struct Instance {
 
 ```rust
 pub trait ProviderDriver: Send + Sync {
+    // 10 个必选
     fn name(&self) -> &str;
     fn display_name(&self) -> &str;
     fn capabilities(&self) -> DriverCapabilities;
@@ -411,250 +343,86 @@ pub trait ProviderDriver: Send + Sync {
     fn destroy(&self, instance_id: &str) -> MnResult<()>;
     fn describe(&self, instance_id: &str) -> MnResult<Instance>;
     fn list(&self) -> MnResult<Vec<Instance>>;
+    // 3 个带默认实现
     fn probe_latency_ms(&self) -> Option<u32> { None }
+    fn set_password(&self, ...) -> MnResult<()> { /* password_reset_unsupported */ }
+    fn instance_metrics(&self, ...) -> MnResult<Option<InstanceMetrics>> { Ok(None) }
 }
 ```
 
-约束：
-
-1. 禁止 `unwrap` 网络结果，厂商错误码必须归一化为 `MnError::Provider`
-2. 除 `create` 外全部幂等（调度器会重试）
-3. 不暴露任何厂商私有字段（放 `extra` / 驱动内部）
-4. 对象安全（以 `dyn` 使用）
+约束：禁止 `unwrap` 网络结果或透传厂商错误码（必须归一化为 `MnError::Provider`）；除 `create` 外全部幂等；不暴露厂商私有字段。
 
 ### 6.2 两条新增服务商路径
 
-**配置路径（首选）**——写一段 TOML，无需改代码、无需重编译：
+**配置路径（首选）**——`RestDriver` + `RestDriverProfile`（认证头/URL 路径/字段映射/状态枚举全部可配），写一段 TOML 即可接入 REST 形态厂商，无需改代码。
 
-```toml
-[providers.autodl.profile]
-name = "autodl"
-display_name = "AutoDL"
-[providers.autodl.profile.auth]
-type = "bearer"
-[providers.autodl.profile.endpoints]
-base_url = "https://api.autodl.com"
-list_specs = "/api/v1/machine/region/available"
-create = "/api/v1/instance?snapshot_id={spec_id}"
-start = "/api/v1/instance/{id}/power_on"
-stop = "/api/v1/instance/{id}/power_off"
-destroy = "/api/v1/instance/{id}"
-describe = "/api/v1/instance/{id}"
-list = "/api/v1/instance"
-status_field = "code"
-success_code = "Success"
-error_field = "msg"
-[providers.autodl.profile.fields]
-list_root = "data.list"
-item_root = "data"
-id = "instance_id"
-state = "status"
-gpu_model = "gpu_name"
-gpu_count = "gpu_num"
-vram = "gpu_memory"
-vram_unit = "gib"
-# ...
-[providers.autodl.profile.states.mapping]
-running = "running"
-shutdown = "stopped"
-creating = "creating"
-starting = "starting"
-```
+**代码路径（特殊场景）**——厂商需要签名算法、分页聚合、异步任务轮询时，新写一个 `impl ProviderDriver` 并在 `registry::build_registry` 注册。
 
+### 6.2.1 compshare 专用驱动（协议形态完全不同的厂商）
 
-**代码路径（特殊场景）**——厂商需要签名算法（阿里云 RPC 签名）、  
-分页聚合、异步任务轮询时，新写一个 `impl ProviderDriver` 并在  
-`registry::build_registry` 注册。
-
-两条路径对上层完全等价。
-
-#### 6.2.1 第三条路径：`provider::compshare`（协议形态完全不同的厂商）
-
-`profile` 能表达"路径 + 字段 + 状态"的差异，但假设了 REST 形态
-（每动作一个 URL、Token 放请求头、JSON body）。**优云智算用的是 UCloud RPC 形态**，
-三者全部不成立：
-
-| 维度 | REST profile 假设 | 优云智算实际 |
-|------|-------------------|--------------|
-| 端点 | 每个动作一个路径 | 全部 `POST https://api.compshare.cn` |
-| 动作区分 | HTTP 方法 + 路径 | 表单参数 `Action=CreateCompShareInstance` |
-| 认证 | 请求头 Token | 参数 `PublicKey` + `Signature`（SHA1 签名） |
-| 编码 | JSON body | 扁平表单（`Disks.0.Size=100`） |
-| 成功判定 | HTTP 2xx | HTTP 2xx **且** `RetCode == 0` |
-
-签名无法用字段映射表达，所以这类厂商放进 `mangosteen-provider::compshare`：
-
-```
-provider/registry.rs ── handles(driver)? ──▶ compshare::build_from_options
-                                               │ sign / params / client / driver
-                                               ▼
-                                        https://api.compshare.cn
-```
-
-`compshare` 内部的分层（每层只做一件事，便于对着文档逐条核对）：
+优云智算用 UCloud RPC 形态：全部 `POST https://api.compshare.cn`、表单参数 `Action=...` 区分动作、`PublicKey + Signature`（SHA1）认证、扁平表单编码、成功判定 = HTTP 2xx **且** `RetCode == 0`。签名无法用字段映射表达，所以放进 `mangosteen-provider::compshare`：
 
 | 模块 | 职责 |
 |------|------|
-| `sign` / `sha1` | UCloud V1 签名（工作区只依赖 sha2，SHA-1 自实现并用官方向量校验） |
-| `params` | 参数扁平化；**签名用原值、传输用 URL 转义**（混用必然签名不匹配） |
-| `model` | 厂商响应结构（字段名与文档逐字一致，全部 `default`） |
-| `mapping` | 唯一换算点：单位（MB/GB）、状态、SSH 端口、价格折算 |
-| `retcode` | 返回码语义归类（容量不足→换节点 / 欠费→停止重试） |
-| `client` | 各 Action 的具体调用 |
+| `sign` / `sha1` | UCloud V1 签名（`concat(key+value)` 字典序 + 私钥，SHA1 小写 hex；数组元素直接首尾相接；官方向量钉死） |
+| `params` | 参数扁平化；**签名用原值、传输用 URL 转义** |
+| `model` | 厂商响应结构（字段与文档逐字一致，全部 default） |
+| `mapping` | 唯一换算点：单位（MB/GB）、状态、SSH 端口、价格折算；Linux 镜像强制（`pick_linux_image` 刻意不回退 Windows 镜像） |
+| `retcode` | 返回码语义归类（226604 容量不足→换节点 / 226601 欠费→停止重试 / 226605 镜像任务冲突 / 8903 异步任务中→重试） |
+| `client` | 各 Action 的具体调用（29 个方法，见 §6.6） |
 | `driver` | `ProviderDriver` 实现 + 业务补偿 |
 
-**驱动层承担的三个业务补偿**（上层因此不必认识厂商限制）：
+**驱动层承担的业务补偿**（上层不必认识厂商限制）：
+1. **创建前查库存**：用 `CheckCompShareResourceCapacity`（文档要求，不能用 Describe 代替）；无库存返回可降级错误
+2. **销毁前先关机**：`TerminateCompShareInstance` 仅对 `Stopped` 有效；`destroy()` 内部完成「关机 → 等 Stopped → 删除」
+5. **创建后补详情可失败但 ID 必须保留**：否则编排器拿不到 ID，回滚无从谈起
+6. **统一固定密码**：所有云端实例强制 `1qaz@WSX`（`restore_login_credential` 异步生效后验证；失败重启实例再验证）
+7. **伪 Running 防线**：厂商状态滞后时 `force_reboot_if_unreachable` 唯一有效处置是 stop→等真实 Stopped→start
 
-1. **创建前强制查库存**：厂商文档要求判库存必须用 `CheckCompShareResourceCapacity`，
-   不能用 Describe 类接口代替。无库存直接返回可降级错误，不提交创建请求。
-2. **销毁前先关机**：`TerminateCompShareInstance` 仅对 `Stopped` 实例有效。
-   `destroy()` 内部完成"关机 → 等 Stopped → 删除"，否则运行中的实例永远删不掉。
-3. **创建后补详情可失败但 ID 必须保留**：创建接口只返回短 ID，
-   补查 `Describe` 失败时返回带 ID 的占位实例——否则编排器拿不到 ID，回滚无从谈起。
-
-**单位陷阱**（写进代码注释并有单测钉死）：创建/价格接口的 `Memory` 是 **MB**，
-机型表的 `Memory` 与库存接口的 `Mem` 是 **GB**。混用会让显存/内存评估差 1024 倍，
-直接把"本地优先"的降级判断带偏。
+**单位陷阱**：创建/价格接口的 `Memory` 是 **MB**，机型表/库存接口是 **GB**。混用差 1024 倍且不报错。
 
 ### 6.3 驱动注册表的容错
 
-```rust
-build_registry_with(config, make_transport) -> RegistryBuild {
-    registry,   // 成功加载的驱动
-    skipped,    // (服务商名, 跳过原因)
-}
-```
-
-**单个服务商配置错误不中断其它服务商**。理由：某个密钥没配好，  
-不该让整个客户端不可用。这与"部署失败自动降级重试"是同一容错哲学。
+`build_registry_with` 返回 `(registry, skipped)`：**单个服务商配置错误不中断其它服务商**——某个密钥没配好，不该让整个客户端不可用。`builtin_driver_names()` 当前返回空：只有 compshare 经过真实验证，其余厂商只能通过配置 `profile` 段接入（REST 映射未核对）。
 
 ### 6.4 传输层抽象
 
-驱动只依赖 `Transport` trait：
+驱动只依赖 `Transport` trait（`execute(&self, req) -> MnResult<HttpResponse>`）。
 
-```rust
-pub trait Transport: Send + Sync {
-    fn execute(&self, req: &HttpRequest) -> MnResult<HttpResponse>;
-}
-```
-
-- 生产：`CurlTransport`（系统 curl，自带 TLS，无新增依赖）
+- 生产：`CurlTransport`（系统 curl，自带 TLS，三平台自带，无新增供应链）
 - 测试：`MockTransport`（预设响应 + 记录请求）
 
-**为什么用 curl 而不是 HTTP 客户端库**：云端 API 是低频操作（分钟级），  
-进程启动开销（~10ms）可忽略；而 curl 三平台自带、自带 TLS、  
-不引入供应链风险。认证头通过 `--config` 从 0600 临时文件读取，  
-避免出现在进程参数列表。
-
-`mangosteen-provider::compshare` 出于同样的理由用 curl，但**认证参数在 body 里**
-（UCloud 签名的一部分），所以改用 `--data-binary @-` 从 stdin 喂入请求体：
-既不进进程参数列表，也不需要临时文件（少了权限与残留清理两类问题）。
-
-**URL 只能出现一次**。云端 `CurlTransport` 曾把 URL 同时写进 `--config`
-文件与 argv，curl 于是把同一请求发了两次，响应体变成
-`{json}\n200{json}\n200`，调用方解析报 `trailing characters at line 2`。
-对 GET 只是「看起来怪」，但对 POST 创建实例意味着可能开出两台并持续计费。
-由 `curl::tests::url_must_appear_exactly_once` 守护。
+**为什么用 curl 而不是 HTTP 客户端库**：云端 API 低频（分钟级），进程启动开销 ~10ms 可忽略；认证头通过 `--config` 从 0600 临时文件读取，避免出现在进程参数列表；`--noproxy '*'` 防止继承消亡代理；**URL 只能出现一次**（曾把 URL 同时写进 config 与 argv，curl 发两次请求，POST 创建意味着可能开两台计费实例，由 `url_must_appear_exactly_once` 守护）。
 
 ### 6.5 云端实例监控
 
-设备页在「使用云端算力」时需要显示云端实例的 CPU / GPU / 显存 / 内存 / 磁盘
-使用率。这条链路的三个关键决定：
-
-```text
+```
 后台线程（每 5 秒）──持锁读台账──▶ provider + instance_id
-        │
-        └──释放锁──▶ 厂商监控接口（约 0.5 秒）──▶ 共享快照
-                                                     │
-HTTP /api/sysinfo ◀── 只读内存（微秒级）──────────────┘
+        └──释放锁──▶ 厂商监控接口（~0.5s）──▶ 共享快照
+HTTP /api/sysinfo ◀── 只读内存（微秒级）
 ```
 
-1. **绝不在请求路径里调厂商接口**。设备页每 2 秒轮询；同步调用会卡页面、
-   持网关锁拖慢其它 API，还会触发厂商限流。
-2. **绝不在网关锁内做网络往返**（与「27 秒引擎探测」同一教训）。
-3. **单位归一化放在驱动内**：厂商返回 0~100 百分数，本项目本地监控用 0~1
-   比例。混用会出现「CPU 3500%」，因此 `percent_to_ratio` 是唯一换算点。
+1. 绝不在请求路径里调厂商接口（设备页 2 秒轮询会卡页面、持网关锁、触发限流）
+2. 绝不在网关锁内做网络往返
+3. 单位归一化放驱动内（厂商 0~100 vs 本地 0~1）
 
-空态必须**三态可分**，否则用户无法判断该找谁：
+空态三态可分：`supported:false`（无监控接口）/ `has_any:false`（暂无数据）/ `error`（失败保留上次快照）。
 
-| 状态 | 含义 | 界面 |
-|------|------|------|
-| `supported: false` | 该服务商没有监控接口 | 「未提供实例监控接口」 |
-| `has_any: false` | 实例存在但厂商暂无数据（关机/刚开机） | 「实例可能已关机…」 |
-| `error` | 调用失败（鉴权/网络） | 「查询失败：…」并保留上次快照 |
+### 6.6 compshare GPU 接口覆盖矩阵
 
-兜底：监控接口的 `Results` 为空时，用 `DescribeCompShareInstance` 的
-`MonitorMessages`（当前值快照）补 CPU/内存，避免一片空白。
+厂商 OpenAPI 共 71 个接口。`client.rs` 已实现 29 个 Action（覆盖部署全链路）：
 
----
+| 分类 | 已适配 | 关键约束 |
+|------|--------|---------|
+| 可用区/机型 | `DescribeCompShareSupportZone`、`DescribeAvailableCompShareInstanceTypes`、`DescribeCompShareMachineTypeFamilies` | 可用区三级回退：虚机+镜像兼容 → 任意虚机 → 任意可用区 |
+| 库存/价格 | `CheckCompShareResourceCapacity`、`GetCompShareInstancePrice`、`GetCompShareInstanceUserPrice`、`GetCompShareInstanceUpgradePrice`、`GetCompShareRefundPrice` | 库存必查；退款/监控数组走 JSON 通道 |
+| 实例 CRUD | `CreateCompShareInstance`、`DescribeCompShareInstance`、`StartCompShareInstance`（仅 Stopped）、`StopCompShareInstance`（仅 Running）、`RebootCompShareInstance`、`TerminateCompShareInstance`（仅 Stopped）、`ModifyCompShareInstanceName`、`ResetCompShareInstancePassword`（Base64）、`ReinstallCompShareInstance`、`ResizeCompShareInstance`（计算/磁盘二选一）、`SwitchChargeType` | 状态前置校验统一放驱动层，给可操作提示 |
+| 端口/网络 | `UpdateCompShareInstancePorts`（仅容器区、全量替换）、`SwitchCompShareEIPShareBandwidth`（顶层成功≠每个成功）、`CheckCompShareNetOptimizer`、`DescribeCompShareSoftwarePort`、`GetSoftwareURL` | 带数组参数必须走 JSON 请求体 |
+| 其他 | `UpdateCompShareStopScheduler`、`DeleteCompShareStopScheduler`、`GetProjectList`、`GetCompShareInstanceMonitor`（必须 JSON 体） | 定时关机需 ProjectId；监控数组签名按元素拼接 |
 
-### 6.6 优云智算 GPU 接口覆盖矩阵
+明确不适配的 42 个：`image/*`（自制/社区镜像，17 个）、`data/*`（云盘管理，9 个）、`team/*`（团队/计费，16 个）——属于镜像制作、存储管理、账号体系，不是部署链路。
 
-厂商 OpenAPI 共 **71 个接口**，分 4 类。Mangosteen 只适配**与「部署并运行推理」
-直接相关**的部分，其余明确不做——列出来是为了让后来者知道「不是漏了，是想过」。
-
-#### instance 分类（28 个）：已全部适配
-
-| 接口 | 用途 | 关键约束 |
-|------|------|----------|
-| `DescribeCompShareSupportZone` | 可用区 + 镜像兼容性 | `UnsupportedImageTypes` 提前拦 226603 |
-| `DescribeAvailableCompShareInstanceTypes` | 可售机型与合法组合 | `Memory` 是 **GB** |
-| `CheckCompShareResourceCapacity` | 库存（创建前必调） | `Region`/`Zone` 必填；`Mem` 是 **GB** |
-| `GetCompShareInstancePrice` | 单模式价格 | `Memory` 是 **MB** |
-| `GetCompShareInstanceUserPrice` | 全模式价格（时/日/月/Spot） | 便于对比「按量 vs 包月」 |
-| `GetCompShareInstanceUpgradePrice` | 升降配差价 | 单位是**元**（差价），不是时价 |
-| `GetCompShareRefundPrice` | 删除可退金额 | `UHostIds` 走 **JSON 数组**；按 `Code==0` 才可退 |
-| `CreateCompShareInstance` | 创建 | `Memory` 是 **MB**；`Disks` 扁平化 |
-| `DescribeCompShareInstance` | 查询（含 `MonitorMessages`） | 不传 Region 可查全部地域 |
-| `StartCompShareInstance` | 开机 | 仅 `Stopped` |
-| `StopCompShareInstance` | 关机 | 仅 `Running` |
-| `RebootCompShareInstance` | 重启 | 仅 `Running` |
-| `TerminateCompShareInstance` | 删除 | **仅 `Stopped`**，`destroy()` 自动先关机 |
-| `ModifyCompShareInstanceName` | 改名 | ≤63 字符 |
-| `ResetCompShareInstancePassword` | 重置密码 | `Password` 需 **Base64**；虚机仅 `Stopped`，容器可运行中 |
-| `ReinstallCompShareInstance` | 重装系统 | 仅 `Stopped`；系统盘清空 |
-| `ResizeCompShareInstance` | 升降配 / 扩盘 | 仅 `Stopped`；**计算与磁盘二选一** |
-| `SwitchChargeType` | 按量 ⇄ 包月 | 余额不足可能回 `520` |
-| `UpdateCompShareInstancePorts` | 容器对外端口 | **仅容器区**；**全量替换**（未传的会被删） |
-| `UpdateCompShareStopScheduler` | 定时关机 | 需 `ProjectId`；目标时间 ≥ now+300s |
-| `DeleteCompShareStopScheduler` | 取消定时关机 | 需 `ProjectId` |
-| `SwitchCompShareEIPShareBandwidth` | 带宽归属切换 | `UHostIds` 走 **JSON 数组**；**顶层成功≠每个成功** |
-| `GetCompShareInstanceMonitor` | 监控指标 | **必须 JSON 请求体**；数组签名按元素拼接 |
-| `DescribeCompShareSoftwarePort` | 软件端口 | 实测**不含 SSH**（SSH 走 `TcpForwards`） |
-| `GetSoftwareURL` | 软件访问地址 | Action 是全大写 `URL` |
-| `DescribeCompShareMachineTypeFamilies` | 机型族目录 | 全量机型（含未上架） |
-| `CheckCompShareNetOptimizer` | 网络加速状态 | 影响海外模型下载速度 |
-| `GetProjectList` | 项目列表 | 定时关机的前置依赖（取默认 `ProjectId`） |
-
-#### 明确不适配的 43 个
-
-| 分类 | 数量 | 为什么不做 |
-|------|------|-----------|
-| `image/*`（自制/社区/收藏镜像） | 17 | 属于**镜像制作与分享**，不是部署链路。部署只用系统镜像；自制镜像由控制台管理 |
-| `data/*`（云盘挂载/扩容/快照） | 9 | 属于**存储管理**。实例自带系统盘足够放 GGUF，不需要独立云盘编排 |
-| `team/*`（团队/成员/订单/日志） | 17 | 属于**账号与计费体系**。Mangosteen 是个人级客户端，不做多租户（产品边界） |
-
-> 如果将来要支持「团队共享 GPU 池」，`team/*` 才需要重新评估。
-> 现在实现它们等于给一个不存在的功能写代码。
-
-#### 三条跨接口的适配经验
-
-1. **带数组参数就必须走 JSON 请求体**。表单编码（`UHostIds.0`）对
-   `GetCompShareInstanceMonitor`、`GetCompShareRefundPrice`、
-   `SwitchCompShareEIPShareBandwidth`、`UpdateCompShareInstancePorts`
-   一律失败；而 `DescribeCompShareInstance` 用扁平索引键是正常的。
-   两种形态并存，不能一刀切。
-2. **JSON 通道的签名口径不同**：数组元素**直接首尾相接**
-   （`UHostIdsu-1u-2`），逗号分隔或 JSON 字面量都会被判签名错误。
-3. **`Memory` 单位随接口变化**：创建/价格/升降配是 **MB**，
-   机型表/库存是 **GB**。差 1024 倍，且不会报错——只会算错钱或选错规格。
-
-#### 状态前置校验统一放在驱动层
-
-升降配、重装、重置密码（虚机）都要求实例 `Stopped`。厂商对状态不符只回
-笼统的参数错误，用户无从判断该做什么。因此驱动层先查实例状态，
-再给出**可操作**的提示（「请先执行 `mangosteen cloud stop <id>`」），
-而不是把厂商原文透传上去。
+**三条跨接口经验**：① 带数组参数必须走 JSON 请求体（`UHostIds.0` 表单对部分接口全失败）；② JSON 通道签名口径不同（元素直接首尾相接）；③ `Memory` 单位随接口变化（MB/GB 混用差 1024 倍且不报错）。
 
 ---
 
@@ -662,570 +430,441 @@ HTTP /api/sysinfo ◀── 只读内存（微秒级）────────�
 
 ### 7.1 两阶段
 
-**阶段一：硬性过滤**（`SelectionConstraints::admits`）
+**阶段一：硬性过滤**（`SelectionConstraints::admits`）——服务商/地域白名单、显存/内存/磁盘下限、价格上限、`require_stock` 时要求有库存。
 
-| 约束     | 默认       |
-| ------ | -------- |
-| 最低显存   | 模型所需     |
-| 最低内存   | 模型所需     |
-| 最低磁盘   | 模型大小 × 2 |
-| 价格上限   | 配置或请求    |
-| 服务商白名单 | 空（全部）    |
-| 地域白名单  | 空（全部）    |
-| 要求有库存  | 是        |
+**阶段二：排序**
 
-**阶段二：四维加权打分**
-
-```
-score = w_price·S_price + w_latency·S_latency + w_availability·S_avail + w_hardware·S_hw
-```
-
-归一化基准是**候选集内**的最优值（相对比较），不是绝对尺度。
+- `SelectionStrategy::Cheapest`（默认）：满足约束的候选里价格升序取第一个（`cheapest_first` 纯价格序，不受配置权重影响）
+- `SelectionStrategy::Balanced`：四维加权打分 `w_price·S_price + w_latency·S_latency + w_availability·S_avail + w_hardware·S_hw`，归一化基准为候选集内最优值
 
 ### 7.2 权重语义
 
-配置里写的是**相对重要性**（如 price=40, latency=15...），不必加和为 1。  
-打分时统一归一化一次。这样用户改单个权重不会意外改变其它维度的相对占比。
-
-默认权重偏向"性价比 + 稳定"（价格 40 / 可用性 30 / 延迟 15 / 硬件 15），  
-因为个人用户对延迟不敏感、对价格敏感。
+配置写的是相对重要性（默认 price 40 / availability 30 / latency 15 / hardware 15），不必加和为 1；打分时统一归一化。GPU 型号偏好表（`default_gpu_preference`）：RTX 4090=1.20、RTX 5090=1.25、RTX 4080=1.05、RTX 3090=0.95、RTX 3080=0.85、A100=0.80、H100=0.75。
 
 ### 7.3 排序的确定性
 
-```
-总分降序 → 价格升序 → provider 字典序 → spec_id 字典序
-```
-
-同分同价同 provider 的候选按 `spec_id` 排序，保证结果可复现  
-（快照测试与日志对比需要）。
+`总分降序 → 价格升序 → provider 字典序 → spec_id 字典序`，同分同价保证结果可复现。
 
 ### 7.4 「就要最便宜」：纯价格序（`cheapest_first`）
 
-打分策略是**配置项**（`scheduler.strategy`）。用户临时说「给我最便宜的」时
-不能指望配置恰好是 `cheapest`——默认 `balanced` 下四维打分会让延迟/库存分
-翻盘（实测出现过 ¥2.15/h 的 4090 排在 ¥1.34/h 的 V100S 前面）。
-
-因此单开一条**不受配置影响**的价格序：
-
-```
-价格升序（未知价排最后）→ 库存多优先 → provider → spec_id
-```
-
-排序口径抽成 `policy::cheapest_cmp`，由 `SelectionStrategy::Cheapest` 与
-`SelectionConstraints::cheapest_first` **共用**。两处各写一遍必然漂移，
-表现是「`cloud pick` 说 A 最便宜、`cloud cheapest` 说 B」——用户只会觉得
-工具在乱说。
-
-**未知价必须排最后**，不能当 0 元：厂商对个别规格返回 `f64::MAX` 当无报价
-哨兵，上层落成 `0.0` 后按升序会排到第一，于是「最便宜」先去开最贵的卡。
+`cloud cheapest` 与部署选点共用 `cheapest_cmp`（价格升序 → 库存多优先 → provider → spec_id），两处各写一遍必然漂移。**未知价必须排最后**，不能当 0 元：厂商对个别规格返回 `f64::MAX` 当无报价哨兵，落成 0.0 会排到第一，先去开最贵的卡。
 
 ### 7.5 「可用」由创建结果定义
 
-厂商库存接口不可信：优云是**模拟调度**（对能开出来的机器也返回 false），
-AutoDL 只覆盖部分机型。因此 `cloud cheapest --create` **不拿 `stock` 当准入
-条件**，而是按价格顺序逐个真开：
-
-```
-P40  ¥0.380  → 226604 无库存  ✗
-2080 ¥0.390  → 226604 无库存  ✗
-3080Ti ¥0.700 → 226604 无库存 ✗
-3090 ¥1.130  → 226604 无库存  ✗
-V100S ¥1.340 → 创建成功       ✓   ← 「当前可用的最低价」就是它
-```
-
-（2026-10-26 真实调用记录。）
-
-这条路径与 `provision` 共用 `create_first_running`，因此继承了同一条不变量：
-**创建成功但起不来的实例，必须先销毁（带重试）才换下一个候选**——销毁失败
-就立刻返回错误并带上残留实例 ID，绝不继续建（会同时留两台计费）。
+厂商库存接口不可信（优云是模拟调度）。`create_first_running` 按价格序逐个真开，**只在「该规格无库存」这类可重试错误上换下一个候选**（`is_retryable_create_error`：226604/售罄/sold out/no stock）；鉴权、参数、余额类错误立刻中止。创建成功但起不来的实例必须先销毁（带重试）才换下一个，销毁失败立即返回错误并带残留实例 ID。
 
 ### 7.6 裸实例必须能被清理
 
-`cloud cheapest --create` 建的是**裸实例**：不建隧道、不传模型、不写部署台账。
-代价是它不会被 `stop` / `abort` 自动回收，也不会出现在「模型实例」列表。
-
-因此配套提供 `cloud destroy --instance <服务商>/<实例ID>`：没有这条路径，
-用户想清理只能去厂商控制台，而「忘了去控制台」正是持续计费最常见的成因。
-创建成功后 CLI 会直接打印这条可复制执行的命令。
+`cloud cheapest --create` 建的是裸实例（不建隧道、不传模型、不写部署台账），不会被 stop/abort 自动回收；配套 `cloud destroy --instance` 清理路径，创建成功后 CLI 直接打印可复制执行的命令。
 
 ---
 
 ## 8. 云端网络工具集
 
-### 9.1 SSH 隧道
+### 8.1 SSH 隧道
 
 ```
 ssh -N -T \
-    -o ExitOnForwardFailure=yes \      ← 端口占用时立即失败，避免"假连通"
+    -o ExitOnForwardFailure=yes \      ← 端口占用时立即失败，避免「假连通」
     -o ServerAliveInterval=15 \        ← 保活，防 NAT 静默断开
     -o ServerAliveCountMax=3 \
+    -o ConnectTimeout=5 \              ← 不可达快速失败
+    -o ConnectionAttempts=2 \
     -o StrictHostKeyChecking=accept-new \
-    -o ControlMaster=auto \            ← 连接复用，降低重连延迟
-    -o ControlPersist=60 \
     -p <ssh_port> \
     -L 127.0.0.1:<local>:127.0.0.1:<remote> \
     <user>@<host>
 ```
 
-建立后的就绪判据：**本地端口可连通**（不是"进程活着"——  
-SSH 可能活着但转发已断）。
+- **不再传 ControlMaster/ControlPersist**：厂商网关按 host:port 区分实例，控制套接字会被互不相干的会话争用（历史事故：`Connection closed by remote host` 连续刷屏）
+- 就绪判据：**本地端口可连通**（不是「进程活着」——SSH 可能活着但转发已断）
+- `TunnelManager::establish` 6 次重试、退避 3/6/9/12/15s，跨厂商网关冷启动窗口（30s+）
+- 瞬时断链白名单（`is_transient_connect_failure`）：`Connection closed by` / `closed by remote host`（OpenSSH 9.x 带 IP） / `Connection reset by peer` / `Connection refused` / `Connection timed out` / `Broken pipe` / `ssh_dispatch_run_fatal`；认证失败、密钥缺失、主机不可达不重试
 
-### 9.2 健康检查与自动重建
+### 8.2 SSH 快速失败策略（远端执行层）
 
-`ensure_alive()`：检查 → 断了就关旧进程、释放端口、重建。  
-这是"云端实例像本地服务一样无感访问"的关键——网络抖动时上层不必感知。
+`ssh_exec` 失败两分类（`SshFailure`）：
 
-### 9.3 端口分配器
+| 类别 | 判定 | 行为 |
+|------|------|------|
+| Transient（可重试） | 退出码 255 且 stderr 未命中确定性关键词 | 重试，最多 2 次（总尝试 2） |
+| Fatal（快速失败） | 认证/配置类（Permission denied、host key 变更、DNS 失败）+ TCP 不可达类（connect to host 阶段的 timeout/refused/unreachable/no route） | 立即报错 |
 
-`PortAllocator` 抽成独立结构以便单测（真实探测需要绑定 socket，  
-而"跳过已占用端口"的逻辑与 OS 无关）。
+- **为什么不可达不重试**：每次烧满 ConnectTimeout（5s × ConnectionAttempts 2），5 次重试把「实例已关机」拖成数分钟假死（实测：手动关闭节点后 stop/deploy 卡住）
+- **banner exchange 超时仍可重试**（TCP 已建立，只是握手慢）
+- askpass 免密：密码落 0600 sidecar 文件，脚本只负责打印（Unix `#!/bin/sh + exec cat`、Windows `.cmd + type`）；成功后公钥进 `authorized_keys`（幂等 `grep -qxF`），主路径切换公钥认证
 
-### 9.4 存储映射
+### 8.3 健康检查与自动重建
 
-三种方式：`Mount`（SSHFS/SMB）、`Sync`（rsync）、`None`（云端自行下载）。
+`ensure_alive()`：检查 → 断了就关旧进程、释放端口、重建；`heal(remote_port)` 按远端端口精确定位（同节点多模型）。runprobe 二道防线：连续 3 轮 `/health` 失败且过 60s 冷却 → `restore_deployment_tunnel` 重建。
 
-rsync 参数固定包含 `--partial`（断点续传，大模型必开）与  
-`--inplace`（避免临时文件占双份磁盘）。
+### 8.4 存储映射
+
+三种方式：`Mount`（SSHFS/SMB）、`Sync`（rsync，`--partial --inplace --info=progress2`）、`None`（云端自行下载）。
 
 ---
 
-## 9. 统一协议适配层
+## 9. 部署编排与生命周期
 
-### 10.1 接口清单
+### 9.1 部署阶段划分
 
-| 方法     | 路径                      | 说明          |
-| ------ | ----------------------- | ----------- |
-| GET    | `/health`               | 网关存活 + 后端就绪 |
-| GET    | `/v1/models`            | [OI] 模型列表   |
-| POST   | `/v1/chat/completions`  | [OI] 对话     |
-| POST   | `/v1/completions`       | [OI] 文本补全   |
-| POST   | `/v1/embeddings`        | [OI] 向量化    |
-| GET    | `/api/status`           | 网关状态        |
-| POST   | `/api/deploy`           | 发起部署        |
-| POST   | `/api/assess`           | 仅评估         |
-| GET    | `/api/deployments`      | 部署列表        |
-| GET    | `/api/deployments/{id}` | 单个部署        |
-| DELETE | `/api/deployments/{id}` | 停止部署        |
-
-[OI] = OpenAI 兼容。
-
-### 10.2 请求规范化
-
-**只改 `model` 字段**，其余原样保留：
-
-| 输入               | 处理                                  |
-| ---------------- | ----------------------------------- |
-| `model = "auto"` | 替换为当前部署的模型 ID                       |
-| `model = ""`     | 同 `auto`                            |
-| `model = "具体名"`  | 原样透传                                |
-| 未知字段             | 原样透传（OpenAI 兼容性的关键）                 |
-| 采样参数缺失           | 不补默认值（交给 llama.cpp 用它自己的默认值，避免双重默认） |
-| 采样参数越界           | 400 + 指明参数名                         |
-
-### 10.3 错误归一化
-
-上游（llama.cpp）的错误体统一转换成 Mangosteen 格式，  
-上层应用只需处理一种错误结构：
-
-```json
-{
-  "error": {
-    "message": "...",
-    "type": "invalid_request_error",
-    "code": "bad_request"
-  }
-}
+```
+① 模型评估 → ② 节点选择（实例创建/复用）→ ③ 节点配置（依赖 + llama-server）
+→ ④ 模型下载（主模型 + 辅助模型）→ ⑤ 启动模型（拉引擎 + 健康检查）→ ⑥ 就绪
 ```
 
-HTTP 状态码映射：
+`DeployStage`（Assessing/Selecting/Configuring/Downloading/Launching/Tunneling/Ready/Failed）驱动前端步骤条；`perf.rs` 的 `StageTimer` 在每阶段进入/退出时输出 `[perf] ▶/✓/✗` 耗时日志，`DeployPerfTrace` 在结束时输出全程汇总（最长阶段占 40 字符柱状条）。
 
-| 错误                                                | 状态码     |
-| ------------------------------------------------- | ------- |
-| `BadRequest` / `ModelNotFound`                    | 400     |
-| `AccessDenied`                                    | 401/403 |
-| `InsufficientLocalResource` / `NoViableCandidate` | 503     |
-| 其它                                                | 500     |
+### 9.2 部署主流程
 
-### 10.4 为什么网关不自己实现推理
+CLI `deploy`（`crates/cli/src/commands/deploy.rs`）：
+1. 解析参数 → 查模板正文（设置页配置 → 内置默认模板）
+2. **幂等部署检查**：同模型 `ready+active` 部署存在 → 打印「正在运行，跳过部署」返回 0；否则删除该模型全部旧台账后重新部署
+2. 三条路径：模型在台账 → `gw.deploy`；不在台账但有模板 → 估算评估 → `prepare_with_progress` → `commit_cloud`；无模板 → 返回原始错误
+3. `--watch` 每 5 秒轮询进度直至终态；成功后确保网关持有隧道（已运行 → `POST /api/deployments/{id}/restore-tunnel`；未运行 → 拉起守护网关 `ui --foreground --no-open`）
 
-网关只做协议转换与路由。这样：
+`prepare_with_progress`：先 `prune_inactive` 清非活跃记录（避免复用不可达旧实例）→ `evaluate` → `prepare_inner`（唯一性按模型 ID、引擎可用性检查）→ `prepare_vendor_node`（构造 SelectionConstraints：`min_memory ≥ 8GiB`、`min_disk ≥ 50GiB`）→ `configure_node` → `download_all_node_models`。
 
-- 本地与云端走同一份转发代码，行为一致
-- 上游升级 llama.cpp 时网关无需改动
-- 网关不可用时用户仍可直连后端排障
+**实例复用**：`find_reusable_instance` 按 GPU 型号匹配（大小写不敏感 contains），只接受可进入 Running 的状态（Created/Stopped/Starting/Running）；列实例失败退避重试 3 次、全失败报错终止部署（宁可让用户稍后重试，不能静默多开机器）。
 
-### 10.5 HTTP 服务的实现取舍
+### 9.3 模型下载
 
-用标准库手写 HTTP/1.1（每连接一线程），不引入 axum/hyper。
+- 两条节点路径共用 `download_all_node_models`（下载清单只定义一次）；主模型在前、辅助模型（mmproj/MTP）按模板顺序
+- **aria2c 优先**（-x16 -s16 多连接多分片续传），失败回退 `curl -fL -C - --retry 5`
+- **`.download.ok` 权威标记**：只有下载器 0 退出才写入（内容 = 真实文件大小）；期望字节数只是参考值（计划元数据与实际模板文件可能不是同一个）
+- 完整性三道证据：`.download.ok` + 文件非空 + GGUF 魔数；终检只看远端真实文件（任一缺失/为空禁止进入加载）
+- 进度上报：每 5% bucket 写一次阶段输出（trail）；无总大小时按 64 MiB 粒度报增量
+- 重试模型：单轮 5 次 × 3 轮 + 停滞上限 3 次（跨续传比较无增长立即失败，不再烧完轮次预算）；总 deadline 3600s；源站轮询 3 轮（hf-mirror ↔ huggingface 镜像替换）
+- 远端下载元数据预取：HTTP Range 取文件头 8MiB 解析 GGUF（截断错误翻倍重试至 64MiB）
 
-| 需求       | 是否满足           |
-| -------- | -------------- |
-| 本机回环监听   | 是              |
-| 11 个固定路由 | 是              |
-| JSON 收发  | 是              |
-| 并发       | 线程池，个人级（<64）足够 |
+### 9.4 停止与生命周期
 
-**代价**：不支持 HTTP/2、不支持 TLS。两者对"仅监听 127.0.0.1 的个人客户端"都不必要。
+**`stop`（销毁台账 + 释放实例）**：
+
+```
+stop 部署
+  ├─ 只能关闭 Ready 状态部署
+  ├─ 台账检查 + 远端端口探测（engine_ports_busy 8080/8081，ss → netstat → /dev/tcp 三级）
+  │    ├─ 端口全空闲 → teardown（关隧道 + 关机保留，磁盘/模型文件保留）
+  │    └─ 任一端口被占 → 只按模型名停本部署进程，实例保留（note 注明）
+  └─ 台账置 stopped
+```
+
+- **关实例判据 = 引擎端口占用制**（用户策略）：8080/8081 都空闲即无人推理，直接关机；台账其他部署记录仅提示不阻止（其进程没跑，模型文件随磁盘保留，下次 deploy 自动开机复用）
+- **按模型名停止**（`stop_llama_server_by_model`）：`--model <path>` 是进程命令行最稳定锚点（端口会漂移、pid 文件会陈旧）；流程 = TERM（等 5s 优雅退出）→ KILL → **等 1s** → 按模型名复查 → 未删净重试，共 2 轮；两轮仍残留报错附 PID 列表（绝不假报成功）
+- 实例未运行 → SSH 探测快速返回（无进程可查），不做无谓连接
+
+**`stop_service`（停服务保留实例）**：停进程 + 关机 + 清台账 node_ip（防开机漂移残留）；自建设备只停进程绝不关机。
+
+**`unload`（卸载只停不删）**：先置台账 stopped（消除 runprobe 秒级竞态误降 failed）→ 按模型名停进程 → 云厂商等待端口空闲确认（最多 10s）→ 共享节点只关自己隧道 → nvidia-smi 检查其他 GPU 进程无则关机（查询失败保守不关）。
+
+**`restore_deployment_tunnels`（网关启动自恢复）**：厂商 stopped + 台账 ready/failed → 删台账；厂商 running + 台账 ready/failed → 恢复隧道 + 起进程 + 等 /health → 置 ready；不修改台账 local_port（CLI 分配的固定端口）。
+
+**`abort_deployment`（取消）**：实例只停不删；显式释放端口预留（否则反复「部署→停止」吃光端口区间）。
+
+### 9.5 状态机
+
+- `DeploymentStatus`：Planned → Provisioning → Ready → Stopped → Destroyed（+ Failed）；`transition` 白名单迁移，非法迁移报 `InvalidTransition`；**Failed → Ready 专门放行**（探测自愈：瞬时 /health 503 翻的 Failed 在端口恢复后必须能翻回）
+- `RunStatus`：Active/Unactive，只由后台探测线程更新（`update_run_status`），**不修改 DeploymentStatus**（避免后台线程误降级）
+- 三个监控线程（gateway crate，任何网络调用不得在网关锁内执行）：
+  - **runprobe**：5 秒一轮探测本地回环 /health（400ms 超时），更新 run_status；连续 3 轮失败 + 60s 冷却 → 隧道自愈重建
+  - **sshmon**：20 秒一轮刷新 SSH 登录信息缓存（持锁只读台账 → 释放锁调厂商）
+  - **cloudmon**：5 秒一轮采集实例监控指标（失败保留上次快照但暴露 error）
+
+### 9.6 失败清理
+
+`park_failed_instance`：
+- **连接类失败（非认证）** → 清理本部署隧道 + **删台账**（用户重新 deploy 从零开始；远端已无现场可复用）
+- **认证失败（Permission denied）** → 保留台账（机器活着，修好密钥即可重试）
+- 其余失败 → 停进程 + 关隧道 + 关机保留（不销毁）
+
+云资源回滚不变量（provider 层）：`provision` 返回 Err 时云端不应残留本次创建的实例；回滚失败必须把残留实例 ID 写进错误消息。
 
 ---
 
-## 10. 会话管理
+## 10. 统一协议适配层
+
+### 10.1 HTTP 服务的实现取舍
+
+用标准库手写 HTTP/1.1（不引 axum/hyper）。**8 个固定 worker 线程池**（非每连接一线程——监控页 1.5s 轮询会积累上百线程拖垮进程）；每连接读超时 120s / 写超时 300s；`Connection: close` 短连接；`MAX_BODY = 32MiB`；内置 base64 解码（服务浏览器附件上传）；路径 percent-decode（模型 ID 的 `:` 被浏览器编成 `%3A`）。
+
+代价：不支持 HTTP/2、TLS——对「仅监听 127.0.0.1 的个人客户端」都不必要。
+
+### 10.2 路由清单（54 条，按类别）
+
+| 类别 | 路由 |
+|------|------|
+| 内置页面 | `GET /`、`GET /index.html`（内嵌 WebUI，同源可调 /api 与 /v1，无需 CORS） |
+| OpenAI 兼容 | `GET /health`、`GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/completions`、`POST /v1/embeddings` |
+| Anthropic 兼容 | `POST /v1/messages`（系统提示插入 messages 开头；流式 chunk → content_block_delta / message_delta / message_stop 事件） |
+| 部署管理 | `GET /api/status`、`POST /api/deploy`、`GET /api/deployments`、`POST /api/assess`、`POST /api/preview`、`GET /api/sysinfo`、`GET/PUT /api/settings` |
+| 模型模板 | `GET /api/model-templates`、`PUT /api/model-templates`、`DELETE /api/model-templates/{model}/{slot}` |
+| 设备 | `GET/POST /api/devices`、`POST /api/devices/{id}/test`、`DELETE /api/devices/{id}` |
+| 云实例 | `GET /api/cloud/instances`、`POST .../power-off`、`POST .../power-on`、`DELETE .../{provider}/{id}` |
+| 模型下载任务 | `POST /api/models/pull`、`GET /api/models`、`GET /api/models/jobs`、`POST /api/models/jobs/{id}/cancel`、`DELETE /api/models/{id}` 等 |
+| 会话 | `GET/POST /api/sessions`、`POST /api/sessions/{id}/messages`、`POST /api/sessions/{id}/operations`、`DELETE/GET /api/sessions/{id}` |
+| 部署生命周期 | `POST /api/deployments/{id}/stop-service|start-service|unload|restore-tunnel`、`DELETE /api/deployments/{id}`、`GET /api/deployments/{id}/ssh-info` |
+| 附件/联网 | `POST /api/extract`、`POST /api/fetch-url` |
+
+`/api/` 或 `/v1/` 前缀下方法不匹配 → 405；其余 404。
+
+### 10.3 请求规范化
+
+**只改 `model` 字段**，其余原样保留（OpenAI 兼容性的关键）：`model="auto"`/空 → 当前部署模型 ID；具体名 → 原样透传；未知字段 → 透传；采样参数越界 → 400 指明参数名。
+
+**响应改写**：上游 llama.cpp 填绝对路径，必须改写为 Mangosteen 模型 ID（防泄漏本机路径）；只改 `model` 一个键、保留 `timings`/`system_fingerprint` 等非标准字段。
+
+### 10.4 错误归一化
+
+上游错误统一转 Mangosteen 格式 `{error: {message, type, code}}`：
+
+| 错误 | 状态码 |
+|------|--------|
+| `BadRequest` / `ModelNotFound` | 400（model_not_found → 404） |
+| `AccessDenied` | 403 |
+| `InsufficientLocalResource` / `NoViableCandidate` | 503 |
+| 其它 | 500 |
+
+### 10.5 流式 / 非流式分路径
+
+流式（POST + 推理路由 + `stream:true`）走 `relay_stream` 直通：系统 `curl --no-buffer` 上游、先探第一段区分正常 SSE 与上游报错 JSON（不能一上来写 200，否则错误被当流解析、界面空白）、SSE 帧逐行改写 model 后 `write_chunk` 立即 flush、`TCP_NODELAY` 防 Nagle 攒包、客户端断开即 `child.kill()`。非流式走 `http_post_json` 裸 TcpStream（上游必为本机回环，无需 TLS）。
+
+### 10.6 为什么网关不自己实现推理
+
+网关只做协议转换与路由：本地与云端走同一份转发代码；上游升级 llama.cpp 时网关无需改动；网关不可用时用户仍可直连后端排障。
+
+---
+
+## 11. 会话管理
 
 ### 11.1 定位
 
-基线把「用户会话管理」放在**第一层**，职责是「管理用户会话、部署任务会话、
-推理会话生命周期；维护任务状态、上下文、操作记录，作为最上层交互入口」。
+第一层职责：「管理用户会话、部署任务会话、推理会话生命周期；维护任务状态、上下文、操作记录」。关键边界：**不感知算力来源**——不判断能不能部署、不启动引擎、不访问云厂商。
 
-关键边界：**它不感知算力来源**。会话层不判断能不能部署、不启动引擎、
-不访问云厂商——那些都是下层的事。它只记录「谁、在什么时候、做了什么、
-结果如何」。
-
-### 11.2 两类会话
+### 11.2 会话种类
 
 | 种类 | 内容 | 生命周期 |
 |------|------|----------|
 | `Chat`（推理会话） | `messages: [{role, content, at_ms}]` | 新建 → 追加消息 → 删除 |
 | `Deploy`（部署任务会话） | `operations: [{action, detail, ok, at_ms}]` | 新建 → 记录操作 → 删除 |
 
-**为什么部署也要一个「会话」**：一次部署不是单点动作，而是
-「评估 → 选点 → 下载 → 加载 → 就绪」的过程，中途可能降级、重试、失败。
-把这些记在同一条时间线上，事后才能回答「上次为什么上了云」。
-只记最终状态等于把排查线索丢掉。
+部署也要「会话」：一次部署是「评估 → 选点 → 下载 → 加载 → 就绪」的过程，记在同一条时间线上，事后才能回答「上次为什么上了云」。
 
-### 11.3 持久化
+### 11.3 持久化与接口
 
-单文件 JSON（`sessions.json`）+ 原子写，与部署台账、模型台账同目录。
+单文件 JSON（`sessions.json`，config_dir 下）+ 原子写，跨进程可见（CLI 与 `ui` 共享同一份）。`prune(keep)` 防文件无限增长。接口：`GET/POST /api/sessions`、`GET/DELETE /api/sessions/{id}`、`POST /api/sessions/{id}/messages`、`POST /api/sessions/{id}/operations`。
 
-**为什么不用数据库**：三个台账加起来不过几十 KB，引入 SQLite 会多一个
-跨平台编译与迁移负担。JSON 直读也便于用户自己看、自己备份。
+### 11.4 与推理链路的关系
 
-**为什么必须有 `prune`**：会话文件随对话增长，长期使用后会到几 MB。
-每次读写都解析整份 JSON，UI 会肉眼可见地变慢。`prune(keep)` 保留最近的
-若干个，是必要的上限保护。
-
-### 11.4 接口
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/sessions?kind=chat\|deploy` | 列表（摘要，不含消息体） |
-| `POST` | `/api/sessions` | 新建（`kind` / `title` / `model` 均可省略） |
-| `GET` | `/api/sessions/{id}` | 详情（含消息与操作记录） |
-| `DELETE` | `/api/sessions/{id}` | 删除（幂等） |
-| `POST` | `/api/sessions/{id}/messages` | 追加消息 |
-| `POST` | `/api/sessions/{id}/operations` | 记录操作 |
-
-列表只返回摘要：几十轮对话的会话带完整消息体会让列表接口膨胀到几百 KB，
-而列表页根本不需要消息内容。
-
-`title` 留空时由**首条用户消息**自动生成（按字符截断到 24 字 + 省略号，
-不是按字节——按字节会切坏中文）。
-
-### 11.5 与推理链路的关系
-
-会话层**不参与**推理转发。`POST /v1/chat/completions` 仍是网关直接转发给
-引擎（基线：网关不自己实现推理）。消息落库由调用方（UI / CLI）在拿到
-完整回复后另行调用会话接口。
-
-这样做的原因：流式响应下「什么时候算一条完整回复」只有调用方知道。
-塞进网关的转发路径会让协议层多出一个状态机，而它对转发本身没有价值。
+会话层**不参与**推理转发（消息落库由调用方拿到完整回复后另行调用）——流式响应下「什么时候算一条完整回复」只有调用方知道。
 
 ---
 
-## 11. 基础能力层
+## 12. 基础能力层
 
-### 11.1 模型台账
+### 12.1 模型台账
 
-JSON 存储（不是数据库）。理由：个人场景模型数量在几十量级；  
-用户可以直接手改排障（符合"配置驱动"调性）；写操作走原子替换不会写坏。
+JSON 存储。`register_local_with_source`：访问控制校验 → 解析 GGUF → 可选 SHA-256 → 写入台账；同 ID 重复注册**更新**（幂等），未提供来源不抹历史来源。`register_cloud`：不校验本地文件，location 记 `Cloud{instance_id, path}`。
 
-`register_local()` 流程：访问控制校验 → 解析 GGUF → 可选哈希 → 写入台账。  
-重复注册同一 `name+quant` 会**更新**（幂等），便于"同一模型换了位置"。
+**哈希默认在登记时不算**（7B 文件机械盘数十秒），改为 `verify` 时按需计算。`remove(id, delete_file)` 删磁盘文件前再走访问控制。
 
-**哈希默认在登记时不算**：7B 模型 4.5GiB，机械盘上要数十秒，  
-会让 `models add` 体验极差。改为 `models verify` 时按需计算  
-（首次计算并记录，后续比对）。
+### 12.2 部署台账
 
-### 11.2 部署台账
+`state.json`（config_dir），`DeploymentRecord{plan, status, run_status, pid, error, updated_at, config_template}`。**每次状态变更立即落盘**（原子替换）——一次云端部署可能持续数小时并产生真实计费，进程重启丢失台账 = 忘记关机持续扣费 + 资源泄漏。`upsert`（同 ID 覆盖）、`prune_destroyed/prune_terminal`（清 destroyed+failed，保留 stopped 复用依据）、`prune_inactive`（部署前清非活跃，避免复用不可达旧实例）。
 
-**每次状态变更立即落盘**（不是退出时保存），原子替换。
+### 12.3 文件访问控制（AccessGuard）
 
-理由：一次云端部署可能持续数小时并产生真实计费。进程重启后若丢失台账：  
-用户看不到在跑什么实例 → 忘记关机 → 持续扣费；无法清理已创建实例 →  
-云端资源泄漏。
+威胁模型：误读系统文件、符号链接逃逸、`../../` 穿越、超大文件。防御：`fs::canonicalize` 后前缀比较（符号链接无处遁形）+ 词法归约兜底（目标不存在时仍能拦住 `..`）+ 体积上限 + `.gguf` 扩展名白名单。授权范围 = `models_dir ∪ cache_dir ∪ allowed_read_roots`。
 
-状态机：`Planned → Provisioning → Ready → Stopped → Destroyed`  
-（另有 `Failed`）。非法迁移（如 `Destroyed → Ready`）被拒绝。
+### 12.4 下载与格式
 
-### 11.3 文件访问控制
+`download_model`：`.part` 断点续传（`--continue-at -`）、多源择优（hf-mirror/huggingface HEAD 测速排序）、大小/sha256 校验后原子 rename、进度轮询 250ms、取消经 `try_wait + kill`。`detect_format` 识别 gguf/safetensors/onnx/pytorch/tensorrt/config/ggml（**只标识不过滤**——下载不限格式）。
 
-威胁模型：
+### 12.5 其他能力
 
-1. 误把系统文件当模型读（`/etc/shadow`）→ 信息泄露
-2. 授权目录内的符号链接指向外部 → 前缀判断被绕过
-3. `../../` 路径穿越
-4. 读取超大文件耗尽内存/磁盘
-
-防御：
-
-| 威胁 | 措施                                |
-| -- | --------------------------------- |
-| 1  | 白名单前缀 + 必须存在且为普通文件                |
-| 2  | `fs::canonicalize` 后再比较（符号链接无处遁形） |
-| 3  | 词法归约兜底（目标不存在时仍能拦住 `..`）           |
-| 4  | 单文件体积上限                           |
-
-授权范围 = `models_dir` ∪ `cache_dir` ∪ `allowed_read_roots`。
+`quantize`（可选工具，非部署主链路；输出不得覆盖源文件）、`extract`（文本直读 + 系统工具富文档，单文件 200k 字符上限）、`webfetch`（系统 curl + 状态机去标签，零密钥零依赖）。
 
 ---
 
-## 12. 平台适配层
+## 13. 平台适配层（本地三平台：macOS / Windows / Linux）
 
-### 12.1 路径规范
+### 13.1 路径规范
 
-| 用途 | macOS                                       | Linux                              | Windows                            |
-| -- | ------------------------------------------- | ---------------------------------- | ---------------------------------- |
-| 配置 | `~/Library/Application Support/mangosteen`  | `$XDG_CONFIG_HOME/mangosteen`      | `%APPDATA%\mangosteen`             |
-| 模型 | `.../Application Support/mangosteen/models` | `$XDG_DATA_HOME/mangosteen/models` | `%LOCALAPPDATA%\mangosteen\models` |
-| 缓存 | `~/Library/Caches/mangosteen`               | `$XDG_CACHE_HOME/mangosteen`       | `%LOCALAPPDATA%\mangosteen\cache`  |
-| 日志 | `~/Library/Logs/mangosteen`                 | `$XDG_STATE_HOME/mangosteen/log`   | `%LOCALAPPDATA%\mangosteen\logs`   |
+| 用途 | macOS | Linux | Windows |
+|------|-------|-------|---------|
+| 配置 | `~/Library/Application Support/mangosteen` | `$XDG_CONFIG_HOME/mangosteen` | `%APPDATA%\mangosteen` |
+| 模型 | `.../mangosteen/models` | `$XDG_DATA_HOME/mangosteen/models` | `%LOCALAPPDATA%\mangosteen\models` |
+| 缓存 | `~/Library/Caches/mangosteen` | `$XDG_CACHE_HOME/mangosteen` | `%LOCALAPPDATA%\mangosteen\cache` |
+| 日志 | `~/Library/Logs/mangosteen` | `$XDG_STATE_HOME/mangosteen/log` | `%LOCALAPPDATA%\mangosteen\logs` |
 
-每个都支持 `MANGOSTEEN_*` 环境变量覆盖。
+每个都支持 `MANGOSTEEN_*` 环境变量覆盖（容器化与测试）。不用 `dirs` crate（手写 <200 行可完全单测）。
 
-**为什么不用 `dirs` crate**：规则只有四类、覆盖三平台，手写不足 200 行  
-且可完全无副作用单测（注入环境变量读取器）；引入第三方反而增加审计面。
+### 13.2 硬件采集
 
-### 12.2 硬件采集
+| 平台 | GPU | 内存 | CPU |
+|------|-----|------|-----|
+| macOS | `system_profiler SPDisplaysDataType -json`；Apple Silicon 统一内存 | `sysctl` + `vm_stat` | `sysctl hw.physicalcpu/logicalcpu` |
+| Linux | `nvidia-smi`；AMD `rocm-smi` | `/proc/meminfo` | `/proc/cpuinfo`（按 physical id + core id 去重） |
+| Windows | `nvidia-smi`；否则 PowerShell WMI | `Win32_OperatingSystem` | `Win32_Processor` |
 
-| 平台      | GPU                                                            | 内存                              | CPU                                            |
-| ------- | -------------------------------------------------------------- | ------------------------------- | ---------------------------------------------- |
-| macOS   | `system_profiler SPDisplaysDataType -json`；Apple Silicon 用统一内存 | `sysctl hw.memsize` + `vm_stat` | `sysctl hw.physicalcpu/logicalcpu`             |
-| Linux   | `nvidia-smi --query-gpu=...`；AMD 读 `rocm-smi`                  | `/proc/meminfo`                 | 解析 `/proc/cpuinfo`（去重 `physical id`+`core id`） |
-| Windows | `nvidia-smi`；否则 PowerShell WMI                                 | `Win32_OperatingSystem`         | `Win32_Processor`                              |
+降级策略：采集失败**绝不**退出，每项退回保守默认（8GiB/4 核/无 GPU）并记入 `warnings`。
 
-**降级策略**：采集失败**绝不**导致进程退出。每项失败退回保守默认值  
-并记入 `warnings`，在 `mangosteen doctor` 里可见。
+### 13.3 进程管理
 
-### 12.3 进程管理
+| 差异点 | Unix | Windows |
+|--------|------|---------|
+| 温和终止 | SIGTERM | `taskkill /PID`（不带 /F = WM_CLOSE） |
+| 强杀 | SIGKILL | `taskkill /PID /F` |
+| 进程组 | `process_group(0)` | `CREATE_NEW_PROCESS_GROUP \| CREATE_NO_WINDOW` |
+| 僵尸判定 | `ps -o stat=` 首字母 Z | 无此概念 |
 
-| 差异点  | Unix                  | Windows                    |
-| ---- | --------------------- | -------------------------- |
-| 温和终止 | `SIGTERM`             | `taskkill /PID`            |
-| 强杀   | `SIGKILL`             | `taskkill /PID /F`         |
-| 进程组  | `process_group(0)`    | `CREATE_NEW_PROCESS_GROUP` |
-| 僵尸判定 | `ps -o stat=` 首字母 `Z` | 无此概念                       |
+**SIGKILL 后的判定**：若 `kill(pid,0)` 仍成功，只可能是僵尸态或内核尚未调度终止——「倾向于认为已终止」比「报错」更安全（误报失败会让调用方重复清理甚至放弃清理）。日志重定向优先于管道（管道写满 64KB 会阻塞子进程——「引擎启动后卡死」根因）。
 
-**SIGKILL 后的判定逻辑**：SIGKILL 不可捕获，发出后必然终止。  
-若 `kill(pid,0)` 仍成功，只可能是僵尸态或内核尚未调度终止。  
-此时"倾向于认为已终止"比"报错"更安全——误报失败会让调用方重复清理甚至放弃清理，  
-而资源实际上已经释放了。
+### 13.4 文档转换（docconv）
+
+macOS `textutil` / Linux `pdftotext + pandoc` / Windows PowerShell + Word COM；缺工具时给可执行安装建议，不静默失败。
+
+### 13.5 资源监控（resmon）
+
+`CpuSampler` 有状态（存上次累计时间片算增量）；`process_rss_bytes` 供设备页每部署内存占用（查不到返回 None 不算错误）。
 
 ---
 
-## 13. 配置体系
+## 14. 配置体系
 
-### 13.1 搜索顺序
+### 14.1 搜索顺序
 
-1. `--config <path>` 显式指定（**必须存在**，否则报错）
-2. `MANGOSTEEN_CONFIG` 环境变量（同样必须存在）
-3. 用户配置目录
+1. `--config <path>`（**必须存在**，否则报错——静默回退会让人误以为配置生效）
+2. `MANGOSTEEN_CONFIG` 环境变量
+3. 用户配置目录 `config.toml`
 4. 系统级目录（`/etc/mangosteen`，Windows 无）
-5. 全部缺失 → 内置默认（首次运行场景）
+5. 全部缺失 → `Config::sample()` 内置默认（首次运行场景）
 
-**显式路径缺失为什么报错而非回退**：那是用户明确要求的，  
-静默回退到默认值会让人误以为配置生效了。
+TOML 语法损坏 → 重命名为 `config.toml.corrupt-<时间戳>` 并警告，回落内置样例继续；语义错误（如 max_model_bytes=0）原样上报。
 
-### 13.2 密钥表达
+### 14.2 密钥表达
 
-三种来源，`config show` 只输出脱敏形式：
+`SecretRef` 四种来源：Inline / Env / File / None，按顺序解析；`config show` 只输出脱敏形式（`${ENV}` / `file:...` / `<inline:***redacted***>`）；配置文件 0600。
 
-```toml
-secret = { env = "AUTODL_API_TOKEN" }    # 显示为 ${AUTODL_API_TOKEN}
-secret = { file = "/run/secrets/tok" }   # 显示为 file:/run/secrets/tok
-secret = { inline = "xxx" }              # 显示为 <inline:***redacted***>
-```
+### 14.3 向前兼容
 
-配置文件以 `0600` 权限创建（Unix）。
+所有字段 `serde(default)`，旧版配置在新版本下可正常加载，缺失项取默认值。
 
-### 13.3 向前兼容
+### 14.4 配置模板与模型来源
 
-所有字段都有 `serde(default)`。旧版配置在新版本下可正常加载，  
-缺失项取默认值。
+- **配置模板**（`core::template`）：手写 YAML 子集解析（带行号错误）；`BUILTIN_TEMPLATES` 是首次启动灌入用户配置的唯一数据源（只补缺失不覆盖用户已改）；`resolve(model, text)` 未注册模型明确报错不猜默认值
+- **模型来源**（`ModelSource`）：全字段可配（配置驱动）；内置三源 modelscope（默认）/ hf-mirror（国内直连可搜索）/ huggingface；`download_url` 按 kind 拼装，Custom 缺模板报 config 错误
 
 ---
 
-## 14. 错误处理与降级
+## 15. 错误处理与降级
 
-### 14.1 错误分类与可重试性
+### 15.1 错误分类与可重试性
 
-| 变体                                              | 可重试 | 理由               |
-| ----------------------------------------------- | --- | ---------------- |
-| `InsufficientLocalResource`                     | 是   | 本地链路的典型降级触发点     |
-| `EngineLaunch` / `EngineExited`                 | 是   | 换云端再试            |
-| `Provider` / `NoViableCandidate` / `Network`    | 是   | 换节点再试            |
-| `Config` / `ConfigIo` / `BadRequest`            | 否   | 与算力来源无关，换链路也不会成功 |
-| `ModelNotFound` / `GgufFormat` / `HashMismatch` | 否   | 文件问题，换算力来源无用     |
-| `InvalidTransition`                             | 否   | 状态机错误，重试只会重复失败   |
+`MnError` 20 个变体；`is_retryable()` 是调度决策器判断是否降级的依据：
 
-`MnError::is_retryable()` 是调度决策器判断是否降级的依据。
+| 可重试 | 不可重试 |
+|--------|---------|
+| InsufficientLocalResource / EngineLaunch / EngineExited / Provider / NoViableCandidate / Network | Config / ConfigIo / ModelNotFound / GgufFormat / HashMismatch / DriverUnavailable / AccessDenied / BadRequest / Cancelled / CloudDownloadFailed / InvalidTransition / Io |
 
-### 14.2 云端编排的资源回滚
+`code()` 提供稳定错误码（17 个）；`exit_code()` 用 BSD sysexits（64 用法错 / 66 无输入 / 77 无权限 / 78 配置错 / 69 不可用 / 70 软件错）。
 
-**核心不变量**：`provision()` 返回 `Err` 时，云端不应残留任何由本次调用创建的资源。
+### 15.2 云端编排的资源回滚
 
-任何一步失败（创建失败、启动超时、缺 SSH 信息、隧道失败）都要销毁已创建的实例。  
-若回滚本身也失败，必须把**残留实例 ID** 与**手工清理命令**写进错误消息：
+**核心不变量**：`provision()` 返回 `Err` 时，云端不应残留任何由本次调用创建的资源。失败处理原则：**停实例不销毁**（权重/引擎/环境是重新部署最贵的部分；关机已能停止计费）；回滚失败必须把**残留实例 ID + 手工清理命令**写进错误消息。
+
+### 15.3 错误消息的三段式
 
 ```
-⚠ 自动销毁实例 i-abc123 失败：...
-请立即手工处理，避免持续计费：
-  mangosteen cloud destroy i-abc123 --provider autodl
+✗ 现象（发生了什么）
+  上下文（为什么：资源不足/网络/厂商限流）
+  建议： 下一步该做什么（可执行命令）
 ```
 
-否则用户会被静默扣费。
-
-### 14.3 错误消息的三段式
-
-```
-✗ 无可用云端算力节点：本地部署失败（推理引擎进程 46873 被信号终止：...）；
-  但未配置任何可用的云服务商，无法降级。请检查 config.providers ...
-  建议： 放宽约束（提高价格上限 / 降低显存要求），或启用更多服务商
-```
-
-1. **现象**：发生了什么
-2. **上下文**：为什么会这样（本地失败？资源不足？）
-3. **建议**：下一步该做什么
-
-`output::suggest()` 为每种错误类型提供具体建议，不留"未知错误"。
+`output::suggest()` 为每种错误类型提供具体建议，不留「未知错误」。
 
 ---
 
-## 15. 安全设计
+## 16. 安全设计
 
-| 面      | 措施                                         |
-| ------ | ------------------------------------------ |
-| 密钥存储   | 支持 env/file 引用；配置文件 0600；`config show` 脱敏  |
-| 认证头传递  | 通过 0600 临时配置文件传给 curl，不放在进程参数里             |
-| 推理服务暴露 | 本地绑 `127.0.0.1`；云端绑 `0.0.0.0` 但只经 SSH 隧道访问 |
-| 网关鉴权   | 可选 Bearer / `X-API-Key`；开启时无密钥直接 401       |
-| 文件访问   | 白名单 + 真实路径解析 + 体积上限 + 扩展名限制                |
-| 路径穿越   | 词法归约 + 符号链接解析（防 TOCTOU）                    |
-| 云端实例清理 | 失败必回滚；回滚失败必须暴露残留 ID                        |
-| 网络重定向  | curl `--max-redirs 0`（防止认证头被带到别的域）         |
-
-### 危险操作的确认机制
-
-删除模型文件、销毁云端实例、批量停止——这些**不可逆**操作要求 `--yes`：
-
-```
-⚠ 此操作非常危险，可能导致不可逆的数据丢失！
-  将删除：/path/to/model.gguf
-
-  确认执行请加 --yes：mangosteen models remove x --delete-file --yes
-```
-
-未加 `--yes` 时返回退出码 2（可被脚本区分）。
+| 面 | 措施 |
+|----|------|
+| 密钥存储 | env/file/inline 引用；配置文件 0600；`config show` 脱敏 |
+| 认证头传递 | 0600 临时配置文件传给 curl（`--config`），不进进程参数列表 |
+| 推理服务暴露 | 本地绑 127.0.0.1；云端绑 0.0.0.0 但只经 SSH 隧道访问（浏览器直接开 `http://127.0.0.1:<本地端口>/v1`） |
+| 网关鉴权 | 可选 Bearer / `X-API-Key`；开启时无密钥 401 |
+| 文件访问 | 白名单 + 真实路径解析 + 体积上限 + 扩展名限制 |
+| 路径穿越 | 词法归约 + 符号链接解析（防 TOCTOU） |
+| 云端实例清理 | 失败必回滚；回滚失败必须暴露残留 ID |
+| 网络重定向 | curl `--max-redirs 0`（防认证头被带到别的域） |
+| 危险操作确认 | 删除模型/销毁实例/批量停止要求 `--yes`，未加返回退出码 2 |
+| 隧道进程清理 | `TunnelManager::Drop` 兜底 `close_all()`，ssh 不成孤儿 |
 
 ---
 
-## 16. 测试策略
+## 17. 测试策略
 
-### 16.1 分层测试
+### 17.1 分层测试（当前规模）
 
-| 层          | 测试类型                | 数量      |
-| ---------- | ------------------- | ------- |
-| `core`     | 纯单元测试（无 IO）         | 142     |
-| `platform` | 单元测试（含真实 syscall）   | 36      |
-| `base`     | 单元测试（临时目录）          | 47      |
-| `local`    | 单元测试（假引擎脚本）         | 12      |
-| `cloud`    | 单元测试（MockTransport） | 78      |
-| `gateway`  | 单元测试 + **端到端集成**    | 71 + 11 |
-| `cli`      | 单元测试 + **架构约束**     | 72 + 18 |
+| crate | 单元测试 | 备注 |
+|-------|---------|------|
+| `core` | 185 | 纯算法（无 IO） |
+| `platform` | 36 | 含真实 syscall |
+| `base` | 47 | 临时目录 |
+| `device` | 33 + 1 ignored | 假引擎脚本 |
+| `provider` | 293 | MockTransport / FakeDriver |
+| `orchestration` | 63 | 不变量 I1–I4 |
+| `gateway` | 单测 + e2e 43 | 真 GGUF + 假 llama-server + 真 TCP |
+| `cli` | 47 + layering 24 + release_assets 20 | 架构守护 + 交付件守护 |
 
-### 16.2 关键测试设计
+### 17.2 关键测试设计
 
-**资源估算的边界测试**：
+- **资源估算边界**：7B Q4 适配 8GB/24GB 卡；32B 在 8GB 卡必然部分卸载；KV 降档救「差一点」；无 GPU 时 CPU 回退 vs 禁止回退
+- **状态机完备性**：合法路径全通；终态不可复活；不跳过 Starting 直接 Running；Failed → Ready 探测自愈
+- **降级链不变量**：I1–I4 各有用例；本地失败错误信息含「本地部署失败」
+- **端到端**（`gateway/tests/e2e.rs`，43 项）：真实 GGUF + 假 llama-server（Python 实现 /health 与 /v1/chat/completions）+ 真实 TCP——登记 → 评估 → 部署 → 就绪 → 停止全链路、OpenAI 兼容接口、`model:"auto"` 替换、API Key 鉴权、跨进程台账持久化
+- **为什么用假引擎**：llama-server 需要 GB 级模型与 GPU，CI 没有；假引擎能验证「网关 → 引擎进程 → HTTP 转发 → 响应归一化」这条最易出错的路径
 
-- 7B Q4 适配 8GB / 24GB 卡的不同落位形态
-- 32B 在 8GB 卡上必然部分卸载
-- KV 量化降档能否救活"差一点"的场景
-- 无 GPU 时 CPU 回退 vs 禁止回退
+### 17.3 交付件守护（release_assets.rs，20 项）
 
-**状态机的完备性测试**：
-
-- 合法路径全通
-- 终态不可复活
-- 不能跳过 `Starting` 直接 `Running`
-
-**降级链的不变量测试**：
-
-- I1~I4 四条不变量各有用例
-- 本地失败时错误信息必须含"本地部署失败"而非"资源不足"
-- 回滚失败必须暴露残留 ID 与清理命令
-
-**端到端测试**（`gateway/tests/e2e.rs`，11 项）：  
-用真实 GGUF 文件 + 真实的假 llama-server 子进程 + 真实 TCP 连接，验证：
-
-- 登记 → 评估 → 部署 → 就绪 → 停止 全链路
-- OpenAI 兼容接口（`/v1/models`、`/v1/chat/completions`、`/v1/embeddings`）
-- `model:"auto"` 被替换为真实模型 ID
-- API Key 鉴权（401 / 200）
-- 本地失败降级且错误信息准确
-- 跨进程引擎可见性（`deploy` 后另起 `serve` 能识别）
-- 台账跨进程持久化
-
-### 16.3 为什么端到端测试用假引擎
-
-`llama-server` 需要真实模型文件（GB 级）与 GPU，CI 环境没有。  
-假引擎用 Python 实现 `/health` 与 `/v1/chat/completions`，  
-能验证协议层全链路，只是不产生真实推理结果。
-
-这让"网关 → 引擎进程 → HTTP 转发 → 响应归一化"这条最易出错的路径  
-在任何机器上都能被验证。
+DESIGN.md 必须覆盖 8 个 crate 名与 7 个主题词（资源评估引擎/调度决策器/多云统一抽象/后端节点选择器/统一协议适配层/文件访问控制/架构约束的自动化守护）；CI 必须跑架构约束测试；WebUI 保持自包含（禁止 CDN）。
 
 ---
 
-## 17. 架构约束的自动化守护
+## 18. 架构约束的自动化守护
 
-`cli/tests/layering.rs` 把提示词里的架构铁律变成可执行断言。  
-任何违反都会让 `cargo test` 失败。
+`cli/tests/layering.rs`（1,031 行、24 个用例）把架构铁律变成可执行断言，扫描前用 `strip_comments_and_strings()` 剥离注释与字符串（本仓库大量注释在解释「为什么不用某技术栈」，直接扫原文会误伤），并有元测试验证剥离器可靠。
 
-| 编号 | 约束       | 校验方式                                                                                                  |
-| -- | -------- | ----------------------------------------------------------------------------------------------------- |
-| C1 | 网关唯一收口   | CLI 的 Cargo.toml 不得依赖 local/cloud；源码不得 `use mangosteen_device::`；不得出现厂商 API 地址；除 `serve` 外不得自建 TCP 连接  |
-| C2 | 平台无关     | core/gateway/base/local/cloud/backend 源码不得出现 `cfg(target_os)`；不得直接调 `libc::` / `windows_sys::`                            |
-| C3 | 推理引擎唯一   | 全仓不得出现 vLLM / TensorRT / SGLang 等引擎名                                                                  |
-| C4 | 纯云端模式     | `scheduler.rs` 中 `decide()` 必须返回云端方案；`Config::sample` 里无 `local_first` |
-| C5 | 依赖方向自上而下 | 逐 crate 检查 Cargo.toml 的依赖声明                                                                           |
-| C5b | 厂商驱动统一入口 | `gateway` / `cli` / `base` 不得依赖或引用 `mangosteen_backend`，必须经 `cloud` 的注册表加载                          |
+| 编号 | 约束 | 校验方式 |
+|------|------|---------|
+| C1 | 网关唯一收口 | CLI 的 Cargo.toml 不得依赖 device/provider；源码不得 `use mangosteen_device::/mangosteen_provider::`；不得出现厂商 API 地址；不得自建 TCP 连接 |
+| C2 | 平台无关 | core/gateway/base 源码不得出现 `cfg(target_os)`；core 不得依赖 platform/libc/windows-sys；平台分支只允许在 platform 与 cli |
+| C3 | 推理引擎插件化 | orchestration/gateway 源码不得出现 `InferenceEngine::`（settings handler 例外）；必须出现 `engines_registry.get(`；注册表恰好 2 个内置插件（llama.cpp + Ollama），未实现引擎刻意缺席 |
+| C4 | 本地优先配置 | `decide()` 中本地拒绝判定必须早于云端方案构造；默认配置必须含 `local_first: true` |
+| C5 | 依赖方向自上而下 | 逐 crate 比对 Cargo.toml 依赖白名单 |
+| C6 | 五层架构完整性 | session/cli/webui、gateway http/*、device/plugin + orchestration 7 个执行文件 + provider/registry、base 下载/量化、core/platform 全部在位；session 不感知算力 |
+| — | 其他 | 生产代码 unwrap 密度 < 3/kloc；多格式「识别不过滤」；模型登记仍要求 GGUF 元数据 |
 
-C2 的落地：`mangosteen-base` 的富文档提取原本内联了 `cfg(target_os)`（选择
-textutil / pdftotext / Word COM），违反「平台差异收敛到 platform」。现已下沉为
-`mangosteen-platform::docconv`，base 只调用不判断平台。
-
-**技术要点**：扫描前必须剥离注释与字符串字面量。  
-本仓库大量注释在**解释**为什么不用某个技术栈（例如"禁止引入 vLLM"），  
-若直接扫原文会把自己写死。`strip_comments_and_strings()` 处理这一点，  
-并有元测试验证剥离器本身可靠。
-
-此外还检查：
-
-- 生产代码中 `unwrap()` 密度 < 3/kloc（防止 panic 蔓延）
-- 只支持 GGUF（不得出现 safetensors 等加载逻辑）
+接入点：`.github/workflows/release.yml` 在 `cargo test --workspace` 后单独再跑 layering；`scripts/refactor-check.sh` 五级校验（fmt → clippy → test → layering → e2e）。
 
 ---
 
 ## 附：关键设计决策速查
 
-| 决策              | 选择           | 理由                                    |
-| --------------- | ------------ | ------------------------------------- |
-| 推理引擎            | 只用 llama.cpp | 本地/云端参数语义必须一致                         |
-| 模型格式            | 只用 GGUF      | 与 llama.cpp 生态对齐，不引入转换链               |
-| 云端 HTTP 客户端     | 系统 curl      | 低频操作；无新增供应链；自带 TLS                    |
-| 网关 HTTP 服务      | 标准库手写        | 11 个固定路由；HTTP/2 与 TLS 对回环监听不必要        |
-| 台账存储            | JSON + 原子写   | 几十条记录；用户可手改排障                         |
-| 登记时算哈希          | 默认不算         | 4.5GiB 文件数十秒；改为 verify 时按需            |
-| 引擎退出时杀进程        | 不杀           | 用户可能要用服务；必须显式 stop                    |
-| 并发模型            | 线程而非 async   | 推理是一次性生命周期管理，无高并发需求                   |
-| 周期轮询 vs 事件      | 轮询           | 云厂商普遍无 webhook；轮询间隔可配                 |
-| 云端监控采集          | 后台线程 + 5 秒缓存 | 设备页 2 秒轮询；每次同步打厂商接口会卡页面并触发限流      |
-| 云端监控空态          | 三态可区分        | 「不支持 / 无数据 / 失败」混为一谈会让用户找错排查方向        |
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| 推理引擎 | 插件化（llama.cpp + Ollama） | 本地/云端参数语义一致；新增引擎不改调度主链路 |
+| 模型格式 | 下载不限格式，只标识 | 非 GGUF 是别的引擎要用的 |
+| 本地推理部署 | 不支持（target=local 拒绝） | 本地推理交由 Ollama；静默上云会产生计费实例 |
+| 云端 HTTP 客户端 | 系统 curl | 低频操作；无新增供应链；自带 TLS |
+| 网关 HTTP 服务 | 标准库手写（8 worker 线程池） | 回环监听；HTTP/2 与 TLS 不必要；每连接一线程会被轮询拖垮 |
+| 台账存储 | JSON + 原子写 | 几十条记录；用户可手改排障 |
+| 登记时算哈希 | 默认不算 | GB 级文件耗时；verify 时按需 |
+| 关实例判据 | 引擎端口占用制（8080/8081） | 端口空闲即无人推理；台账其他部署仅提示 |
+| 停止进程判据 | 按模型名（非端口） | 端口漂移、pid 陈旧；模型文件名是命令行最稳定锚点 |
+| SSH 重试 | 断链才重试，最多 2 次；不可达快速失败 | 不可达每次烧满 ConnectTimeout，把已关机节点拖成假死 |
+| 失败清理 | 连接类失败删台账；其余停实例不销毁 | 远端无现场可复用；权重/环境是重部署最贵部分 |
+| 并发模型 | 线程而非 async | 推理是一次性生命周期管理，无高并发需求 |
+| 云端监控采集 | 后台线程 + 5 秒缓存 | 设备页 2 秒轮询；同步调厂商会卡页面并触发限流 |
+| 远端节点 OS | 仅 Linux | 镜像强制 Linux；Windows 镜像既不能 SSH 也不能跑推理 |
+| 实例密码 | 固定 `1qaz@WSX` | 公钥安装后的统一回退凭证；异步生效需验证重试 |
