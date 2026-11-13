@@ -1528,12 +1528,12 @@ pub fn stop_llama_server(target: &SshTarget, workdir: &str) -> MnResult<()> {
 /// 锚点。同节点多模型/端口漂移/旧进程残留的场景下，按模型名匹配
 /// 才能精确停掉「这一个模型」的进程。
 ///
-/// ## 确认-重试机制（用户要求）
+/// ## 删除-等待-确认-重试（用户要求）
 ///
-/// 停止脚本执行后**不盲信退出码**：立即用同一套模型名匹配逻辑复查
-/// 进程是否真的没了。首次确认仍有残留 → 重试一次（TERM/KILL 再来一
-/// 轮 + 复查）；重试后仍残留 → 报错，绝不假报成功（「进程还在却被
-/// 标记为已停止」会让关机流程被跳过、节点持续计费）。
+/// 每一轮：按模型名匹配发 TERM（等不到优雅退出再 KILL）→ **等待 1s**
+/// → 用同一套模型名匹配逻辑复查进程是否删净。确认未删净 → 重试一轮
+/// （最多 2 轮）；两轮后仍残留 → 报错并附 PID 列表，绝不假报成功
+/// （「进程还在却被标记为已停止」会让关机流程被跳过、节点持续计费）。
 pub fn stop_llama_server_by_model(
     target: &SshTarget,
     workdir: &str,
@@ -1541,46 +1541,50 @@ pub fn stop_llama_server_by_model(
 ) -> MnResult<()> {
     let _ = workdir; // 按模型名停止不依赖 workdir（命令行里含完整路径）
     let script = build_stop_script_by_model(model_name);
-    // 最多两轮：首轮 + 确认失败后的重试轮。每轮内部已有 TERM 等待
-    // KILL 复查；两轮都 still-running 才判失败。
-    let mut last_err = None;
-    for round in 1..=2u32 {
+    // 每轮脚本内部：TERM → 等待优雅退出（最多 5s）→ KILL → 删净检查。
+    // 轮间固定等待 1s 再复查确认（用户要求），给系统释放端口/清理
+    // 子进程留出时间。
+    const ROUNDS: u32 = 2;
+    let mut last_still: Vec<String> = Vec::new();
+    for round in 1..=ROUNDS {
         let out = ssh_exec(target, &script, 90)?;
         if !out.contains("still-running") {
             return Ok(());
         }
-        let still: Vec<&str> = out
+        last_still = out
             .lines()
             .find_map(|l| l.strip_prefix("still-running:"))
-            .map(|rest| rest.split_whitespace().collect())
+            .map(|rest| rest.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default();
-        last_err = Some(format!(
-            "第 {round} 轮停止后模型 {model_name} 的 llama-server 仍在运行（PID: {}）",
-            still.join(",")
-        ));
-        if round == 1 {
+        if round < ROUNDS {
             eprintln!(
-                "[cloud] ⚠ 模型 {} 的进程首次停止未确认（仍有残留），1 轮重试",
-                model_name
+                "[cloud] ⚠ 模型 {} 的进程第 {} 轮删除后仍有残留（PID: {}），等待 1s 后重试",
+                model_name,
+                round,
+                last_still.join(",")
             );
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
     Err(MnError::Network {
         stage: "停止云端推理服务".to_string(),
-        reason: last_err.unwrap_or_else(|| {
-            format!("模型 {model_name} 的 llama-server 经 2 轮停止与确认仍在运行")
-        }),
+        reason: format!(
+            "模型 {model_name} 的 llama-server 经 {ROUNDS} 轮删除 + 1s 确认等待仍在运行（PID: {}）",
+            last_still.join(",")
+        ),
     })
 }
 
 /// 生成「按模型名停止」的远端脚本（纯函数，供生产与测试共用）。
 ///
-/// 定位三路精确化（不误伤同节点其它模型）：
+/// 定位与确认都按模型名模糊匹配（不误伤同节点其它模型）：
 /// 1. `pgrep llama-server`（不带 -f）按进程名（comm）找候选——承载
 ///    命令的 shell comm 是 bash，天然不命中；
 /// 2. 逐 PID 取完整命令行（`ps -o args=`，macOS/Linux 通用；
-///    `/proc/<pid>/cmdline` 兜底），含模型文件名才杀；
-/// 3. 杀完复查仍残留 → still-running（上层报错，不假报成功）。
+///    `/proc/<pid>/cmdline` 兜底），含模型文件名才 TERM；
+/// 3. TERM 后等待最多 5s 优雅退出，不退则 KILL；
+/// 4. **等待 1s** 让系统清理子进程/端口后复查（用户要求），仍残留
+///    输出 still-running 及 PID 列表（上层据此重试或报错）。
 fn build_stop_script_by_model(model_name: &str) -> String {
     let q = shell_quote(model_name);
     format!(
@@ -1601,6 +1605,7 @@ fn build_stop_script_by_model(model_name: &str) -> String {
          for pid in $pids; do \
            if kill -0 $pid 2>/dev/null; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; \
          done; \
+         sleep 1; \
          still=''; \
          for pid in $(pgrep llama-server 2>/dev/null); do \
            a=$(ps -p $pid -o args= 2>/dev/null); \
