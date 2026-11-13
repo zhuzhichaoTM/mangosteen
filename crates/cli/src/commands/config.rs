@@ -229,7 +229,7 @@ fn show(args: Args) -> MnResult<i32> {
     ]);
 
     println!();
-    println!("{}", output::bold("节点策略"));
+    println!("{}", output::bold("优选策略"));
     output::print_kv(&[
         (
             "权重".into(),
@@ -251,14 +251,6 @@ fn show(args: Args) -> MnResult<i32> {
     println!();
     println!("{}", output::bold("模型配置"));
     output::print_kv(&[
-        (
-            "推理引擎".into(),
-            cfg.local
-                .engine_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| output::dim("自动在 PATH 中查找").to_string()),
-        ),
         ("默认上下文".into(), cfg.local.default_context.to_string()),
         (
             "端口区间".into(),
