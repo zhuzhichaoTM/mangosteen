@@ -47,7 +47,6 @@ const ALLOWED: &[&str] = &[
     "reuse-provider",
     "device",
     "gpu-model",
-    "interactive",
     // 进度查看参数
     "watch",
     // 配置模板槽位（与 UI 部署页下拉框一致：default / uncensored / mode1…）
@@ -89,7 +88,6 @@ fn print_deploy_help() {
     println!("  {:<w$}  {}", "--watch", "部署后轮询查看进度（每 5 秒刷新）", w = 22);
     println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
     println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
-    println!("  {:<w$}  {}", "--interactive", "交互式确认部署方案", w = 22);
     println!();
     println!("{}", output::bold("示例"));
     println!("  mangosteen deploy qwen2.5-0.5b --gpu-model V100S --watch");

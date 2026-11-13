@@ -98,12 +98,11 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "enable",
     "disable",
     // 节点选择相关的布尔开关
-    "interactive",
     "running",
     "stopped",
     "require-stock",
     "no-require-stock",
-    // deploy 进度查看开关（--async 已移除：CLI 退出即断隧道，语义不成立）
+    // deploy 进度查看开关（--async / --interactive 已移除）
     "watch",
 ];
 
