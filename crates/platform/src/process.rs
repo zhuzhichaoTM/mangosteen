@@ -534,6 +534,105 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// 判断指定端口上的监听进程是否为 Mangosteen 的 UI/API 网关。
+///
+/// ## 判定口径（逐级兜底，任一命中即认定）
+///
+/// 1. **pidfile**：`gateway.pid` 存在、进程存活且确实在监听该端口；
+/// 2. **可执行文件名**：端口监听进程的可执行文件名为 `mangosteen`；
+/// 3. **HTTP 端点**：`/v1/models` 返回 200（mangosteen 网关的
+///    OpenAI 兼容端点，不依赖外部命令，沙箱/精简系统亦可用；
+///    网关开鉴权时该端点返回 401，由口径 1/2 兜底）。
+///
+/// doctor 据此区分「网关在跑（正常，不告警）」与「被其他程序占用
+/// （真正的端口冲突，需要处理）」。
+pub fn is_gateway_running(port: u16) -> bool {
+    // 口径 1：pidfile + 存活 + 确实在监听
+    if let Some(pid) = read_gateway_pid().filter(|pid| process_alive(*pid)) {
+        if find_listener_pid(port) == Some(pid) {
+            return true;
+        }
+    }
+    // 口径 2：端口监听进程的可执行文件是 mangosteen
+    if let Some(pid) = find_listener_pid(port) {
+        if let Some(exe) = process_exe(pid) {
+            let name = exe
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let base = name.strip_suffix(".exe").unwrap_or(&name);
+            if base == "mangosteen" {
+                return true;
+            }
+        }
+    }
+    // 口径 3：HTTP 探测 mangosteen 网关特征端点
+    probe_http_ok("127.0.0.1", port, "/v1/models", Duration::from_millis(500))
+}
+
+/// 读取 pidfile（`gateway.pid`），不存在或不可读返回 `None`。
+fn read_gateway_pid() -> Option<u32> {
+    let path = crate::paths::gateway_pid_file(&crate::paths::real_env);
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// 查询进程的可执行文件路径。
+fn process_exe(pid: u32) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS：ps -o comm= -p <pid> 给出完整路径
+        let out = Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(s))
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let link = format!("/proc/{pid}/exe");
+        std::fs::read_link(link).ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows：wmic 查询可执行路径
+        let out = Command::new("wmic")
+            .args([
+                "process",
+                "where",
+                &format!("ProcessId={pid}"),
+                "get",
+                "ExecutablePath",
+                "/value",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let path = text
+            .lines()
+            .find_map(|l| l.strip_prefix("ExecutablePath="))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+        Some(std::path::PathBuf::from(path))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// 发送温和终止信号（SIGTERM / taskkill 不带 /F）。
 #[cfg(unix)]
 fn send_signal_term(pid: u32) {

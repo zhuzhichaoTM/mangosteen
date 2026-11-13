@@ -199,18 +199,28 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
         // 网关端口
         let port = cfg.gateway.port;
         if mangosteen_platform::process::is_port_bindable(port) {
+            // 端口空闲：网关未运行，提示启动命令
             out.push(Check {
                 name: "网关端口".into(),
                 status: Status::Ok,
-                detail: format!("{port} 可绑定"),
-                hint: None,
+                detail: format!("{port} 可绑定（网关未运行）"),
+                hint: Some("执行 `mangosteen ui start` 启动 API 网关".into()),
+            });
+        } else if mangosteen_platform::process::is_gateway_running(port) {
+            // 端口被本程序网关占用：运行属正常状态，不是告警
+            out.push(Check {
+                name: "网关端口".into(),
+                status: Status::Ok,
+                detail: format!("{port} 已被 UI/API 网关占用（运行中）"),
+                hint: Some("执行 `mangosteen ui status` 查询状态".into()),
             });
         } else {
+            // 被其他程序占用：真正的冲突，需要处理
             out.push(Check {
                 name: "网关端口".into(),
                 status: Status::Warn,
-                detail: format!("{port} 已被占用"),
-                hint: Some("已有 serve 在运行？否则改配置 gateway.port 或加 --port 启动".into()),
+                detail: format!("{port} 已被其他程序占用"),
+                hint: Some("改配置 gateway.port 或加 --port 启动".into()),
             });
         }
 
