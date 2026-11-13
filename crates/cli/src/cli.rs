@@ -232,8 +232,35 @@ pub fn run(argv: Vec<String>) -> MnResult<i32> {
         }
         "doctor" => crate::commands::doctor::run(args),
         "help" => {
-            print_help();
-            Ok(0)
+            // `mangosteen help <命令>` 分发到对应命令的帮助：
+            // 把目标命令名重写为首选命令，交给它的 run() 处理 --help。
+            // 未指定命令（或未知命令）时打印顶层帮助。
+            match args.pos(1) {
+                Some(target) if commands().iter().any(|(n, _)| *n == target) => {
+                    let mut sub = crate::cli::Args::default();
+                    sub.positionals = vec![target.to_string()];
+                    sub.flags = vec!["help".to_string()];
+                    match &target[..] {
+                        "deploy" => crate::commands::deploy::run(sub),
+                        "stop" => crate::commands::stop::run(sub),
+                        "status" => crate::commands::status::run(sub),
+                        "cloud" => crate::commands::cloud::run(sub),
+                        "device" => crate::commands::device::run(sub),
+                        "models" => crate::commands::models::run(sub),
+                        "config" => crate::commands::config::run(sub),
+                        "ui" => crate::commands::ui::run(sub),
+                        "doctor" => crate::commands::doctor::run(sub),
+                        _ => {
+                            print_help();
+                            Ok(0)
+                        }
+                    }
+                }
+                _ => {
+                    print_help();
+                    Ok(0)
+                }
+            }
         }
         other => Err(MnError::bad_request(format!(
             "未知命令 `{other}`。可用命令：{}。执行 `mangosteen help` 查看详情",
