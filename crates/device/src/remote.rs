@@ -1519,10 +1519,77 @@ pub fn stop_llama_server(target: &SshTarget, workdir: &str) -> MnResult<()> {
     stop_llama_server_on_port(target, workdir, None)
 }
 
-/// 停掉指定远端端口对应的模型进程。
+/// 停掉**指定模型**的远端推理进程（模型名模糊匹配）。
+///
+/// ## 为什么按模型名而不是端口（用户要求）
+///
+/// 端口是部署时分配的资源、会漂移（8080 被占则 8081），pid 文件可能
+/// 陈旧；模型文件名（`--model <path>`）才是远端进程命令行里最稳定的
+/// 锚点。同节点多模型/端口漂移/旧进程残留的场景下，按模型名匹配
+/// 才能精确停掉「这一个模型」的进程。
+///
+/// 停止脚本：pgrep llama-server 找候选 → 逐 PID 读完整命令行（ps 优先，
+/// /proc 兜底）→ 含模型名才 TERM/KILL → 复查仍残留则报 still-running。
+pub fn stop_llama_server_by_model(
+    target: &SshTarget,
+    workdir: &str,
+    model_name: &str,
+) -> MnResult<()> {
+    let _ = workdir; // 按模型名停止不依赖 workdir（命令行里含完整路径）
+    let script = build_stop_script_by_model(model_name);
+    let out = ssh_exec(target, &script, 90)?;
+    if out.contains("still-running") {
+        return Err(MnError::Network {
+            stage: "停止云端推理服务".to_string(),
+            reason: format!("模型 {model_name} 的 llama-server 在 TERM 与 KILL 之后仍在运行"),
+        });
+    }
+    Ok(())
+}
+
+/// 生成「按模型名停止」的远端脚本（纯函数，供生产与测试共用）。
+///
+/// 定位三路精确化（不误伤同节点其它模型）：
+/// 1. `pgrep llama-server`（不带 -f）按进程名（comm）找候选——承载
+///    命令的 shell comm 是 bash，天然不命中；
+/// 2. 逐 PID 取完整命令行（`ps -o args=`，macOS/Linux 通用；
+///    `/proc/<pid>/cmdline` 兜底），含模型文件名才杀；
+/// 3. 杀完复查仍残留 → still-running（上层报错，不假报成功）。
+fn build_stop_script_by_model(model_name: &str) -> String {
+    let q = shell_quote(model_name);
+    format!(
+        "m={q}; \
+         pids=''; \
+         for pid in $(pgrep llama-server 2>/dev/null); do \
+           a=$(ps -p $pid -o args= 2>/dev/null); \
+           if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
+           case \"$a\" in *\"$m\"*) pids=\"$pids $pid\";; esac; \
+         done; \
+         for pid in $pids; do kill -TERM -- -$pid 2>/dev/null || kill -TERM $pid 2>/dev/null || true; done; \
+         i=0; while [ $i -lt 10 ]; do \
+           i=$((i+1)); sleep 0.5; \
+           alive=''; \
+           for pid in $pids; do if kill -0 $pid 2>/dev/null; then alive=\"$alive $pid\"; fi; done; \
+           if [ -z \"$alive\" ]; then break; fi; \
+         done; \
+         for pid in $pids; do \
+           if kill -0 $pid 2>/dev/null; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; \
+         done; \
+         still=''; \
+         for pid in $(pgrep llama-server 2>/dev/null); do \
+           a=$(ps -p $pid -o args= 2>/dev/null); \
+           if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
+           case \"$a\" in *\"$m\"*) still=\"$still $pid\";; esac; \
+         done; \
+         if [ -n \"$still\" ]; then echo \"still-running:$still\"; else echo stopped; fi"
+    )
+}
+
+/// 停掉指定远端端口对应的模型进程（健康检查/兼容路径用）。
 ///
 /// `port` 为 `Some` 时只操作该部署的 PID/端口；旧调用传 `None` 时保留
-/// 兼容行为，但同节点多模型的生命周期必须使用带端口版本。
+/// 兼容行为。**停止部署主链路已切换为按模型名匹配**
+/// （[`stop_llama_server_by_model`]），本函数供探活等端口语义场景使用。
 pub fn stop_llama_server_on_port(
     target: &SshTarget,
     workdir: &str,

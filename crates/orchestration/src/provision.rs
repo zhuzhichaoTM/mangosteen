@@ -328,10 +328,16 @@ impl Orchestrator {
             && !instance_id.trim().is_empty()
         {
             if let Some(o) = self.cloud().as_mut() {
-                // 先按端口停本部署的进程（可能已起来），再关机。
-                // 绝不无差别杀：共享节点保护已在上面判过，但同端口精确
-                // 停止是双保险，避免误伤同实例其它模型。
-                let _ = o.stop_service(provider, instance_id, cloud.engine_port);
+                // 先按模型名停本部署的进程（可能已起来），再关机。
+                // 按模型名精确停止（用户要求）：端口是分配资源会漂移，
+                // 模型文件名才是进程命令行里最稳定的锚点；共享节点保护
+                // 已在上面判过，同模型名精确停止是双保险。
+                let model_name = cloud
+                    .model_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&cloud.model_path);
+                let _ = o.stop_service(provider, instance_id, model_name);
                 if let Err(e) = o.power_off(provider, instance_id) {
                     note = format!("{err}；且实例 {instance_id} 关机失败，可能仍在计费：{e}");
                 } else {
@@ -1073,10 +1079,19 @@ impl Orchestrator {
             .and_then(|r| r.plan.cloud);
 
         // 1. 只停**本次部署自己的**引擎进程。共享节点（用户复用的已有实例、
-        //    或同机多模型的自建设备）上其它模型可能正在推理，不带端口的
-        //    全量停止会误杀整台机器的 llama-server。
-        match own.as_ref().map(|c| c.engine_port) {
-            Some(port) => {
+        //    或同机多模型的自建设备）上其它模型可能正在推理。停止判据
+        //    按模型名（用户要求）：命令行 `--model <path>` 含本模型文件名
+        //    才杀；台账缺模型路径时退回端口判据，绝不无差别全停。
+        match own.as_ref().map(|c| {
+            let p = c.model_path.rsplit('/').next().unwrap_or(&c.model_path);
+            (c.engine_port, if p.is_empty() { None } else { Some(p.to_string()) })
+        }) {
+            Some((_port, Some(m))) => {
+                let _ = mangosteen_device::remote::stop_llama_server_by_model(
+                    ssh, workdir, &m,
+                );
+            }
+            Some((port, None)) => {
                 let _ = mangosteen_device::remote::stop_llama_server_on_port(
                     ssh, workdir, Some(port),
                 );

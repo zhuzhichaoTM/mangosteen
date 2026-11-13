@@ -692,24 +692,22 @@ impl CloudOrchestrator {
         ensure_key_target(&inst, &self.config, Some("1qaz@WSX"))
     }
 
-    /// **停止服务**：只停指定部署端口对应的 `llama-server`，保留实例。
+    /// **停止服务**：只停**指定模型**的远端推理进程，保留实例。
     ///
     /// 与 [`Self::teardown`] 的区别见 `remote::stop_llama_server` 的说明——
     /// 这里**不销毁实例**，所以仍在计费。上层必须把这一点告诉用户。
     ///
-    /// ## 为什么必须带端口（实测踩坑）
+    /// ## 按模型名匹配（用户要求）
     ///
-    /// 实例按 GPU 型号复用，同节点可并存多个部署。旧签名不带端口，
-    /// 内部走 `stop_llama_server`（三路并集 + `pkill -x llama-server`
-    /// 兜底）——**整机全部 llama-server 一起杀**。stop 其中一个模型
-    /// 会误杀同节点其它模型。现在按端口精确停止：pid 文件
-    /// （`llama-server-<port>.pid`）+ 命令行含 `--port <p>` + 监听该端口
-    /// 的进程，三者取并集，绝不 `pkill` 兜底。
+    /// 端口是分配资源、会漂移；pid 文件可能陈旧。模型文件名
+    /// （命令行 `--model <path>`）是远端进程最稳定的锚点。实例按 GPU
+    /// 型号复用、同节点可并存多个部署时，按模型名才能精确停掉「这一个
+    /// 模型」的进程，不误伤同节点其它模型。
     pub fn stop_service(
         &self,
         provider: &str,
         instance_id: &str,
-        engine_port: u16,
+        model_name: &str,
     ) -> MnResult<()> {
         // 快速通道：实例未运行 → 无进程可停（避免对已关机实例做
         // 无谓的 SSH 连接重试，用户实测会假死）
@@ -727,27 +725,28 @@ impl CloudOrchestrator {
             }
         }
         let target = self.service_target(provider, instance_id)?;
-        let result = mangosteen_device::remote::stop_llama_server_on_port(
+        let result = mangosteen_device::remote::stop_llama_server_by_model(
             &target,
             &self.config.remote_workdir,
-            Some(engine_port),
+            model_name,
         );
         match &result {
             Ok(()) => eprintln!(
-                "[cloud] ✓ 实例 {} 端口 {} 的 llama-server 已停止（不影响同节点其它模型）",
+                "[cloud] ✓ 实例 {} 模型 {} 的 llama-server 已停止（不影响同节点其它模型）",
                 instance_id,
-                engine_port
+                model_name
             ),
             Err(e) => eprintln!(
-                "[cloud] ⚠ 实例 {} 端口 {} 停止服务失败：{e}",
+                "[cloud] ⚠ 实例 {} 模型 {} 停止服务失败：{e}",
                 instance_id,
-                engine_port
+                model_name
             ),
         }
         result
     }
 
-    /// 停止指定部署端口对应的 llama-server，不影响同节点其它模型。
+    /// 停止指定部署端口对应的 llama-server（探活/兼容路径用，停止主链路
+    /// 已切换为 [`Self::stop_service`] 的模型名匹配）。
     pub fn stop_service_on_port(
         &self,
         provider: &str,
@@ -762,10 +761,6 @@ impl CloudOrchestrator {
             }
         }
         let target = self.service_target(provider, instance_id)?;
-        // 修复1：外层不再叠加 3 次重试。停止脚本幂等，ssh_exec 内部已有
-        // 5 次连接层重试；旧实现 3×5 最坏要数分钟，期间持有云锁，把
-        // preview/deploy 等所有云端操作全部堵死（实测「卡在模型评估」）。
-        // 失败后上层 unload 会按「进程是否真的还在」判定，不依赖这里的重试。
         mangosteen_device::remote::stop_llama_server_on_port(
             &target,
             &self.config.remote_workdir,
@@ -773,13 +768,14 @@ impl CloudOrchestrator {
         )
     }
 
-    /// 检查远端是否还有**非本部署**的 llama-server 进程在运行。
+    /// 检查远端是否还有**非本模型**的 llama-server 进程在运行。
     ///
     /// ## 为什么需要
     ///
     /// stop/teardown 关机前，除了台账里可见的其他部署，还要看远端进程
     /// 表：手工启动或其他来源的服务不在台账里，关机就会把它们一起中断。
-    /// `own_port` 指定的本部署进程不算 foreign（它随后会被精确停掉）。
+    /// `own_model` 指定的本部署模型（命令行 `--model <path>` 含该模型
+    /// 文件名）不算 foreign——它随后会被按模型名精确停掉。
     ///
     /// ## 实例未运行时的快速通道（实测卡死修复）
     ///
@@ -791,7 +787,7 @@ impl CloudOrchestrator {
         &self,
         provider: &str,
         instance_id: &str,
-        own_port: Option<u16>,
+        own_model: Option<&str>,
     ) -> MnResult<bool> {
         // 快速通道：实例不在运行 → 无进程可查
         if let Ok(driver) = self.registry.get(provider) {
@@ -801,36 +797,39 @@ impl CloudOrchestrator {
             }
         }
         let target = self.service_target(provider, instance_id)?;
-        // 探测「非本部署端口」的 llama-server 进程。
+        // 探测「非本模型」的 llama-server 进程。
         //
         // ## 为什么不能用 `pgrep -af llama-server`
         //
         // ssh_exec 的承载 shell（`bash -c "pgrep -af llama-server ..."`）
-        // 自身 cmdline 就含 "llama-server" 字样且不含 `--port <own>`，
-        // **每次检查都把自己当成 foreign 进程**——实测导致 stop 永远走
-        // 「实例保留」分支，实例不被关机（用户只能手动 cloud instances
-        // stop）。
+        // 自身 cmdline 就含 "llama-server" 字样，**每次检查都把自己当成
+        // foreign 进程**——实测导致 stop 永远走「实例保留」分支，实例
+        // 不被关机（用户只能手动 cloud instances stop）。
         //
         // 现在的做法分两步精确化：
         // 1. `pgrep llama-server`（不带 -f）按**进程名**（comm）匹配：
         //    目标进程 exec 后 comm 恰为 llama-server；承载 shell 的
         //    comm 是 bash/zsh，天然不匹配；
-        // 2. 逐 PID 取完整命令行（`ps -p <pid> -o args=`，macOS 与
-        //    Linux 通用；`/proc/<pid>/cmdline` 仅 Linux 有，只作兜底），
-        //    排除 `--port <own_port>` 的本部署进程，其余输出到 PIDS 行。
-        //
-        // 远端是 Linux 节点时走 /proc 兜底也无妨；远端是 macOS 节点
-        // （自建 Mac）时 /proc 不存在，必须靠 `ps -o args=` 拿到
-        // 命令行，否则端口过滤失效 → 本部署进程也被算成 foreign →
-        // stop 误走「实例保留」分支。
-        let script = match own_port {
-            Some(p) => format!(
-                "P=''; for pid in $(pgrep llama-server 2>/dev/null); do \
-                 a=$(ps -p $pid -o args= 2>/dev/null); \
-                 if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
-                 case \"$a\" in *\"--port {p} \"*) ;; *) P=\"$P $pid\";; esac; \
-                 done; echo \"PIDS:$P\""
-            ),
+        // 2. 逐 PID 取完整命令行（`ps -o args=`，macOS/Linux 通用；
+        //    `/proc/<pid>/cmdline` 兜底），含**本模型文件名**的排除，
+        //    其余输出到 PIDS 行。
+        let script = match own_model {
+            Some(m) => {
+                // 模型名是文件名（字母/数字/点/下划线/连字符），单引号包裹
+                // 即可安全传入远端 shell；异常字符防御性剔除。
+                let safe: String = m
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c))
+                    .collect();
+                let q = format!("'{safe}'");
+                format!(
+                    "P=''; for pid in $(pgrep llama-server 2>/dev/null); do \
+                     a=$(ps -p $pid -o args= 2>/dev/null); \
+                     if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
+                     case \"$a\" in *\"{q}\") ;; *) P=\"$P $pid\";; esac; \
+                     done; echo \"PIDS:$P\""
+                )
+            }
             None => {
                 "P=''; for pid in $(pgrep llama-server 2>/dev/null); do P=\"$P $pid\"; done; echo \"PIDS:$P\""
                     .to_string()

@@ -317,16 +317,25 @@ impl Orchestrator {
         }
 
         // 1) 先停远端推理进程：无论哪种来源，GPU 显存都该释放。
+        //    按模型名精确停（用户要求）；台账缺模型路径时退回端口判据。
         if let Some(c) = cloud.as_ref() {
             match self.device_target_for(c) {
                 Some(target) => {
                     let workdir = self.config().cloud.remote_workdir.clone();
                     let port = c.engine_port;
-                    if let Err(e) = mangosteen_device::remote::stop_llama_server_on_port(
-                        &target,
-                        &workdir,
-                        Some(port),
-                    ) {
+                    let model_name = {
+                        let p = c.model_path.rsplit('/').next().unwrap_or(&c.model_path);
+                        if p.is_empty() { None } else { Some(p.to_string()) }
+                    };
+                    let stop_res = match model_name.as_deref() {
+                        Some(m) => mangosteen_device::remote::stop_llama_server_by_model(
+                            &target, &workdir, m,
+                        ),
+                        None => mangosteen_device::remote::stop_llama_server_on_port(
+                            &target, &workdir, Some(port),
+                        ),
+                    };
+                    if let Err(e) = stop_res {
                         // 停止脚本失败不等于进程还在：SSH 抖动（连接层中断、
                         // 厂商网关限流）可能发生在「已发出 kill、确认命令
                         // 未返回」的半程。此时按实际状态判定——进程确实
@@ -342,7 +351,8 @@ impl Orchestrator {
                             return Err(MnError::Network {
                                 stage: "卸载（停止模型进程）".to_string(),
                                 reason: format!(
-                                    "模型远端端口 {port} 的 llama-server 停止失败：{e}"
+                                    "模型 {} 的 llama-server 停止失败：{e}",
+                                    model_name.as_deref().unwrap_or("远端端口模型")
                                 ),
                             });
                         }
@@ -748,27 +758,26 @@ impl Orchestrator {
         filter_other_deployments_on_instance(&refs, provider, instance_id, exclude_id)
     }
 
-    /// 共享实例时的统一停止路径：**只按端口停本部署的推理进程，绝不关机**。
+    /// 共享实例时的统一停止路径：**只按模型名停本部署的推理进程，绝不关机**。
     ///
     /// 供 `stop`/`stop_service` 在「实例上还有其他部署或未知进程」时调用。
     /// 失败不致命（实例可能本来就是关机状态，SSH 不可达），记入 warnings
     /// 由调用方决定如何提示。
     ///
-    /// 台账缺少引擎端口时**不盲停**：旧实现会退回无差别杀全部
-    /// llama-server，误伤同节点其它模型。
+    /// 台账缺少模型路径时**不盲停**：绝不无差别杀全部 llama-server。
     fn stop_shared_instance_service(
         &self,
         provider: &str,
         instance_id: &str,
-        engine_port: Option<u16>,
+        model_name: Option<&str>,
         warnings: &mut Vec<String>,
     ) {
-        let Some(port) = engine_port else {
-            warnings.push("台账缺少引擎端口，无法精确停止推理进程（拒绝无差别停止）".into());
+        let Some(model) = model_name else {
+            warnings.push("台账缺少模型文件路径，无法按模型名停止推理进程（拒绝无差别停止）".into());
             return;
         };
         if let Some(o) = self.cloud().as_ref() {
-            if let Err(e) = o.stop_service_on_port(provider, instance_id, port) {
+            if let Err(e) = o.stop_service(provider, instance_id, model) {
                 warnings.push(format!("停止推理进程：{e}"));
             }
         }
@@ -833,7 +842,16 @@ impl Orchestrator {
                 // 仍然为空（自建设备/无远端）：没有厂商资源可销毁，
                 // 直接销毁台账即可。
                 if !provider.trim().is_empty() {
-                    let engine_port = record.plan.cloud.as_ref().map(|c| c.engine_port);
+                    let cloud_ref = record.plan.cloud.as_ref();
+                    let model_name = cloud_ref
+                        .map(|c| {
+                            c.model_path
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or(&c.model_path)
+                                .to_string()
+                        })
+                        .filter(|m| !m.is_empty());
                     let mut warnings = Vec::new();
 
                     // 1) 台账检查：同实例是否还有其他部署
@@ -842,8 +860,11 @@ impl Orchestrator {
                     // 2) 远端进程检查：是否有台账外的 llama-server 在跑
                     let mut foreign = false;
                     if let Some(o) = self.cloud().as_ref() {
-                        match o.has_foreign_service_process(&provider, instance_id, engine_port)
-                        {
+                        match o.has_foreign_service_process(
+                            &provider,
+                            instance_id,
+                            model_name.as_deref(),
+                        ) {
                             Ok(true) => foreign = true,
                             Ok(false) => {}
                             // SSH 不可达（实例已关机等）：无法判断，不阻止
@@ -878,14 +899,14 @@ impl Orchestrator {
                             }
                         );
                         eprintln!(
-                            "[cloud]   本部署推理进程已按端口停止；实例仍在计费，如需彻底释放：先停掉同实例的其他部署，或执行 `mangosteen cloud instances stop {}`（会中断实例上所有推理）",
+                            "[cloud]   本部署模型的推理进程已按模型名停止；实例仍在计费，如需彻底释放：先停掉同实例的其他部署，或执行 `mangosteen cloud instances stop {}`（会中断实例上所有推理）",
                             instance_id
                         );
-                        // 共享实例：只停本部署进程，实例保留
+                        // 共享实例：只停本部署进程的模型，实例保留
                         self.stop_shared_instance_service(
                             &provider,
                             instance_id,
-                            engine_port,
+                            model_name.as_deref(),
                             &mut warnings,
                         );
                         let mut note = String::from("实例保留（未关机）：");
@@ -1015,28 +1036,42 @@ impl Orchestrator {
                 //
                 // power_off 关掉的是整个实例。实例按 GPU 型号复用，台账里
                 // 可能还有别的部署引用它，远端还可能有台账外的推理进程
-                // （手工启动等）。任一命中 → 只按端口停本部署进程，不关机。
-                let engine_port = record.plan.cloud.as_ref().map(|c| c.engine_port);
+                // （手工启动等）。任一命中 → 只按模型名停本部署进程，不关机。
+                let cloud_ref = record.plan.cloud.as_ref();
+                let model_name = cloud_ref
+                    .map(|c| {
+                        c.model_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(&c.model_path)
+                            .to_string()
+                    })
+                    .filter(|m| !m.is_empty());
                 let others = self.other_deployments_on_instance(&provider, instance_id, id);
                 let mut warnings = Vec::new();
                 let mut foreign = false;
-                match o.has_foreign_service_process(&provider, instance_id, engine_port) {
+                match o.has_foreign_service_process(
+                    &provider,
+                    instance_id,
+                    model_name.as_deref(),
+                ) {
                     Ok(true) => foreign = true,
                     Ok(false) => {}
                     Err(e) => warnings.push(format!("远端进程检查跳过：{e}")),
                 }
                 if !others.is_empty() || foreign {
                     let mut ws = warnings;
-                    // 只按端口停本部署进程；台账缺端口时不盲停
-                    // （旧实现无差别杀全部 llama-server，误伤同节点其它模型）
-                    match engine_port {
-                        Some(p) => {
-                            if let Err(e) = o.stop_service_on_port(&provider, instance_id, p) {
+                    // 只按模型名停本部署进程；台账缺模型路径时不盲停
+                    // （绝不无差别杀全部 llama-server，误伤同节点其它模型）
+                    match model_name.as_deref() {
+                        Some(m) => {
+                            if let Err(e) = o.stop_service(&provider, instance_id, m) {
                                 ws.push(format!("停止推理进程：{e}"));
                             }
                         }
                         None => ws.push(
-                            "台账缺少引擎端口，无法精确停止推理进程（拒绝无差别停止）".into(),
+                            "台账缺少模型文件路径，无法按模型名停止推理进程（拒绝无差别停止）"
+                                .into(),
                         ),
                     }
                     let mut note = String::from("实例保留（未关机）：");
@@ -1063,17 +1098,17 @@ impl Orchestrator {
                     return Ok(());
                 }
 
-                // 1) 先停推理进程（按端口精确停，失败不致命——它可能本来
-                //    就没跑）。台账缺端口时不盲停：无差别杀全部
-                //    llama-server 会误伤同节点其它模型。
-                match engine_port {
-                    Some(p) => {
-                        if let Err(e) = o.stop_service(&provider, instance_id, p) {
+                // 1) 先停推理进程（按模型名精确停，失败不致命——它可能
+                //    本来就没跑）。台账缺模型路径时不盲停：绝不无差别杀
+                //    全部 llama-server。
+                match model_name.as_deref() {
+                    Some(m) => {
+                        if let Err(e) = o.stop_service(&provider, instance_id, m) {
                             warnings.push(format!("停止推理进程：{e}"));
                         }
                     }
                     None => warnings.push(
-                        "台账缺少引擎端口，跳过停止推理进程（拒绝无差别停止）".into(),
+                        "台账缺少模型文件路径，跳过停止推理进程（拒绝无差别停止）".into(),
                     ),
                 }
                 // 2) 再关机。这一步失败必须报错——机器还在跑就意味着继续计费。
@@ -1127,18 +1162,31 @@ impl Orchestrator {
         let mut warnings = Vec::new();
         if let Some(cloud) = record.plan.cloud.as_ref() {
             let port = cloud.engine_port;
+            // 按模型名停止（用户要求）：模型文件名是进程命令行最稳定的
+            // 锚点；端口是分配资源、可能漂移。台账缺模型路径时退回
+            // 端口判据（兼容旧记录）。
+            let model_name = {
+                let p = cloud.model_path.rsplit('/').next().unwrap_or(&cloud.model_path);
+                if p.is_empty() { None } else { Some(p.to_string()) }
+            };
             match self.device_target_for(cloud) {
                 // 走自建设备（设置页登记的 SSH 目标）
                 Some(target) => {
                     let workdir = self.config().cloud.remote_workdir.clone();
-                    mangosteen_device::remote::stop_llama_server_on_port(
-                        &target,
-                        &workdir,
-                        Some(port),
-                    )
-                    .map_err(|e| MnError::Network {
+                    let stop_res = match model_name.as_deref() {
+                        Some(m) => mangosteen_device::remote::stop_llama_server_by_model(
+                            &target, &workdir, m,
+                        ),
+                        None => mangosteen_device::remote::stop_llama_server_on_port(
+                            &target, &workdir, Some(port),
+                        ),
+                    };
+                    stop_res.map_err(|e| MnError::Network {
                         stage: "停止推理进程".to_string(),
-                        reason: format!("远端端口 {port} 的 llama-server 停止失败：{e}"),
+                        reason: format!(
+                            "{} 的 llama-server 停止失败：{e}",
+                            model_name.as_deref().unwrap_or("远端端口模型")
+                        ),
                     })?;
                     // 二次确认：按端口判据必须真的没了，不能只信脚本退出码。
                     //
@@ -1695,29 +1743,48 @@ impl Orchestrator {
             if id != model_id {
                 continue;
             }
-            // 只停本模型自己的推理进程（按其 engine_port 定位），
+            // 只停本模型自己的推理进程（按模型名定位，用户要求），
             // 绝不 pkill 全节点，避免误杀同节点其它模型。
             let mut remote_targets: Vec<mangosteen_device::remote::SshTarget> = Vec::new();
             if let Some(cloud) = rec.plan.cloud.as_ref() {
                 let port = cloud.engine_port;
+                let model_name = {
+                    let p = cloud.model_path.rsplit('/').next().unwrap_or(&cloud.model_path);
+                    if p.is_empty() { None } else { Some(p.to_string()) }
+                };
                 if let Some(target) = self.device_target_for(cloud) {
-                    // 自定义节点：直接 SSH 停进程
+                    // 自定义节点：直接 SSH 停进程（按模型名，缺则端口兜底）
                     let workdir = self.config().cloud.remote_workdir.clone();
-                    let _ = mangosteen_device::remote::stop_llama_server_on_port(
-                        &target,
-                        &workdir,
-                        Some(port),
-                    );
+                    match model_name.as_deref() {
+                        Some(m) => {
+                            let _ = mangosteen_device::remote::stop_llama_server_by_model(
+                                &target, &workdir, m,
+                            );
+                        }
+                        None => {
+                            let _ = mangosteen_device::remote::stop_llama_server_on_port(
+                                &target, &workdir, Some(port),
+                            );
+                        }
+                    }
                     remote_targets.push(target);
                 } else {
                     let ComputeOrigin::Cloud {
                         provider,
                         instance_id,
                     } = &rec.plan.origin;
-                    // 云厂商实例：走驱动停进程，但**不关机**
+                    // 云厂商实例：走驱动停进程（按模型名，缺则端口兜底），
+                    // **不关机**
                     if !provider.trim().is_empty() && !instance_id.trim().is_empty() {
                         if let Some(o) = self.cloud().as_mut() {
-                            let _ = o.stop_service_on_port(provider, instance_id, port);
+                            match model_name.as_deref() {
+                                Some(m) => {
+                                    let _ = o.stop_service(provider, instance_id, m);
+                                }
+                                None => {
+                                    let _ = o.stop_service_on_port(provider, instance_id, port);
+                                }
+                            }
                             // 厂商实例：取 SSH 目标用于清理下载残留（失败不阻断）
                             if let Ok(t) = o.service_target(provider, instance_id) {
                                 remote_targets.push(t);

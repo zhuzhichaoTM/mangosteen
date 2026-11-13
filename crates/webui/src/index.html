@@ -657,11 +657,11 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
               <option value="" data-page-node-id="VSYFPfMKx9oUYr2pkMAyfh">（加载中…）</option>
             </select>
           </label>
-          <!-- 跳转：新页签打开所选模型的远端 GPU 访问链接（节点信息 IP:端口）。
-               与部署页「节点信息」同源（/api/status.active 的 node_ip + remote_port），
-               本地模型无 node_ip，按钮置灰。 -->
-          <button class="iconbtn" id="btn-open-node" title="在新页签打开该模型的远端访问链接"
-                  aria-label="跳转远端访问链接" disabled data-page-node-id="MnJumpNodeBtn0001">
+          <!-- 跳转：新页签打开所选模型的本地推理入口（127.0.0.1:本地端口，
+               SSH 隧道转发）。远端 IP:端口在浏览器中不可直达（容器网络/
+               防火墙），本机回环才是有效入口。 -->
+          <button class="iconbtn" id="btn-open-node" title="在新页签打开该模型的推理入口（127.0.0.1:本地端口）"
+                  aria-label="跳转模型推理入口" disabled data-page-node-id="MnJumpNodeBtn0001">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" data-page-node-id="MnJumpNodeIco00001">
               <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" data-page-node-id="MnJumpNodePth00001"/>
@@ -1305,8 +1305,8 @@ Tabs.register("chat", (() => {
     try { if (chatAbort) chatAbort.abort(); } catch (e) { /* 已结束 */ }
   }
 
-  /// 跳转按钮状态同步：当前所选模型有远端访问链接才可点；
-  /// 无选择 / 本地模型（无 node_ip）→ 置灰并给出原因提示。
+  /// 跳转按钮状态同步：当前所选模型有本地推理入口（隧道端口）才可点；
+  /// 无入口（未就绪/隧道未建立）→ 置灰并给出原因提示。
   function syncJumpBtn() {
     const btn = $("btn-open-node");
     if (!btn) return;
@@ -1314,8 +1314,8 @@ Tabs.register("chat", (() => {
     const url = model ? nodeUrlByModel[model] : "";
     btn.disabled = !url;
     btn.title = url
-      ? "在新页签打开 " + model + " 的远端访问链接（" + url + "）"
-      : (model ? "该模型无远端节点（本地部署或无节点信息），不可跳转"
+      ? "在新页签打开 " + model + " 的推理入口（" + url + "）"
+      : (model ? "该模型无本地推理入口（隧道未建立或未就绪），暂不可跳转"
                : "请先选择一个模型");
   }
 
@@ -1389,15 +1389,16 @@ Tabs.register("chat", (() => {
         //
         // 数据源统一为 `/api/status.active`，两页永远一致。
         const active = (st.active || []).filter((a) =>
-          a.ready && a.node_ip && a.remote_port
+          a.ready && a.port
         );
         ready = active.length > 0;
-        // 跳转按钮的节点映射：模型 → http://node_ip:remote_port
-        // （与部署页「节点信息」同源；本地模型无 node_ip，不进映射）。
+        // 跳转按钮的节点映射：模型 → http://127.0.0.1:<本地端口>
+        // （SSH 隧道已把远端模型端口转发到本地回环；直接用远端 IP:端口
+        // 在浏览器里会被容器网络/防火墙拦截，本机回环才是有效入口）。
         nodeUrlByModel = {};
         active.forEach((a) => {
-          if (a.node_ip && a.remote_port) {
-            nodeUrlByModel[a.model] = "http://" + a.node_ip + ":" + a.remote_port;
+          if (a.port) {
+            nodeUrlByModel[a.model] = "http://127.0.0.1:" + a.port;
           }
         });
 
