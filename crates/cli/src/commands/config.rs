@@ -14,10 +14,7 @@ use crate::commands::{load_config, reject_unknown_options};
 use crate::output;
 
 /// 允许的选项。
-///
-/// `yes` 供 `config reset-templates` 确认覆盖内置模板槽位；
-/// 覆盖用户配置属于需要二次确认的操作，不能不给确认开关就执行。
-const ALLOWED: &[&str] = &["config", "json", "force", "quiet", "yes"];
+const ALLOWED: &[&str] = &["config", "json", "force", "quiet"];
 
 /// 入口。
 pub fn run(args: Args) -> MnResult<i32> {
@@ -48,102 +45,10 @@ pub fn run(args: Args) -> MnResult<i32> {
             }
             path(args)
         }
-        "validate" => {
-            if args.has("help") {
-                print_config_validate_help();
-                return Ok(0);
-            }
-            validate(args)
-        }
-        "reset-templates" => {
-            if args.has("help") {
-                print_config_reset_templates_help();
-                return Ok(0);
-            }
-            reset_templates(args)
-        }
         other => Err(mangosteen_core::MnError::bad_request(format!(
-            "未知子命令 `config {other}`。可用：show / init / path / validate / reset-templates"
+            "未知子命令 `config {other}`。可用：show / init / path"
         ))),
     }
-}
-
-/// `config reset-templates`
-///
-/// ## 为什么需要这条命令
-///
-/// 内置模型配置模板随版本升级而改进（例如修正量化精度、去掉无法加载的
-/// 外置草稿模型）。但落盘到用户配置里的模板**优先于**内置版本，而网关
-/// 的补种逻辑（`seed_builtin_templates`）只在「槽位缺失」时插入——
-/// 已存在的槽位永不更新。
-///
-/// 结果是：升级后用户仍在跑旧模板，且毫无提示。这个设计对「保护用户
-/// 自定义」是对的，但让「内置模板的修正」永远无法送达。
-///
-/// 因此提供显式的重置入口：把配置里的内置槽位改写为当前内置版本。
-/// **只处理内置槽位**，用户自建的模板名（如 `uncensored-custom`）原样保留。
-fn reset_templates(args: Args) -> MnResult<i32> {
-    let store = mangosteen_base::ConfigStore::platform_default(
-        args.get("config").map(std::path::PathBuf::from),
-    );
-    let (mut cfg, _source) = load_config(&args)?;
-
-    // 汇总将要发生的变更，先展示后落盘：这是覆盖用户配置的操作，
-    // 不能让用户「执行完才发现改了哪些」。
-    let mut planned: Vec<(String, String)> = Vec::new();
-    for (model, slot, display, text) in mangosteen_core::template::BUILTIN_TEMPLATES {
-        let entry = cfg
-            .model_whitelist
-            .entry((*model).to_string())
-            .or_insert_with(|| mangosteen_core::config::WhitelistedModel {
-                display_name: (*display).to_string(),
-                source_spec: String::new(),
-                template: (*slot).to_string(),
-                templates: Default::default(),
-            });
-        let current = entry.templates.get(*slot);
-        if current.map(|c| c.as_str()) != Some(*text) {
-            entry.templates.insert((*slot).to_string(), (*text).to_string());
-            planned.push(((*model).to_string(), (*slot).to_string()));
-        }
-    }
-
-    if planned.is_empty() {
-        output::print_success("内置模板已是最新版本，无需重置");
-        return Ok(0);
-    }
-
-    println!("{}", output::bold("将重置以下内置模板槽位："));
-    for (model, slot) in &planned {
-        println!("  · {model} / {slot}");
-    }
-    println!();
-    println!(
-        "  {}",
-        output::dim("自定义模板（不叫这些名字的槽位）不会被动")
-    );
-    println!();
-
-    if !args.has("yes") {
-        println!(
-            "  确认执行请加 {}",
-            output::bold("--yes")
-        );
-        return Ok(0);
-    }
-
-    cfg.validate()?;
-    let written = store.save(&cfg)?;
-    output::print_success(&format!(
-        "已重置 {} 个内置模板槽位 → {}",
-        planned.len(),
-        written.display()
-    ));
-    println!(
-        "  {}",
-        output::dim("若网关正在运行，重启后生效：mangosteen ui restart")
-    );
-    Ok(0)
 }
 
 /// `config show`
@@ -364,23 +269,6 @@ fn path(args: Args) -> MnResult<i32> {
     Ok(0)
 }
 
-/// `config validate`
-fn validate(args: Args) -> MnResult<i32> {
-    let (cfg, source) = load_config(&args)?;
-    cfg.validate()?;
-    output::print_success(&format!("配置合法（{source}）"));
-
-    // 额外做云端能力诊断
-    let notes = mangosteen_gateway::diagnose_cloud(&cfg);
-    if !notes.is_empty() {
-        println!();
-        for n in notes {
-            output::print_warning(&n);
-        }
-    }
-    Ok(0)
-}
-
 /// 数字选项展示。
 fn opt_num<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_else(|| "不限".into())
@@ -396,21 +284,17 @@ fn print_config_help() {
     println!("  {:<w$}  {}", "show", "显示当前完整配置", w = 18);
     println!("  {:<w$}  {}", "init", "初始化默认配置文件", w = 18);
     println!("  {:<w$}  {}", "path", "显示配置文件所在路径", w = 18);
-    println!("  {:<w$}  {}", "validate", "验证配置项合法性", w = 18);
-    println!("  {:<w$}  {}", "reset-templates", "重置内置部署模板为默认值", w = 18);
     println!();
     println!("{}", output::bold("全局选项"));
     println!("  {:<w$}  {}", "--config <path>", "指定配置文件", w = 22);
     println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
     println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
     println!("  {:<w$}  {}", "--force", "强制覆盖已存在的配置文件", w = 22);
-    println!("  {:<w$}  {}", "--yes", "免确认直接执行（与 reset-templates 配合）", w = 22);
     println!();
     println!("{}", output::bold("示例"));
     println!("  mangosteen config show");
+    println!("  mangosteen config init");
     println!("  mangosteen config path");
-    println!("  mangosteen config validate");
-    println!("  mangosteen config reset-templates --yes");
     println!();
     println!("更多信息：docs/USAGE.md");
 }
@@ -465,39 +349,6 @@ fn print_config_path_help() {
     println!("更多信息：docs/USAGE.md");
 }
 
-/// 打印 config validate 子命令帮助。
-fn print_config_validate_help() {
-    println!("mangosteen config validate [选项]");
-    println!();
-    println!("验证配置项合法性（如 image_id、region、zone 等）。");
-    println!();
-    println!("{}", output::bold("选项"));
-    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
-    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
-    println!();
-    println!("{}", output::bold("示例"));
-    println!("  mangosteen config validate");
-    println!();
-    println!("更多信息：docs/USAGE.md");
-}
-
-/// 打印 config reset-templates 子命令帮助。
-fn print_config_reset_templates_help() {
-    println!("mangosteen config reset-templates [选项]");
-    println!();
-    println!("重置内置部署模板为默认值。");
-    println!("只处理内置槽位，用户自建的模板名原样保留。");
-    println!();
-    println!("{}", output::bold("选项"));
-    println!("  {:<w$}  {}", "--yes", "免确认直接执行", w = 22);
-    println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
-    println!();
-    println!("{}", output::bold("示例"));
-    println!("  mangosteen config reset-templates --yes");
-    println!();
-    println!("更多信息：docs/USAGE.md");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,26 +375,25 @@ mod tests {
         assert!(a.is_err() || run(a.unwrap()).is_err());
     }
 
-    /// 重置命令必须被 `ALLOWED` 放行，否则 `config reset-templates` 会
-    /// 因为选项校验直接失败——这条测试守的是「新命令可用」。
+    /// 已删除的子命令传入应报未知子命令（不静默执行）。
     #[test]
-    fn reset_templates_option_is_allowed() {
-        let a = crate::cli::parse_args(&[
-            "config".to_string(),
-            "reset-templates".to_string(),
-            "--yes".to_string(),
-        ])
-        .expect("--yes 应被解析为布尔开关");
-        assert!(a.has("yes"), "--yes 未进入 flags：{a:?}");
-        // reject_unknown_options 不应报错（真正执行留给集成环境）
-        assert!(reject_unknown_options(&a, ALLOWED).is_ok());
+    fn removed_subcommands_are_rejected() {
+        for sub in ["validate", "reset-templates"] {
+            let a =
+                crate::cli::parse_args(&["config".to_string(), sub.to_string()]).unwrap();
+            let e = run(a).unwrap_err();
+            assert!(e.to_string().contains("未知子命令"), "{sub} 未被拦截：{e}");
+            assert!(e.to_string().contains("show"), "提示未列出可用命令：{e}");
+        }
     }
 
-    /// 未知子命令的提示必须列出新命令，避免用户以为它不存在。
+    /// 未知子命令的提示必须列出当前可用命令，避免用户以为它不存在。
     #[test]
-    fn unknown_subcommand_lists_reset_templates() {
+    fn unknown_subcommand_lists_current_commands() {
         let a = crate::cli::parse_args(&["config".to_string(), "nope".to_string()]).unwrap();
         let msg = run(a).unwrap_err().to_string();
-        assert!(msg.contains("reset-templates"), "提示未列出新命令：{msg}");
+        assert!(msg.contains("show"), "提示未列出命令：{msg}");
+        assert!(msg.contains("init"), "提示未列出命令：{msg}");
+        assert!(msg.contains("path"), "提示未列出命令：{msg}");
     }
 }
