@@ -274,13 +274,16 @@ impl TunnelManager {
     /// `Connection refused` / `Connection timed out` 才重试。
     fn is_transient_connect_failure(e: &MnError) -> bool {
         let text = e.to_string();
-        const TRANSIENT: [&str; 7] = [
-            // ssh 输出两种格式都会出现：
-            //   「Connection closed by remote host」（无 IP）
-            //   「Connection closed by 117.50.x.x port 23」（实测
-            //    dep-1a1c22b5400000，厂商网关按来源打印）
-            // 用 "Connection closed by" 前缀统一覆盖。
+        const TRANSIENT: [&str; 8] = [
+            // ssh 输出的「远端主动断链」有两种格式：
+            //   「Connection closed by remote host」（无 IP，老格式）
+            //   「Connection to 117.50.x.x closed by remote host」（带 IP，
+            //     OpenSSH 9.x 实测 dep-1a1d34af363000：探活通过后建隧道
+            //     仍被网关拆链）
+            // 后者**不含**连续子串「Connection closed by」（中间隔了 IP），
+            // 只匹配前者会漏判——必须单列 "closed by remote host"。
             "Connection closed by",
+            "closed by remote host",
             "Connection reset by peer",
             "Connection refused",
             "Connection timed out",
@@ -938,6 +941,50 @@ s.bind(('127.0.0.1',$port)); s.listen(5); time.sleep(30)"
             .establish(&spec(8080), Duration::from_secs(8))
             .expect("瞬时网关故障应被重试跨过");
         assert!(t.local_port >= port_base(60).0);
+        assert_eq!(m.len(), 1);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 回归：OpenSSH 9.x 的断链文案「Connection to <IP> closed by remote
+    /// host」不含连续子串「Connection closed by」——只匹配后者会漏判，
+    //  6 次重试机制被跳过、部署直接失败（实测 dep-1a1d34af363000：
+    // 探活通过、建隧道被网关拆链）。必须重试跨过。
+    #[cfg(unix)]
+    #[test]
+    fn establish_retries_ip_form_closed_by_remote_host() {
+        let d = tmpdir("ssh-closed-by-ip");
+        let marker = d.join("first-done");
+        let script = format!(
+            r#"
+port=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-L" ]; then port=$(echo "$a" | cut -d: -f2); fi
+  prev="$a"
+done
+if [ ! -f '{marker}' ]; then
+  : > '{marker}'
+  echo 'Connection to 117.50.131.174 closed by remote host.' >&2
+  exit 255
+fi
+exec python3 -c "import socket,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(('127.0.0.1',$port)); s.listen(5); time.sleep(30)"
+"#,
+            marker = marker.display()
+        );
+        let bin = fake_ssh(&d, &script);
+        let mut m = TunnelManager::new(
+            port_base(61).0,
+            port_base(61).1,
+            bin.to_string_lossy(),
+            Some(d.clone()),
+        )
+        .unwrap();
+        let t = m
+            .establish(&spec(8080), Duration::from_secs(8))
+            .expect("Connection to <IP> closed by 格式应被重试跨过");
+        assert!(t.local_port >= port_base(61).0);
         assert_eq!(m.len(), 1);
         std::fs::remove_dir_all(&d).ok();
     }
