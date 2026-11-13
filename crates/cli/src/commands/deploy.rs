@@ -20,6 +20,7 @@
 use std::time::Duration;
 
 use mangosteen_base::state::DeploymentStatus;
+use mangosteen_base::state::RunStatus;
 use mangosteen_core::estimate::KvCacheType;
 use mangosteen_core::MnResult;
 use mangosteen_gateway::DeploymentRequest;
@@ -211,6 +212,49 @@ fn execute(args: Args) -> MnResult<i32> {
     // 解析模板正文，提取下载地址和模型文件名（用于远端直连下载）。
     // 模板是部署的唯一真源：下哪个仓库的哪个文件、用什么参数启动，全部由它决定。
     let template_download = parse_template_download(&model_key, &template_text);
+
+    // 幂等部署检查（用户要求）：
+    // - 该模型已有 active（正在运行）的部署 → 跳过，不重复部署；
+    // - 有非 active 的旧部署（实例被手动关闭等） → 删除台账后重新部署，
+    //   避免旧记录继续连一个死节点（用户实测：复用死实例导致卡住）。
+    {
+        let store = crate::commands::state_store(&args)?;
+        let records = store.list().unwrap_or_default();
+        let same_model: Vec<String> = records
+            .iter()
+            .filter(|r| r.plan.model.name == model.as_str())
+            .map(|r| r.plan.id.clone())
+            .collect();
+        let active_id = records
+            .iter()
+            .find(|r| {
+                r.plan.model.name == model.as_str()
+                    && r.run_status == RunStatus::Active
+                    && r.status == DeploymentStatus::Ready
+            })
+            .map(|r| r.plan.id.clone());
+        if let Some(id) = active_id {
+            output::print_info(&format!(
+                "模型 {model} 正在运行（部署 {id}，状态 active），跳过部署"
+            ));
+            output::print_info(&format!(
+                "查看状态：mangosteen status；推理入口：http://127.0.0.1:{}/v1",
+                gw.config().gateway.port
+            ));
+            return Ok(0);
+        }
+        for id in &same_model {
+            if let Err(e) = store.remove(id) {
+                output::print_warning(&format!("清理旧台账 {id} 失败（继续部署）：{e}"));
+            }
+        }
+        if !same_model.is_empty() {
+            output::print_info(&format!(
+                "模型 {model} 的旧部署（{} 条）非运行状态，已清理台账，重新部署",
+                same_model.len()
+            ));
+        }
+    }
 
     let spinner = output::Spinner::new(format!("正在部署 {model}"));
     let mut spinner = spinner;
