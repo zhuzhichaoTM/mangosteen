@@ -711,6 +711,21 @@ impl CloudOrchestrator {
         instance_id: &str,
         engine_port: u16,
     ) -> MnResult<()> {
+        // 快速通道：实例未运行 → 无进程可停（避免对已关机实例做
+        // 无谓的 SSH 连接重试，用户实测会假死）
+        if let Ok(driver) = self.registry.get(provider) {
+            match driver.describe(instance_id) {
+                Ok(inst) if inst.state != InstanceState::Running => {
+                    eprintln!(
+                        "[cloud] 实例 {} 当前状态 {}，无需停止服务",
+                        instance_id,
+                        inst.state.as_str()
+                    );
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         let target = self.service_target(provider, instance_id)?;
         let result = mangosteen_device::remote::stop_llama_server_on_port(
             &target,
@@ -739,6 +754,13 @@ impl CloudOrchestrator {
         instance_id: &str,
         engine_port: u16,
     ) -> MnResult<()> {
+        // 快速通道：实例未运行 → 无进程可停（同 stop_service）
+        if let Ok(driver) = self.registry.get(provider) {
+            match driver.describe(instance_id) {
+                Ok(inst) if inst.state != InstanceState::Running => return Ok(()),
+                _ => {}
+            }
+        }
         let target = self.service_target(provider, instance_id)?;
         // 修复1：外层不再叠加 3 次重试。停止脚本幂等，ssh_exec 内部已有
         // 5 次连接层重试；旧实现 3×5 最坏要数分钟，期间持有云锁，把
@@ -759,29 +781,60 @@ impl CloudOrchestrator {
     /// 表：手工启动或其他来源的服务不在台账里，关机就会把它们一起中断。
     /// `own_port` 指定的本部署进程不算 foreign（它随后会被精确停掉）。
     ///
-    /// SSH 不可达（实例已关机等）时返回 Err——调用方应视为「无法判断，
-    /// 不阻止关机」，因为已关机的实例上不可能有进程在跑。
+    /// ## 实例未运行时的快速通道（实测卡死修复）
+    ///
+    /// 用户手动关闭 GPU 节点后 stop 卡住：SSH 探测对已关机实例做
+    /// ConnectTimeout × 重试，白白假死。实例非 Running（已关机/创建中/
+    /// 已销毁）上不可能有进程在跑，先查厂商状态直接返回 false，
+    /// 不做任何 SSH 尝试。
     pub fn has_foreign_service_process(
         &self,
         provider: &str,
         instance_id: &str,
         own_port: Option<u16>,
     ) -> MnResult<bool> {
+        // 快速通道：实例不在运行 → 无进程可查
+        if let Ok(driver) = self.registry.get(provider) {
+            match driver.describe(instance_id) {
+                Ok(inst) if inst.state != InstanceState::Running => return Ok(false),
+                _ => {}
+            }
+        }
         let target = self.service_target(provider, instance_id)?;
-        let out = mangosteen_device::remote::ssh_exec(
-            &target,
-            "pgrep -af llama-server 2>/dev/null || true",
-            60,
-        )?;
-        let own = own_port.map(|p| format!("--port {p}"));
-        let foreign = out.lines().any(|l| {
-            let l = l.trim();
-            !l.is_empty()
-                && match &own {
-                    Some(p) => !l.contains(p.as_str()),
-                    None => true,
-                }
-        });
+        // 探测「非本部署端口」的 llama-server 进程。
+        //
+        // ## 为什么不能用 `pgrep -af llama-server`
+        //
+        // ssh_exec 的承载 shell（`bash -c "pgrep -af llama-server ..."`）
+        // 自身 cmdline 就含 "llama-server" 字样且不含 `--port <own>`，
+        // **每次检查都把自己当成 foreign 进程**——实测导致 stop 永远走
+        // 「实例保留」分支，实例不被关机（用户只能手动 cloud instances
+        // stop）。
+        //
+        // 现在的做法分两步精确化：
+        // 1. `pgrep llama-server`（不带 -f）按**进程名**（comm）匹配：
+        //    目标进程 exec 后 comm 恰为 llama-server；承载 shell 的
+        //    comm 是 bash/zsh，天然不匹配；
+        // 2. 逐 PID 读 /proc/<pid>/cmdline，排除 `--port <own_port>`
+        //    的本部署进程，其余输出到 PIDS 行。
+        let script = match own_port {
+            Some(p) => format!(
+                "P=''; for pid in $(pgrep llama-server 2>/dev/null); do \
+                 a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); \
+                 case \"$a\" in *\"--port {p} \"*) ;; *) P=\"$P $pid\";; esac; \
+                 done; echo \"PIDS:$P\""
+            ),
+            None => {
+                "P=''; for pid in $(pgrep llama-server 2>/dev/null); do P=\"$P $pid\"; done; echo \"PIDS:$P\""
+                    .to_string()
+            }
+        };
+        let out = mangosteen_device::remote::ssh_exec(&target, &script, 60)?;
+        let foreign = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("PIDS:"))
+            .map(|rest| !rest.trim().is_empty())
+            .unwrap_or(false);
         Ok(foreign)
     }
 

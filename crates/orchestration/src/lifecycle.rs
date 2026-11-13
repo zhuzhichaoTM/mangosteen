@@ -853,6 +853,34 @@ impl Orchestrator {
                     }
 
                     if !others.is_empty() || foreign {
+                        // 共享实例：只停本部署进程，实例保留。
+                        // eprintln 直达终端：CLI 随后会打印「已停止」，
+                        // 必须让用户看到「实例仍在运行/计费」的事实
+                        // （用户实测：stop 显示成功但实例 running 计费，
+                        // 只能手动 cloud instances stop）。
+                        eprintln!(
+                            "[cloud] ⚠ 实例 {}/{} 保留（未关机）：{}",
+                            provider,
+                            instance_id,
+                            if !others.is_empty() && foreign {
+                                "同实例有其他部署且远端有未知推理进程".to_string()
+                            } else if !others.is_empty() {
+                                format!(
+                                    "同实例仍有其他部署 {}",
+                                    others
+                                        .iter()
+                                        .map(|(did, st)| format!("{did}({st})"))
+                                        .collect::<Vec<_>>()
+                                        .join("、")
+                                )
+                            } else {
+                                "远端有非本部署的推理进程在运行".to_string()
+                            }
+                        );
+                        eprintln!(
+                            "[cloud]   本部署推理进程已按端口停止；实例仍在计费，如需彻底释放：先停掉同实例的其他部署，或执行 `mangosteen cloud instances stop {}`（会中断实例上所有推理）",
+                            instance_id
+                        );
                         // 共享实例：只停本部署进程，实例保留
                         self.stop_shared_instance_service(
                             &provider,
