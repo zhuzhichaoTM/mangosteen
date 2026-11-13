@@ -261,21 +261,19 @@ pub fn scheduler_config_with_overrides(
 /// 返回是否发生了改动（true 表示需要落盘）。
 fn seed_builtin_templates(cfg: &mut mangosteen_core::config::Config) -> bool {
     let mut changed = false;
-    for (model, slot, display, text) in mangosteen_core::template::BUILTIN_TEMPLATES {
+    for (model, slot, _display, text) in mangosteen_core::template::BUILTIN_TEMPLATES {
         let entry = cfg
             .model_whitelist
             .entry((*model).to_string())
             .or_insert_with(|| mangosteen_core::config::WhitelistedModel {
-                display_name: (*display).to_string(),
+                display_name: String::new(),
                 source_spec: String::new(),
-                template: (*slot).to_string(),
+                template: String::new(),
                 templates: Default::default(),
             });
-        if entry.display_name.trim().is_empty() {
-            entry.display_name = (*display).to_string();
-            changed = true;
-        }
-        // 只在缺失时插入：用户已定制的版本必须保留
+        // 只在缺失时插入：用户已定制的版本必须保留。
+        // 主段辅助字段（display_name/template）保持为空——空值不序列化，
+        // 生成的配置只含 templates 段，展示端空时回落模型 ID。
         if !entry.templates.contains_key(*slot) {
             entry.templates.insert((*slot).to_string(), (*text).to_string());
             changed = true;

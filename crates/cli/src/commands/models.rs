@@ -99,7 +99,7 @@ fn list(args: Args) -> MnResult<i32> {
                     .collect();
                 serde_json::json!({
                     "model": model,
-                    "display_name": wl.display_name,
+                    "display_name": if wl.display_name.is_empty() { model.clone() } else { wl.display_name.clone() },
                     "templates": templates,
                 })
             })
@@ -114,7 +114,8 @@ fn list(args: Args) -> MnResult<i32> {
     println!();
 
     for (model, wl) in &cfg.model_whitelist {
-        println!("  {} ({})", output::paint(model, output::Color::Cyan), wl.display_name);
+        let display = if wl.display_name.is_empty() { model.as_str() } else { wl.display_name.as_str() };
+        println!("  {} ({})", output::paint(model, output::Color::Cyan), display);
         for (slot, text) in &wl.templates {
             let builtin = mangosteen_core::template::BUILTIN_TEMPLATES
                 .iter()
@@ -341,7 +342,8 @@ fn show(args: Args) -> MnResult<i32> {
         return Ok(0);
     }
 
-    println!("{}", output::bold(&format!("模型：{} ({})", model, wl.display_name)));
+    let display = if wl.display_name.is_empty() { model.as_str() } else { wl.display_name.as_str() };
+    println!("{}", output::bold(&format!("模型：{} ({})", model, display)));
     println!("{}", output::bold(&format!("槽位：{} [{}]", slot, if is_builtin { "内置" } else { "自定义" })));
     println!();
     println!("{}", output::bold("模板正文"));

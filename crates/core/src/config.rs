@@ -873,11 +873,23 @@ impl GatewayConfig {
 }
 
 /// 已验证支持的模型资产配置。
+///
+/// ## 序列化精简
+///
+/// `display_name` / `source_spec` / `template` 是展示与兼容辅助字段，
+/// 空值时**不写入 TOML**——生成配置里只保留核心的 `templates` 段
+/// （槽位 → 正文）。反序列化侧 `#[serde(default)]` 补空串，
+/// 展示端空时回落模型 ID，功能不受影响。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WhitelistedModel {
+    /// 展示名（空时展示端回落模型 ID）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub display_name: String,
+    /// 模型源覆盖（空表示用默认源；pull 链路的 spec 覆盖）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_spec: String,
-    #[serde(default)]
+    /// 默认槽位名（空表示无默认）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub template: String,
     /// 该模型的全部配置模板：槽位名 → YAML 正文。
     ///
@@ -1111,14 +1123,17 @@ impl Config {
         // 与 GatewayBuilder::build 的 seed_builtin_templates 同一真源
         // （BUILTIN_TEMPLATES），seed 只补缺失槽位、不覆盖用户已改内容，
         // 两边不会产生漂移。
+        //
+        // 主段辅助字段（display_name / source_spec / template）留空：
+        // 空值不序列化，生成的 TOML 只含 templates 段；展示端空时回落模型 ID。
         let mut model_whitelist: BTreeMap<String, WhitelistedModel> = BTreeMap::new();
-        for (model, slot, display, text) in crate::template::BUILTIN_TEMPLATES {
+        for (model, slot, _display, text) in crate::template::BUILTIN_TEMPLATES {
             let entry = model_whitelist
                 .entry((*model).to_string())
                 .or_insert_with(|| WhitelistedModel {
-                    display_name: (*display).to_string(),
+                    display_name: String::new(),
                     source_spec: String::new(),
-                    template: (*slot).to_string(),
+                    template: String::new(),
                     templates: Default::default(),
                 });
             entry

@@ -53,7 +53,7 @@ impl GatewayServer {
                     .collect();
                 serde_json::json!({
                     "model": model,
-                    "display_name": wl.display_name,
+                    "display_name": if wl.display_name.is_empty() { model.to_string() } else { wl.display_name.clone() },
                     "templates": templates,
                 })
             })
