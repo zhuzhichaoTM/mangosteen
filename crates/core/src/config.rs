@@ -1071,9 +1071,11 @@ impl Config {
 
     /// 序列化为 TOML（密钥按引用形式输出，不泄露明文）。
     pub fn to_toml(&self) -> MnResult<String> {
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| MnError::config("toml", format!("序列化失败：{e}")))?;
-        Ok(collapse_multiline_strings(&text))
+        // 模板正文用 toml 原生多行 """ 形式：单行双引号字符串不能包含真实
+        // 换行（TOML 语法限制，行尾反斜杠续行 toml 0.8 解析器不接受），
+        // 多行字符串是「每个参数独立一行」的唯一标准形式。
+        toml::to_string_pretty(self)
+            .map_err(|e| MnError::config("toml", format!("序列化失败：{e}")))
     }
 
     /// 从文件加载。
@@ -1170,53 +1172,6 @@ impl Config {
             remote_inferences: Vec::new(),
         }
     }
-}
-
-/// 把 TOML 多行字符串（`"""..."""`）折叠为单行转义形式（`"..."`）。
-///
-/// ## 为什么需要
-///
-/// 模板正文含大量换行，toml crate 的 `to_string_pretty` 会输出多行
-/// `"""` 块，生成的配置段落很长、不利于阅读与 diff。折叠后每个模板是
-/// 一行：换行写为 `\n` 转义序列（TOML 基本字符串合法转义，解析后还原
-/// 为真实换行），内容与原多行形式**完全等价**。
-///
-/// ## 安全性
-///
-/// 只折叠 toml 序列化器实际输出的 `"""` 块——块内容由 toml 保证不含
-/// `"""`（含则序列化器会改用逐字符转义的基本字符串）。内容中的反斜杠、
-/// 双引号、换行统一转义，roundtrip 内容一致。
-fn collapse_multiline_strings(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("\"\"\"") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 3..];
-        let Some(end_rel) = after.find("\"\"\"") else {
-            // 无闭合（不应发生），原样输出剩余
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        let content = &after[..end_rel];
-        // toml pretty 输出形如 """\ncontent——去掉紧邻起始引号的首个换行
-        let content = content.strip_prefix('\n').unwrap_or(content);
-        // 转义：\ → \\，" → \"，换行 → \n（先反斜杠，避免二次转义）
-        let mut escaped = String::with_capacity(content.len() + 16);
-        for c in content.chars() {
-            match c {
-                '\\' => escaped.push_str("\\\\"),
-                '"' => escaped.push_str("\\\""),
-                '\n' => escaped.push_str("\\n"),
-                _ => escaped.push(c),
-            }
-        }
-        out.push('"');
-        out.push_str(&escaped);
-        out.push('"');
-        rest = &after[end_rel + 3..];
-    }
-    out.push_str(rest);
-    out
 }
 
 /// 配置文件的候选路径。
