@@ -815,12 +815,19 @@ impl CloudOrchestrator {
         // 1. `pgrep llama-server`（不带 -f）按**进程名**（comm）匹配：
         //    目标进程 exec 后 comm 恰为 llama-server；承载 shell 的
         //    comm 是 bash/zsh，天然不匹配；
-        // 2. 逐 PID 读 /proc/<pid>/cmdline，排除 `--port <own_port>`
-        //    的本部署进程，其余输出到 PIDS 行。
+        // 2. 逐 PID 取完整命令行（`ps -p <pid> -o args=`，macOS 与
+        //    Linux 通用；`/proc/<pid>/cmdline` 仅 Linux 有，只作兜底），
+        //    排除 `--port <own_port>` 的本部署进程，其余输出到 PIDS 行。
+        //
+        // 远端是 Linux 节点时走 /proc 兜底也无妨；远端是 macOS 节点
+        // （自建 Mac）时 /proc 不存在，必须靠 `ps -o args=` 拿到
+        // 命令行，否则端口过滤失效 → 本部署进程也被算成 foreign →
+        // stop 误走「实例保留」分支。
         let script = match own_port {
             Some(p) => format!(
                 "P=''; for pid in $(pgrep llama-server 2>/dev/null); do \
-                 a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); \
+                 a=$(ps -p $pid -o args= 2>/dev/null); \
+                 if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
                  case \"$a\" in *\"--port {p} \"*) ;; *) P=\"$P $pid\";; esac; \
                  done; echo \"PIDS:$P\""
             ),
