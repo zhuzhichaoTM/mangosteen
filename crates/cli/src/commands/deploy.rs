@@ -30,14 +30,15 @@ use crate::output;
 use output::{Color, paint};
 
 /// 允许的选项。
+///
+/// 已移除的选项（产品纯云端 + 模板驱动后失去意义）：
+/// `--async`（CLI 退出即断隧道）、`--local-only`（无本地链路）、
+/// `--no-cpu-fallback` / `--require-full-gpu`（本地 llama.cpp 参数）、
+/// `--batch-size` / `--kv-cache`（模板正文已含启动参数）、
+/// `--cloud-spec`（规格由调度器按约束自动选择）。
 const ALLOWED: &[&str] = &[
     "config",
     "context",
-    "batch-size",
-    "kv-cache",
-    "local-only",
-    "no-cpu-fallback",
-    "require-full-gpu",
     "max-price",
     "json",
     "quiet",
@@ -45,12 +46,10 @@ const ALLOWED: &[&str] = &[
     "reuse-instance",
     "reuse-provider",
     "device",
-    "cloud-spec",
     "gpu-model",
     "interactive",
-    // 异步/轮询参数
+    // 进度查看参数
     "watch",
-    "async",
     // 配置模板槽位（与 UI 部署页下拉框一致：default / uncensored / mode1…）
     "template",
     // 模型别名（自定义 API 调用时使用的模型名称）
@@ -80,29 +79,23 @@ fn print_deploy_help() {
     println!();
     println!("{}", output::bold("选项"));
     println!("  {:<w$}  {}", "--context <N>", "上下文长度（默认 8192）", w = 22);
-    println!("  {:<w$}  {}", "--batch-size <N>", "批处理大小（默认 512）", w = 22);
-    println!("  {:<w$}  {}", "--kv-cache <类型>", "KV 缓存精度（如 f16, q8_0）", w = 22);
     println!("  {:<w$}  {}", "--gpu-model <型号>", "GPU 型号（如 V100S、3080TI、P40）", w = 22);
     println!("  {:<w$}  {}", "--max-price <元/小时>", "最高价格上限（元/小时）", w = 22);
     println!("  {:<w$}  {}", "--template <槽位>", "配置模板槽位（default / uncensored / mode1…）", w = 22);
     println!("  {:<w$}  {}", "--device <节点ID>", "指定自定义节点部署", w = 22);
     println!("  {:<w$}  {}", "--reuse-instance", "复用已有实例（不重新创建）", w = 22);
     println!("  {:<w$}  {}", "--reuse-provider <厂商>", "指定复用的云厂商", w = 22);
-    println!("  {:<w$}  {}", "--cloud-spec <规格>", "指定云端实例规格 ID", w = 22);
+    println!("  {:<w$}  {}", "--alias <名称>", "API 模型别名（默认取模板 alias 字段）", w = 22);
     println!("  {:<w$}  {}", "--watch", "部署后轮询查看进度（每 5 秒刷新）", w = 22);
-    println!("  {:<w$}  {}", "--async", "异步返回，仅输出部署 ID 不等待完成", w = 22);
-    println!("  {:<w$}  {}", "--local-only", "仅使用本地算力，不走云端", w = 22);
-    println!("  {:<w$}  {}", "--no-cpu-fallback", "禁止 CPU 回退，仅 GPU 推理", w = 22);
-    println!("  {:<w$}  {}", "--require-full-gpu", "要求完整 GPU 显存，不允许部分卸载", w = 22);
     println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 22);
     println!("  {:<w$}  {}", "--quiet", "抑制 banner 与进度提示", w = 22);
     println!("  {:<w$}  {}", "--interactive", "交互式确认部署方案", w = 22);
     println!();
     println!("{}", output::bold("示例"));
     println!("  mangosteen deploy qwen2.5-0.5b --gpu-model V100S --watch");
-    println!("  mangosteen deploy qwen2.5-7b --context 16384 --batch-size 256");
+    println!("  mangosteen deploy qwen3.8-27b --context 16384");
     println!("  mangosteen deploy qwen2.5-0.5b --device dev-001 --template default");
-    println!("  mangosteen deploy qwen2.5-0.5b --max-price 1.5 --async");
+    println!("  mangosteen deploy qwen2.5-0.5b --max-price 1.5");
     println!();
     println!("更多信息：docs/USAGE.md");
 }
@@ -118,29 +111,13 @@ fn execute(args: Args) -> MnResult<i32> {
     })?;
 
     let watch = args.has("watch");
-    let async_mode = args.has("async");
 
     let mut req = DeploymentRequest::for_model(model.clone());
     if let Some(ctx) = args.get_num::<u32>("context")? {
         req.context_len = Some(ctx);
     }
-    if let Some(b) = args.get_num::<u32>("batch-size")? {
-        req.batch_size = b;
-    }
     if let Some(p) = args.get_num::<f64>("max-price")? {
         req.max_price_per_hour = Some(p);
-    }
-    if let Some(kv) = args.get("kv-cache") {
-        req.kv_cache = Some(parse_kv(kv)?);
-    }
-    if args.has("local-only") {
-        req.allow_cloud = false;
-    }
-    if args.has("no-cpu-fallback") {
-        req.allow_cpu_fallback = false;
-    }
-    if args.has("require-full-gpu") {
-        req.allow_partial_offload = false;
     }
 
     // 节点选择参数
@@ -152,9 +129,6 @@ fn execute(args: Args) -> MnResult<i32> {
     }
     if let Some(provider) = args.get("reuse-provider") {
         req.reuse_provider = Some(provider.to_string());
-    }
-    if let Some(spec) = args.get("cloud-spec") {
-        req.cloud_spec = Some(spec.to_string());
     }
     if let Some(gpu_model) = args.get("gpu-model") {
         req.gpu_model = Some(gpu_model.to_string());
@@ -272,19 +246,6 @@ fn execute(args: Args) -> MnResult<i32> {
 
     // 部署已进入 provisioning 或 ready 状态，获取部署 ID
     let deploy_id = plan.id.clone();
-
-    if async_mode {
-        // 仅启动部署，立即返回
-        output::print_success(&format!(
-            "部署已启动（异步模式）：{}",
-            deploy_id
-        ));
-        output::print_info(&format!(
-            "使用 `mangosteen status {}` 查看进度",
-            deploy_id
-        ));
-        return Ok(0);
-    }
 
     if watch {
         // 周期性轮询查看进度
@@ -736,29 +697,9 @@ fn base_model_name(name: &str) -> String {
     name.trim().to_ascii_lowercase().split(':').next().unwrap_or("").to_string()
 }
 
-/// 解析 KV 精度参数。
-fn parse_kv(s: &str) -> MnResult<KvCacheType> {
-    match s.to_ascii_lowercase().as_str() {
-        "f16" => Ok(KvCacheType::F16),
-        "q8_0" | "q8" => Ok(KvCacheType::Q8_0),
-        "q4_0" | "q4" => Ok(KvCacheType::Q4_0),
-        other => Err(mangosteen_core::MnError::bad_request(format!(
-            "未知 kv-cache `{other}`，可选：f16 / q8_0 / q4_0"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn kv_parsing() {
-        assert_eq!(parse_kv("f16").unwrap(), KvCacheType::F16);
-        assert_eq!(parse_kv("Q8_0").unwrap(), KvCacheType::Q8_0);
-        assert_eq!(parse_kv("q4").unwrap(), KvCacheType::Q4_0);
-        assert!(parse_kv("q2").is_err());
-    }
 
     #[test]
     fn missing_model_is_actionable() {

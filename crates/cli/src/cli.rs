@@ -103,9 +103,8 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "stopped",
     "require-stock",
     "no-require-stock",
-    // deploy 异步/轮询开关
+    // deploy 进度查看开关（--async 已移除：CLI 退出即断隧道，语义不成立）
     "watch",
-    "async",
 ];
 
 /// 解析参数列表（不含程序名）。
