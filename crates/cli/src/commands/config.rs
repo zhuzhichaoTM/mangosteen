@@ -177,7 +177,6 @@ fn show(args: Args) -> MnResult<i32> {
                 "api_key": cfg.gateway.api_key.redacted(),
             },
             "scheduler": {
-                "local_first": cfg.scheduler.local_first,
                 "weights": cfg.scheduler.weights,
                 "max_fallbacks": cfg.scheduler.max_fallbacks,
                 "launch_timeout_secs": cfg.scheduler.launch_timeout_secs,
@@ -230,16 +229,8 @@ fn show(args: Args) -> MnResult<i32> {
     ]);
 
     println!();
-    println!("{}", output::bold("云端选择策略"));
+    println!("{}", output::bold("节点策略"));
     output::print_kv(&[
-        (
-            "本地优先".into(),
-            if cfg.scheduler.local_first {
-                output::paint("是", output::Color::Green)
-            } else {
-                output::paint("否（违反产品基线，建议改回）", output::Color::Red)
-            },
-        ),
         (
             "权重".into(),
             format!(
