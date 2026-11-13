@@ -76,3 +76,30 @@ config init → cloud key → doctor → deploy(V100S 复用) → ready
 1. **本轮全部优化生效**：精简配置（无 scheduler/local/storage、compshare 仅 image_id、模板逐行 """ 形式）、doctor 输出（无加速卡、无前缀）、密钥自动启用、简化模型名 qwen2.5-0.5b、隧道保持与自愈。
 2. **完整业务链路可用**：全新 Mac 上 `config init → cloud key → deploy → curl` 四步跑通，云端 V100S 实际推理验证通过。
 3. **无代码级回归**：24 项命令/场景全部通过；3 项遗留中 2 项为外部限制、1 项为存量测试编译问题。
+
+---
+
+## 五、补充：真实环境（用户本机）测试与修复（09:52）
+
+### 问题：`cloud instances list` 为空
+
+**根因**：`config init --force` 用精简 sample 覆盖配置时，`[providers.compshare.secret]` 引用段被丢弃（密钥文件 `secrets/cloud-compshare` 仍在，但配置没有指向它）→ 驱动加载判定「未配置」→ 跳过 → 实例列表空 + doctor 告警。
+
+**修复**：`cloud key compshare --secret *** --public-key ***` 重新写入引用（密钥从现有 secrets 文件恢复）。修复后：doctor 云服务商 OK、instances 列出 4 个实例（V100S/3080TI/3090/P40）。
+
+### 发现并修复：help <命令> 不分发（提交 1d5b6e4）
+
+`mangosteen help cloud` 显示顶层帮助而非 cloud 子命令帮助 → 修复为按 pos(1) 重写首选命令 + --help 分发到对应 run()。
+
+### 真实环境全命令复测（只读）
+
+| 命令 | 结果 |
+|------|------|
+| version / config show / validate / path | ✅ |
+| models list / show（qwen3.8-27b uncensored 解析） | ✅ |
+| status / device list / cloud providers | ✅ |
+| cloud cheapest（5 规格带价格）/ pick（RTX 3090 0.7248 最优） | ✅ |
+| help cloud / deploy / models（修复后） | ✅ |
+| doctor | ✅ 云服务商 OK（网关端口 WARN 为端口占用，正常） |
+
+结论：`cloud instances list` 为空是配置引用丢失（非代码 bug）；产品改进建议——`cloud key` 已写入密钥文件但配置丢失引用时，可在加载时自动恢复（本次已通过重写 cloud key 解决）。
