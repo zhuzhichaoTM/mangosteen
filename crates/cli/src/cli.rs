@@ -75,9 +75,6 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "json",
     "stream",
     "all",
-    "local-only",
-    "no-cpu-fallback",
-    "require-full-gpu",
     "force",
     "yes",
     "verbose",
@@ -102,7 +99,8 @@ const BOOLEAN_FLAGS: &[&str] = &[
     "stopped",
     "require-stock",
     "no-require-stock",
-    // deploy 进度查看开关（--async / --interactive 已移除）
+    // deploy 进度查看开关（--async / --interactive 已移除；
+    // --local-only / --no-cpu-fallback / --require-full-gpu 随本地链路移除）
     "watch",
 ];
 
@@ -393,18 +391,6 @@ fn print_help() {
     );
     println!("  {:<w$}  {}", "init", "初始化配置", w = 18);
     println!("  {:<w$}  {}", "path", "显示配置路径", w = 18);
-    println!(
-        "  {:<w$}  {}",
-        "validate",
-        "验证配置合法性",
-        w = 18
-    );
-    println!(
-        "  {:<w$}  {}",
-        "reset-templates",
-        "重置模板",
-        w = 18
-    );
     println!();
     println!("{}", output::bold("更多信息"));
     println!("  {:<w$}  {}", "详细文档", "docs/USAGE.md", w = 12);
@@ -480,8 +466,9 @@ mod tests {
 
     #[test]
     fn boolean_flags_do_not_consume_next_arg() {
-        let args = a(&["deploy", "m", "--local-only", "--context", "4096"]);
-        assert!(args.has("local-only"));
+        // --watch 是现存布尔开关（--local-only 等已随本地链路移除）
+        let args = a(&["deploy", "m", "--watch", "--context", "4096"]);
+        assert!(args.has("watch"));
         assert_eq!(args.get("context"), Some("4096"));
         assert_eq!(args.positionals.len(), 2);
     }

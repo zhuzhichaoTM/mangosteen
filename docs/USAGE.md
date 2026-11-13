@@ -51,16 +51,17 @@ Mangosteen—— 云端租赁部署大模型部署客户端 v0.1.0
   mangosteen <命令> [选项]
 
 命令
-  deploy  部署模型到云端
-  stop    停止部署并释放资源
-  status  查看网关与部署状态
-  cloud   云端算力管理
-  device  自定义节点管理
-  config  配置管理
-  ui      启动 Web UI
-  doctor  环境自检
-  version 显示版本
-  help    显示帮助
+  deploy   部署模型到云端
+  stop     停止部署并释放资源
+  status   查看网关与部署状态
+  cloud    云端算力管理
+  device   自定义节点管理
+  models   模型配置模板管理
+  config   配置管理
+  ui       启动 Web UI
+  doctor   环境自检
+  version  显示版本
+  help     显示帮助
 
 全局选项
   --config <path>     指定配置文件
@@ -69,6 +70,8 @@ Mangosteen—— 云端租赁部署大模型部署客户端 v0.1.0
   --help, -h          显示帮助
   --version, -V       显示版本
 ```
+
+> `mangosteen help <命令>` 可查看任一命令的详细帮助（如 `mangosteen help cloud`）。
 
 ### 1.2 三步部署模型
 
@@ -141,19 +144,15 @@ mangosteen deploy <模型> [选项]
 | `<模型>` | 模型 ID 或 GGUF 文件路径 | `qwen2.5-0.5b` |
 | `--gpu-model <型号>` | 指定 GPU 型号 | `--gpu-model V100S` |
 | `--device <节点ID>` | 指定自定义节点部署 | `--device dev-001` |
-| `--template <槽位>` | 配置模板名称 | `--template default` |
+| `--template <槽位>` | 配置模板名称 | `--template uncensored` |
 | `--context <N>` | 上下文长度（默认 8192） | `--context 16384` |
-| `--batch-size <N>` | 批处理大小（默认 512） | `--batch-size 256` |
-| `--kv-cache <类型>` | KV 缓存精度 | `--kv-cache q8_0` |
 | `--max-price <元/小时>` | 最高价格上限 | `--max-price 1.5` |
+| `--reuse-instance` | 复用已有实例（不重新创建） | `--reuse-instance` |
+| `--reuse-provider <厂商>` | 指定复用的云厂商 | `--reuse-provider compshare` |
+| `--alias <名称>` | API 模型别名（默认取模板 alias 字段） | `--alias qwen-27b` |
 | `--watch` | 部署后轮询查看进度 | `--watch` |
-| `--async` | 异步返回，不等待完成 | `--async` |
-| `--local-only` | 仅使用本地算力 | `--local-only` |
-| `--no-cpu-fallback` | 禁止 CPU 回退 | `--no-cpu-fallback` |
-| `--require-full-gpu` | 要求完整 GPU 显存 | `--require-full-gpu` |
 | `--json` | 以 JSON 格式输出 | `--json` |
 | `--quiet` | 抑制进度提示 | `--quiet` |
-| `--interactive` | 交互式确认部署方案 | `--interactive` |
 
 #### 示例 1：基础部署（推荐新手）
 
@@ -169,7 +168,7 @@ mangosteen deploy <模型> [选项]
 · 配置模板：default（来源：设置页配置；可用 --template <槽位> 切换）
   ⠋ 正在部署 qwen2.5-0.5b 评估资源并调度…
 
-[perf] ══ 部署开始 (dep-xxx-qwen2.5-0.5b-instruct) ══
+[perf] ══ 部署开始 (dep-xxx-qwen2.5-0.5b) ══
 [perf] ▶ 阶段 实例创建(等待Running+SSH确认)
 [cloud] ✓ provision_resources 复用 GPU 型号匹配实例 compshare · uhost-xxx（状态 stopped）
 [cloud] ✓ 实例 uhost-xxx 已进入 Running 状态
@@ -189,7 +188,7 @@ mangosteen deploy <模型> [选项]
 [perf] ════════════════════════════
 
 ✓ 部署完成：qwen2.5-0.5b-instruct (云端算力 · compshare)
-  部署 ID      dep-xxx-qwen2.5-0.5b-instruct
+  部署 ID      dep-xxx-qwen2.5-0.5b
   算力来源       云端算力 · compshare
   落位形态       纯 CPU 推理（无加速卡参与）
   上下文        8192
@@ -226,20 +225,17 @@ mangosteen deploy <模型> [选项]
 #### 示例 4：调整上下文长度
 
 ```bash
-./mangosteen deploy qwen2.5-0.5b --context 16384 --batch-size 256
+./mangosteen deploy qwen2.5-0.5b --context 16384 --watch
 ```
 
-#### 示例 5：异步部署（不等待完成）
+#### 示例 5：指定 API 模型别名
 
 ```bash
-./mangosteen deploy qwen2.5-0.5b --gpu-model V100S --async
+./mangosteen deploy qwen2.5-0.5b --gpu-model V100S --alias qwen-05b --watch
 ```
 
-**执行结果：**
-```
-部署 ID: dep-xxx-qwen2.5-0.5b-instruct
-异步部署已启动，使用 `mangosteen status` 查看进度
-```
+部署后 API 调用的模型名即为 `qwen-05b`（默认取模板里的 alias 字段，
+如 qwen2.5-0.5b 模板的 `alias: qwen2.5-0.5b`）。
 
 ---
 
@@ -266,20 +262,20 @@ mangosteen stop <部署ID> | --all [选项]
 #### 示例 1：停止指定部署
 
 ```bash
-./mangosteen stop dep-xxx-qwen2.5-0.5b-instruct --yes
+./mangosteen stop dep-xxx-qwen2.5-0.5b --yes
 ```
 
 **执行结果：**
 
 如果部署状态为 `failed`（无法停止）：
 ```
-✗ 请求非法：部署 `dep-xxx-qwen2.5-0.5b-instruct` 当前状态为 failed，不能 stop。只有 ready 状态的部署可停止
+✗ 请求非法：部署 `dep-xxx-qwen2.5-0.5b` 当前状态为 failed，不能 stop。只有 ready 状态的部署可停止
   建议： 执行 `mangosteen help <命令>` 查看正确用法
 ```
 
 如果部署状态为 `ready`（成功停止）：
 ```
-✓ 部署 dep-xxx-qwen2.5-0.5b-instruct 已停止，资源已释放
+✓ 部署 dep-xxx-qwen2.5-0.5b 已停止，资源已释放
 ```
 
 > **注意**：只有 `ready` 状态的部署才能执行 stop 命令。
@@ -355,7 +351,7 @@ mangosteen status [选项]
 
   部署 ID                                     模型                            算力来源              状态     运行状态      本地端口   远端端口  健康
   ----------------------------------------  ----------------------------  ----------------  -----  --------  -----  ----  ---
-  dep-xxx-qwen2.5-0.5b-instruct             qwen2.5-0.5b-instruct:q4_k_m   云端算力 · compshare  ready  active      11435  8080  就绪
+  dep-xxx-qwen2.5-0.5b                      qwen2.5-0.5b                     云端算力 · compshare  ready  active      11435  8080  就绪
 
   推理入口：http://127.0.0.1:11516/v1
 ```
@@ -374,8 +370,8 @@ mangosteen status [选项]
   "providers": ["compshare"],
   "active": [
     {
-      "id": "dep-xxx-qwen2.5-0.5b-instruct",
-      "model": "qwen2.5-0.5b-instruct:q4_k_m",
+      "id": "dep-xxx-qwen2.5-0.5b",
+      "model": "qwen2.5-0.5b",
       "origin": "云端算力 · compshare",
       "status": "ready",
       "run_status": "active",
@@ -468,9 +464,8 @@ mangosteen cloud instances <子命令> [选项]
 
 管理云厂商的 API 密钥。
 
-> **厂商选择说明**：`compshare`（优云智算）是当前唯一已验证支持的云服务商（专用 RPC 驱动）。
-> `ucloud`/`aliyun`/`autodl` 为占位服务商，无内置 profile，配置密钥后驱动加载仍会被跳过，
-> 请勿向它们写入密钥。
+> **厂商说明**：`compshare`（优云智算）是当前内置的服务商（专用 RPC 驱动）。
+> 密钥写入后自动启用该厂商；未写入密钥时保持不可用（doctor 会给出申请链接）。
 
 ```bash
 mangosteen cloud key <厂商> [选项]
@@ -480,13 +475,13 @@ mangosteen cloud key <厂商> [选项]
 
 | 参数 | 说明 |
 |------|------|
-| `<厂商>` | 云服务商名称（**使用 compshare**；aliyun/autodl/ucloud 为占位） |
-| `--secret <密钥>` | 更新厂商私钥（Secret Key） |
+| `<厂商>` | 云服务商名称（当前内置：compshare） |
+| `--secret <密钥>` | 更新厂商私钥（Secret Key），写入后自动启用 |
 | `--public-key <公钥>` | 更新厂商公钥（AccessKey ID） |
 | `--enable` | 启用该厂商 |
 | `--disable` | 禁用该厂商 |
 
-#### 示例 1：更新密钥
+#### 示例 1：更新密钥（自动启用）
 
 ```bash
 ./mangosteen cloud key compshare --public-key YOUR_ACCESS_KEY --secret YOUR_SECRET_KEY
@@ -494,20 +489,19 @@ mangosteen cloud key <厂商> [选项]
 
 **执行结果：**
 ```
-✓ 已更新 compshare 密钥
+✓ 厂商 compshare 配置已更新 → /Users/xxx/Library/Application Support/mangosteen/config.toml
 ```
 
 #### 示例 2：启用/禁用厂商
 
 ```bash
 ./mangosteen cloud key compshare --enable
-./mangosteen cloud key aliyun --disable
+./mangosteen cloud key compshare --disable
 ```
 
 **执行结果：**
 ```
-✓ 已启用 compshare
-✓ 已禁用 aliyun
+✓ 厂商 compshare 配置已更新 → /Users/xxx/Library/Application Support/mangosteen/config.toml
 ```
 
 ### 7.2 cloud providers 命令
@@ -528,8 +522,6 @@ mangosteen cloud providers [选项]
 ```
   名称         显示名     驱动         状态  权重
   ---------  ------  ---------  --  ---
-  aliyun     阿里云     aliyun     禁用  1.0
-  autodl     AutoDL  autodl     禁用  1.0
   compshare  优云智算    compshare  启用  1.0
 
   用 `mangosteen cloud key <厂商> --enable|--disable` 启用/禁用服务商
@@ -853,8 +845,6 @@ mangosteen config <子命令> [选项]
 | `show` | 显示当前完整配置 |
 | `init` | 初始化默认配置文件 |
 | `path` | 显示配置文件路径 |
-| `validate` | 验证配置项合法性 |
-| `reset-templates` | 重置内置部署模板 |
 
 #### 示例 1：显示配置
 
@@ -871,23 +861,19 @@ mangosteen config <子命令> [选项]
   监听  127.0.0.1:11516
   鉴权  关闭
 
-云端选择策略
-  本地优先    是
-  权重      价格 40 / 延迟 15 / 可用性 30 / 硬件 15
+优选策略
+  权重        价格 40 / 延迟 15 / 可用性 30 / 硬件 15
   降级重试上限  2
-  价格上限    不限
+  价格上限     不限
 
 模型配置
-  推理引擎   自动在 PATH 中查找
   默认上下文  8192
-  端口区间   11435-11999
+  端口区间    11435-11999
 
 云服务商
-  名称         驱动         状态  凭证                                                                                          优先级
-  ---------  ---------  --  ------------------------------------------------------------------------------------------  ---
-  aliyun     aliyun     停用  ${ALIBABA_CLOUD_ACCESS_KEY_SECRET}                                                          1.0
-  autodl     autodl     停用  ${AUTODL_API_TOKEN}                                                                         1.0
-  compshare  compshare  启用  file:/Users/zhuzhichao/Library/Application Support/mangosteen/secrets/compshare_secret_key  1.0
+  名称         驱动         状态  凭证                                                          优先级
+  ---------  ---------  --  ----------------------------------------------------------  ---
+  compshare  compshare  启用  file:/Users/xxx/Library/Application Support/mangosteen/secrets/cloud-compshare  1.0
 ```
 
 #### 示例 2：查看配置路径
@@ -907,18 +893,7 @@ mangosteen config <子命令> [选项]
   模型台账        /Users/zhuzhichao/Library/Application Support/mangosteen/models.json
 ```
 
-#### 示例 3：验证配置
-
-```bash
-./mangosteen config validate
-```
-
-**执行结果：**
-```
-✓ 配置合法（用户配置：/Users/zhuzhichao/Library/Application Support/mangosteen/config.toml）
-```
-
-#### 示例 4：初始化配置
+#### 示例 3：初始化配置
 
 ```bash
 ./mangosteen config init
@@ -926,7 +901,12 @@ mangosteen config <子命令> [选项]
 
 **执行结果：**
 ```
-✓ 已创建默认配置文件
+✓ 已生成配置文件：/Users/xxx/Library/Application Support/mangosteen/config.toml
+
+  接下来：
+    1. 执行 `mangosteen cloud key <厂商> --secret <密钥> --public-key <公钥>` 更新云服务商密钥
+    2. 执行 `mangosteen doctor` 自检
+    3. 执行 `mangosteen models add <path>` 登记模型
 ```
 
 ---
@@ -1005,15 +985,14 @@ mangosteen ui [start|stop|restart|status] [选项]
 mangosteen doctor [选项]
 ```
 
+> doctor 不支持 `--help` 子参数（输出即自解释的环境自检报告）。
+
 #### 检查项
 
 - 硬件采集（CPU/内存/加速卡）
-- 推理引擎（llama-server 是否就位）
-- 配置文件（是否合法、密钥是否齐全）
-- 云服务商驱动
-- 目录权限
-- 端口占用
-- 磁盘空间
+- 配置合法性（未初始化时提示 `config init`）
+- 网关端口（运行中 / 空闲 / 被其他程序占用三态）
+- 云服务商（凭证就绪状态，缺失时给出申请链接）
 
 #### 示例
 
@@ -1027,19 +1006,22 @@ mangosteen doctor [选项]
 
   [OK  ] 硬件采集
          macos / x86_64 · 4 物理核 · 16.0 GiB 内存 · 无加速卡（CPU 推理）
-  [WARN] 加速卡
-         未检测到可用加速卡，只能 CPU 推理
-         → CPU 推理速度通常 <5 tok/s。如需 GPU 加速，检查驱动/显存；或配置云服务商以降级
   [OK  ] 配置合法性
          用户配置：/Users/zhuzhichao/Library/Application Support/mangosteen/config.toml
-  [WARN] 网关端口
-         11516 已被占用
-         → 已有 serve 在运行？否则改配置 gateway.port 或加 --port 启动
+  [OK  ] 网关端口
+         11516 可绑定（网关未运行）
+         → 执行 `mangosteen ui start` 启动 API 网关
   [OK  ] 云服务商
-         已就绪：compshare
-         → 另有 2 个被跳过（用 `mangosteen cloud providers` 查看）
+         compshare 已配置成功
 
-⚠ 2 项警告，不影响本地部署
+✓ 全部检查通过，可以开始部署
+```
+
+未配置密钥时：
+```
+  [WARN] 云服务商
+         compshare 未配置成功（缺少密钥）
+         → 优云智算需要申请 API 公钥和私钥，申请链接:https://passport.compshare.cn/register?referral_code=D7ulbLWjdVHCJ0gNwdFxoa
 ```
 
 ---
@@ -1079,7 +1061,7 @@ curl http://127.0.0.1:11516/v1/models
     "object": "list",
     "data": [
         {
-            "id": "qwen2.5-0.5b-instruct:q4_k_m",
+            "id": "qwen2.5-0.5b",
             "object": "model",
             "created": 1794463744,
             "owned_by": "local"
@@ -1111,7 +1093,7 @@ curl http://127.0.0.1:11516/health
 curl -X POST http://127.0.0.1:11516/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-0.5b-instruct:q4_k_m",
+    "model": "qwen2.5-0.5b",
     "messages": [{"role": "user", "content": "你好，请介绍一下自己"}],
     "max_tokens": 64
   }'
@@ -1123,7 +1105,7 @@ curl -X POST http://127.0.0.1:11516/v1/chat/completions \
   "id": "chatcmpl-xxx",
   "object": "chat.completion",
   "created": 1700000000,
-  "model": "qwen2.5-0.5b-instruct:q4_k_m",
+  "model": "qwen2.5-0.5b",
   "choices": [
     {
       "index": 0,
@@ -1148,7 +1130,7 @@ curl -X POST http://127.0.0.1:11516/v1/chat/completions \
 curl -X POST http://127.0.0.1:11516/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen2.5-0.5b-instruct:q4_k_m",
+    "model": "qwen2.5-0.5b",
     "max_tokens": 64,
     "messages": [{"role": "user", "content": "你好，请介绍一下自己"}]
   }'
@@ -1166,7 +1148,7 @@ curl -X POST http://127.0.0.1:11516/v1/messages \
       "text": "你好！我是 Qwen，一个大型语言模型。"
     }
   ],
-  "model": "qwen2.5-0.5b-instruct:q4_k_m",
+  "model": "qwen2.5-0.5b",
   "stop_reason": "end_turn",
   "usage": {
     "input_tokens": 20,
@@ -1188,7 +1170,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="qwen2.5-0.5b-instruct:q4_k_m",
+    model="qwen2.5-0.5b",
     messages=[{"role": "user", "content": "你好"}]
 )
 
@@ -1206,7 +1188,7 @@ client = Anthropic(
 )
 
 response = client.messages.create(
-    model="qwen2.5-0.5b-instruct:q4_k_m",
+    model="qwen2.5-0.5b",
     max_tokens=64,
     messages=[{"role": "user", "content": "你好"}]
 )
@@ -1279,24 +1261,48 @@ curl http://127.0.0.1:11516/health
 
 配置文件位置：`~/Library/Application Support/mangosteen/config.toml`
 
+`config init` 生成的配置（当前精简形态——默认值不落盘）：
+
 ```toml
-# 调度策略
-[scheduler]
-local_first = true           # 本地优先
-strategy = "cheapest"        # 调度策略：cheapest / balanced
+config_version = 1
 
-# 云服务商配置
+[gateway]
+port = 11516
+host = "127.0.0.1"
+require_api_key = false
+
+[cloud]
+remote_workdir = "/root/mangosteen"
+llama_server_url = "https://gh-proxy.com/..."
+
 [providers.compshare]
+driver = "compshare"
 enabled = true
-[providers.compshare.options]
-public_key = "YOUR_ACCESS_KEY"
-image_id = "compshareImage-xxx"
+display_name = "优云智算"
+priority = 1.0
 
-[providers.aliyun]
-enabled = false
-[providers.aliyun.options]
-public_key = "YOUR_ACCESS_KEY"
+[providers.compshare.options]
+image_id = "compshareImage-1k99rzcvdg6j"
+
+[model_whitelist."qwen2.5-0.5b".templates]
+default = """
+template: default
+model_id: qwen2.5-0.5b
+...
+alias: qwen2.5-0.5b
+"""
+
+[model_whitelist."qwen3.8-27b".templates]
+default = """..."""
+uncensored = """..."""
 ```
+
+说明：
+
+- **密钥不进配置**：`cloud key compshare --secret ... --public-key ...` 写入
+  加密存储（`secrets/cloud-compshare`），配置里只出现 `file:` 引用
+- **调度/存储等默认段不落盘**：默认值即 cheapest 策略，需要修改时手写对应段
+- **模板是唯一真源**：部署所用参数（下载地址、上下文、引擎参数）全部由模板正文决定
 
 ---
 
