@@ -244,31 +244,31 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
                 status: Status::Warn,
                 detail: "未配置任何服务商".into(),
                 hint: Some(
-                    "本地资源不足时将无法降级。执行 `mangosteen config init` 后可填 AutoDL/优云智算 凭证"
+                    "本地资源不足时将无法降级。执行 `mangosteen config init` 后可填优云智算凭证"
                         .into(),
                 ),
             });
         } else if registered.is_empty() {
+            // 全部驱动加载失败（多为未配置密钥）：
+            // detail 给告警说明（谁未配置成功），hint 给解决方案（申请链接）
+            let names: Vec<&str> = skipped.iter().map(|(n, _)| n.as_str()).collect();
+            let solutions: Vec<&str> = skipped.iter().map(|(_, r)| r.as_str()).collect();
             out.push(Check {
                 name: "云服务商".into(),
                 status: Status::Warn,
-                detail: skipped
-                    .iter()
-                    .map(|(n, r)| format!("{n}：{r}"))
-                    .collect::<Vec<_>>()
-                    .join("；"),
-                hint: Some("按上述原因修复凭证或配置".into()),
+                detail: format!("{} 未配置成功（缺少密钥）", names.join("、")),
+                hint: Some(solutions.join("；")),
             });
         } else {
             out.push(Check {
                 name: "云服务商".into(),
                 status: Status::Ok,
-                detail: format!("已就绪：{}", registered.join(", ")),
+                detail: format!("{} 已配置成功", registered.join("、")),
                 hint: if skipped.is_empty() {
                     None
                 } else {
                     Some(format!(
-                        "另有 {} 个被跳过（用 `mangosteen cloud providers` 查看）",
+                        "另有 {} 个未配置（用 `mangosteen cloud providers` 查看）",
                         skipped.len()
                     ))
                 },
