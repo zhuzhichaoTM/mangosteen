@@ -23,7 +23,7 @@
 use mangosteen_core::MnResult;
 
 use crate::cli::Args;
-use crate::commands::{load_config, reject_unknown_options};
+use crate::commands::{load_config_ex, reject_unknown_options};
 use crate::output;
 
 /// 允许的选项。
@@ -170,8 +170,8 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
     // 告警只制造噪音；硬件采集行已含加速卡信息。
 
     // ---- 2. 推理引擎 ----
-    let (cfg, config_source) = match load_config(args) {
-        Ok(v) => (Some(v.0), v.1),
+    let (cfg, config_source, from_disk) = match load_config_ex(args) {
+        Ok(v) => (Some(v.0), v.1, v.2),
         Err(e) => {
             out.push(Check {
                 name: "配置加载".into(),
@@ -179,20 +179,27 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
                 detail: e.to_string(),
                 hint: Some("执行 `mangosteen config init` 生成模板".into()),
             });
-            (None, "（加载失败）".to_string())
+            (None, "（加载失败）".to_string(), false)
         }
     };
 
     if let Some(cfg) = &cfg {
         // 配置合法性
-        match cfg.validate() {
-            Ok(()) => out.push(Check {
+        match (cfg.validate(), from_disk) {
+            (Ok(()), true) => out.push(Check {
                 name: "配置合法性".into(),
                 status: Status::Ok,
                 detail: config_source.clone(),
                 hint: None,
             }),
-            Err(e) => out.push(Check {
+            // 配置文件不存在（回落内置默认）：视为未初始化，需要 init
+            (Ok(()), false) => out.push(Check {
+                name: "配置合法性".into(),
+                status: Status::Fail,
+                detail: "未找到配置文件，当前使用内置默认（尚未落盘）".into(),
+                hint: Some("执行 `mangosteen config init` 初始化配置".into()),
+            }),
+            (Err(e), _) => out.push(Check {
                 name: "配置合法性".into(),
                 status: Status::Fail,
                 detail: e.to_string(),

@@ -29,11 +29,25 @@ use crate::cli::Args;
 
 /// 装载配置：解析 `--config` 并加载。
 pub fn load_config(args: &Args) -> MnResult<(Config, String)> {
+    let (config, source, _) = load_config_ex(args)?;
+    Ok((config, source))
+}
+
+/// 装载配置（带来源判定）。
+///
+/// 第三个返回值为 `true` 表示配置来自磁盘文件，`false` 表示
+/// 回落到内置默认（尚未落盘）——doctor 需要区分「已初始化」与
+/// 「未初始化」两种状态。
+pub fn load_config_ex(args: &Args) -> MnResult<(Config, String, bool)> {
     let explicit = args.get("config").map(std::path::PathBuf::from);
     let store = mangosteen_base::ConfigStore::platform_default(explicit);
     let loaded = store.load()?;
+    let from_disk = !matches!(
+        loaded.source,
+        mangosteen_base::config::ConfigSource::Builtin
+    );
     let source = loaded.source.describe();
-    Ok((loaded.config, source))
+    Ok((loaded.config, source, from_disk))
 }
 
 /// 构造网关门面。
