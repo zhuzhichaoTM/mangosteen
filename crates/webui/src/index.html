@@ -657,6 +657,18 @@ table.t td.mono{font-family:var(--mono);font-size:11.5px}
               <option value="" data-page-node-id="VSYFPfMKx9oUYr2pkMAyfh">（加载中…）</option>
             </select>
           </label>
+          <!-- 跳转：新页签打开所选模型的远端 GPU 访问链接（节点信息 IP:端口）。
+               与部署页「节点信息」同源（/api/status.active 的 node_ip + remote_port），
+               本地模型无 node_ip，按钮置灰。 -->
+          <button class="iconbtn" id="btn-open-node" title="在新页签打开该模型的远端访问链接"
+                  aria-label="跳转远端访问链接" disabled data-page-node-id="MnJumpNodeBtn0001">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" data-page-node-id="MnJumpNodeIco00001">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" data-page-node-id="MnJumpNodePth00001"/>
+              <polyline points="15 3 21 3 21 9" data-page-node-id="MnJumpNodePth00002"/>
+              <line x1="10" y1="14" x2="21" y2="3" data-page-node-id="MnJumpNodePth00003"/>
+            </svg>
+          </button>
           <span class="grow" data-page-node-id="KYSbLRZ3wdNjDqzylOsTR5"></span>
           <button class="sendbtn" id="btn-send" disabled
                   aria-label="发送" title="发送消息" data-page-node-id="mMsUAzk5ZDZO4QxiRGnOQs">
@@ -963,6 +975,9 @@ Tabs.register("chat", (() => {
   let history = [];
   let attachments = [];
   let webEnabled = false;
+  /// 跳转按钮的节点映射：`模型 ID → http://node_ip:remote_port`。
+  /// refresh 时从 /api/status.active 刷新；本地模型无 node_ip，不进映射。
+  let nodeUrlByModel = {};
   let mounted = false;
 
   const log = () => $("log");
@@ -1290,8 +1305,34 @@ Tabs.register("chat", (() => {
     try { if (chatAbort) chatAbort.abort(); } catch (e) { /* 已结束 */ }
   }
 
+  /// 跳转按钮状态同步：当前所选模型有远端访问链接才可点；
+  /// 无选择 / 本地模型（无 node_ip）→ 置灰并给出原因提示。
+  function syncJumpBtn() {
+    const btn = $("btn-open-node");
+    if (!btn) return;
+    const model = $("chat-model") ? $("chat-model").value : "";
+    const url = model ? nodeUrlByModel[model] : "";
+    btn.disabled = !url;
+    btn.title = url
+      ? "在新页签打开 " + model + " 的远端访问链接（" + url + "）"
+      : (model ? "该模型无远端节点（本地部署或无节点信息），不可跳转"
+               : "请先选择一个模型");
+  }
+
   function bindOnce() {
     $("btn-send").onclick = send;
+    // 跳转：新页签打开所选模型的远端访问链接（window.open 不携带
+    // opener，避免目标页反向操作本页）。弹窗拦截时退化为 toast 提示。
+    $("btn-open-node").onclick = () => {
+      const model = $("chat-model") ? $("chat-model").value : "";
+      const url = model ? nodeUrlByModel[model] : "";
+      if (!url) return;
+      const w = window.open(url, "_blank", "noopener");
+      if (!w) toast("浏览器拦截了新页签，请允许弹窗后重试：" + url);
+    };
+    // 切换模型时同步按钮状态（refresh 也会调，但用户在下拉里
+    // 切换后到下次轮询之间按钮状态应当即时更新）。
+    $("chat-model").onchange = () => syncJumpBtn();
     const ta = $("ta");
     ta.addEventListener("input", () => {
       ta.style.height = "auto";
@@ -1351,6 +1392,14 @@ Tabs.register("chat", (() => {
           a.ready && a.node_ip && a.remote_port
         );
         ready = active.length > 0;
+        // 跳转按钮的节点映射：模型 → http://node_ip:remote_port
+        // （与部署页「节点信息」同源；本地模型无 node_ip，不进映射）。
+        nodeUrlByModel = {};
+        active.forEach((a) => {
+          if (a.node_ip && a.remote_port) {
+            nodeUrlByModel[a.model] = "http://" + a.node_ip + ":" + a.remote_port;
+          }
+        });
 
         const sel = $("chat-model");
         const prev = sel.value;
@@ -1378,6 +1427,7 @@ Tabs.register("chat", (() => {
           else sel.value = active[0].model;
           $("ta").placeholder = "输入消息…";
         }
+        syncJumpBtn();
 
         // 模型来源符号已经放在下拉选项前：⌂ 本地 / ☁ 云端。
         // 这里不额外显示长文案，避免聊天工具行被撑开。
