@@ -96,9 +96,19 @@ mangosteen config path
 
 ### 3.1 准备 API 凭证
 
-登录优云智算控制台 →「访问管理 / API 密钥」页面，获取：
-- **AccessKey ID**（公钥，形如 `ak-xxxxxxxx`）
-- **AccessKey Secret**（私钥，只在创建时显示一次，务必保存）
+**第一步：注册并登录优云智算控制台**
+
+通过专属注册链接注册（新用户完成注册即送试用额度）：
+
+> https://passport.compshare.cn/register?referral_code=D7ulbLWjdVHCJ0gNwdFxoa
+
+登录后进入控制台，先完成**首次充值（5~10 元即可）**——充值后才能创建 GPU 实例。按量计费下，qwen2.5-0.5b 这类小模型跑一天也只需几毛钱，5~10 元足够试用与验证整个流程。
+
+**第二步：创建 API 密钥**
+
+控制台 →「访问管理 / API 密钥」页面，获取：
+- **AccessKey ID**（公钥，形如一串 32 位字符串，可直接复制）
+- **AccessKey Secret**（私钥，只在创建时显示一次，务必立即保存；丢失只能重建）
 
 ### 3.2 写入密钥
 
@@ -120,7 +130,7 @@ mangosteen cloud key compshare --public-key ak-你的AccessKeyID
 
 ### 3.3 补全服务商参数
 
-编辑 `config.toml`，确认 `[providers.compshare]` 段：
+密钥写好后，编辑 `config.toml` 确认 `[providers.compshare]` 段（密钥已写入的位置不用动，重点是 `[options]` 段——目前**只有 `image_id` 和 `public_key` 是必填**，其余全部可选、有内置默认值）：
 
 ```toml
 [providers.compshare]
@@ -129,30 +139,32 @@ enabled = true
 display_name = "优云智算"
 priority = 1.0
 
+# 私钥：由 cloud key --secret 写入，自动指向加密文件（勿手改）
 [providers.compshare.secret]
-file = "~/Library/Application Support/mangosteen/secrets/compshare_secret_key"
+file = "~/Library/Application Support/mangosteen/secrets/cloud-compshare"
 
 [providers.compshare.options]
-public_key = "ak-你的AccessKeyID"
-region = "cn-wlcb"                  # 地域（华北·乌兰察布）
-zone = "cn-wlcb-01"                 # 可用区
-image_id = "compshareImage-xxxx"    # 镜像 ID（必填，控制台「镜像」页获取）
-charge_type = "Postpay"             # 按量计费：关机不收费
-disk_type = "CLOUD_SSD"             # 系统盘类型
-disk_size_gb = "100"                # 系统盘大小
-gpu_types = ""                      # 允许的卡型号，留空不限制
-min_memory_gb = "32"                # 候选规格的最低内存
-max_price_queries = "10"            # 询价次数上限（控制 API 调用量）
-poll_interval_secs = "5"            # 实例状态轮询间隔
+# 必填：镜像 ID（Ubuntu 22.04 即可）
+# 查法：控制台 →「云服务器」→「创建实例」→ 镜像列表，复制镜像 ID
+image_id = "compshareImage-xxxx"
+# 公钥：cloud key --public-key 写入后会出现在这里
+public_key = "你的AccessKeyID"
+
+# 以下为可选项（不写则用内置默认，按需覆盖）：
+# region = "cn-wlcb"                 # 地域（默认 cn-wlcb 华北·乌兰察布）
+# zone = "cn-wlcb-01"                # 可用区（留空自动挑选）
+# charge_type = "Postpay"            # 按量计费：开机计费、关机停止
+# gpu_types = ""                     # 允许的卡型号，留空不限制
+# min_memory_gb = "32"               # 候选规格的最低内存
 ```
 
-> **image_id 怎么查**：优云智算控制台 →「云服务器」→「创建实例」→ 镜像列表，复制镜像 ID（形如 `compshareImage-xxxx`）。Ubuntu 22.04 镜像即可。
+> **最小可用配置**：只要 `image_id` + `public_key` 两项 + 私钥文件，其余全部省略即可工作。地域/可用区留空时自动探测并选择「虚机 + 镜像兼容」的最优选点；卡型号不填时部署命令用 `--gpu-model` 指定即可。
 
 验证配置：
 
 ```bash
-mangosteen config validate
-mangosteen cloud providers
+mangosteen config show      # 查看配置现状（是否初始化、密钥指向）
+mangosteen cloud providers  # 确认 compshare 状态为「启用」
 ```
 
 **预期输出（cloud providers）：**
@@ -174,19 +186,46 @@ mangosteen cloud providers
 mangosteen doctor
 ```
 
-**预期输出（全部通过或有可接受的警告）：**
+**预期输出（以当前版本为准，检查项有更新）：**
+
+未配置云密钥时：
 ```
-✓ 硬件采集
-✓ 加速卡
-✓ 推理引擎
-✓ 配置
-✓ 云服务商
-✓ 目录权限
-✓ 端口
-✓ 磁盘
+环境自检
+
+  [OK  ] 硬件采集
+         macos / x86_64 · 4 物理核 · 16.0 GiB 内存 · 无加速卡（CPU 推理）
+  [OK  ] 配置合法性
+         用户配置：~/Library/Application Support/mangosteen/config.toml
+  [WARN] 网关端口
+         11516 空闲
+  [WARN] 云服务商
+         compshare 未配置成功（缺少密钥）
+         → 优云智算需要申请 API 公钥和私钥，申请链接: https://passport.compshare.cn/register?...
+
+⚠ 1 项警告，不影响本地部署
 ```
 
-> **注意**：云端部署时，推理引擎（llama-server）会自动安装在远端 GPU 节点上，本机无需安装 llama.cpp。doctor 中「推理引擎」警告不影响云端部署。
+密钥配置完成后：
+```
+  [OK  ] 硬件采集
+  [OK  ] 配置合法性
+  [OK  ] 网关端口
+  [OK  ] 云服务商
+         compshare 已配置成功
+
+✓ 全部检查通过，可以开始部署
+```
+
+检查项说明：
+
+| 检查项 | 含义 | 警告怎么办 |
+|--------|------|-----------|
+| 硬件采集 | CPU/内存/加速卡型号 | 无加速卡属正常（云端部署不吃本地卡） |
+| 配置合法性 | config.toml 可解析、已初始化 | 按提示执行 `mangosteen config init` |
+| 网关端口 | 11516（UI/API 网关）状态 | 空闲或运行中均可；占用但非本程序时报「端口冲突」 |
+| 云服务商 | compshare 密钥/参数完整性 | 按「3.1/3.2」重新写入密钥 |
+
+> **注意**：推理引擎（llama-server）在**远端 GPU 节点**上自动安装，本机无需安装 llama.cpp。`config validate` 子命令已移除，改用 `config show` 查看配置。
 
 ---
 
@@ -258,6 +297,8 @@ mangosteen deploy qwen2.5-0.5b --gpu-model 3090 --watch
 2. 显示「隧道已交由网关节扭持有」
 3. `mangosteen status` 显示状态 `ready`、运行状态 `active`
 
+> **模型在哪台机器上、怎么访问**：部署完成后，`status` 会给出**本地端口**（如 11435）和**远端端口**（如 8080）。SSH 隧道已自动把远端 GPU 上 llama-server 的端口转发到本机回环，因此**直接用 `http://127.0.0.1:<本地端口>/v1`（如 `http://127.0.0.1:11435/v1`）即可访问远端大模型**——与访问本地模型完全相同，无需关心远端 IP、无需公网带宽。Web 控制台（`mangosteen ui`）对话页的「跳转」按钮也会直接打开这个本地入口。
+
 ---
 
 ## 第 7 步：验证模型可用
@@ -302,7 +343,11 @@ curl http://127.0.0.1:11516/v1/chat/completions \
 mangosteen stop --all --yes
 ```
 
-> **计费说明**：`charge_type = "Postpay"` 时，**实例开机即计费、关机停止计费**。停止部署会关闭实例（保留磁盘与模型文件），下次部署直接复用，无需重新下载。
+> **计费说明**：`charge_type = "Postpay"` 时，**实例开机即计费、关机停止计费**。停止部署时：
+> - 引擎端口（8080/8081）全部空闲 → 自动关闭实例（保留磁盘与模型文件），下次部署直接复用，无需重新下载；
+> - 任一端口仍被其他模型占用 → 实例保留（有任务在跑），只停本模型进程。
+>
+> 也可随时手动控制实例：`mangosteen cloud instances stop compshare/uhost-xxxx`。
 
 ---
 
