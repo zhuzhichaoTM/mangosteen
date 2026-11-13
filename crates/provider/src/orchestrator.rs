@@ -768,80 +768,64 @@ impl CloudOrchestrator {
         )
     }
 
-    /// 检查远端是否还有**非本模型**的 llama-server 进程在运行。
+    /// 检查远端**引擎端口集合**的占用情况（stop 关闭实例的判据）。
     ///
-    /// ## 为什么需要
+    /// ## 端口占用制（用户策略）
     ///
-    /// stop/teardown 关机前，除了台账里可见的其他部署，还要看远端进程
-    /// 表：手工启动或其他来源的服务不在台账里，关机就会把它们一起中断。
-    /// `own_model` 指定的本部署模型（命令行 `--model <path>` 含该模型
-    /// 文件名）不算 foreign——它随后会被按模型名精确停掉。
+    /// stop 一个部署后，实例能否关机只看引擎端口（8080/8081）是否还有
+    /// 进程占用：**全部空闲 → 关实例；任一被占 → 实例保留**（上面可能
+    /// 还有其他模型在推理）。不再按模型名/进程名做复杂的 foreign 判定
+    /// ——端口是推理服务的最终落点，端口空闲即无人推理。
     ///
-    /// ## 实例未运行时的快速通道（实测卡死修复）
+    /// 实现：一条 SSH 命令同时探测所有端口（ss 优先，netstat 兜底；
+    /// 都没有时退化为「进程活着就算占用」）。返回**被占用**的端口列表
+    /// （空 = 全部空闲，可关机）。
     ///
-    /// 用户手动关闭 GPU 节点后 stop 卡住：SSH 探测对已关机实例做
-    /// ConnectTimeout × 重试，白白假死。实例非 Running（已关机/创建中/
-    /// 已销毁）上不可能有进程在跑，先查厂商状态直接返回 false，
-    /// 不做任何 SSH 尝试。
-    pub fn has_foreign_service_process(
+    /// 实例未运行 → 返回空（关机状态下无端口占用，可直接关机）。
+    pub fn engine_ports_busy(
         &self,
         provider: &str,
         instance_id: &str,
-        own_model: Option<&str>,
-    ) -> MnResult<bool> {
-        // 快速通道：实例不在运行 → 无进程可查
+        ports: &[u16],
+    ) -> MnResult<Vec<u16>> {
+        if ports.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 快速通道：实例不在运行 → 无端口占用
         if let Ok(driver) = self.registry.get(provider) {
             match driver.describe(instance_id) {
-                Ok(inst) if inst.state != InstanceState::Running => return Ok(false),
+                Ok(inst) if inst.state != InstanceState::Running => return Ok(Vec::new()),
                 _ => {}
             }
         }
         let target = self.service_target(provider, instance_id)?;
-        // 探测「非本模型」的 llama-server 进程。
-        //
-        // ## 为什么不能用 `pgrep -af llama-server`
-        //
-        // ssh_exec 的承载 shell（`bash -c "pgrep -af llama-server ..."`）
-        // 自身 cmdline 就含 "llama-server" 字样，**每次检查都把自己当成
-        // foreign 进程**——实测导致 stop 永远走「实例保留」分支，实例
-        // 不被关机（用户只能手动 cloud instances stop）。
-        //
-        // 现在的做法分两步精确化：
-        // 1. `pgrep llama-server`（不带 -f）按**进程名**（comm）匹配：
-        //    目标进程 exec 后 comm 恰为 llama-server；承载 shell 的
-        //    comm 是 bash/zsh，天然不匹配；
-        // 2. 逐 PID 取完整命令行（`ps -o args=`，macOS/Linux 通用；
-        //    `/proc/<pid>/cmdline` 兜底），含**本模型文件名**的排除，
-        //    其余输出到 PIDS 行。
-        let script = match own_model {
-            Some(m) => {
-                // 模型名是文件名（字母/数字/点/下划线/连字符），单引号包裹
-                // 即可安全传入远端 shell；异常字符防御性剔除。
-                let safe: String = m
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c))
-                    .collect();
-                let q = format!("'{safe}'");
-                format!(
-                    "P=''; for pid in $(pgrep llama-server 2>/dev/null); do \
-                     a=$(ps -p $pid -o args= 2>/dev/null); \
-                     if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
-                     case \"$a\" in *\"{q}\") ;; *) P=\"$P $pid\";; esac; \
-                     done; echo \"PIDS:$P\""
-                )
-            }
-            None => {
-                "P=''; for pid in $(pgrep llama-server 2>/dev/null); do P=\"$P $pid\"; done; echo \"PIDS:$P\""
-                    .to_string()
-            }
-        };
+        // 一条命令探测所有端口：ss/netstat 的监听列表；两者都没有时
+        // 退化用 /dev/tcp 探活（bash 内建，无需额外工具）。
+        let port_list = ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let script = format!(
+            "busy=''; \
+             for p in {port_list}; do \
+               if (command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ':%p '); then busy=\"$busy %p\"; \
+               elif (command -v netstat >/dev/null 2>&1 && netstat -lnt 2>/dev/null | grep -q ':%p '); then busy=\"$busy %p\"; \
+               elif (echo >/dev/tcp/127.0.0.1/$p) 2>/dev/null; then busy=\"$busy %p\"; \
+               fi; \
+             done; echo \"BUSY:$busy\""
+        );
         let out = mangosteen_device::remote::ssh_exec(&target, &script, 60)?;
-        let foreign = out
+        let busy = out
             .lines()
-            .find_map(|l| l.trim().strip_prefix("PIDS:"))
-            .map(|rest| !rest.trim().is_empty())
-            .unwrap_or(false);
-        Ok(foreign)
+            .find_map(|l| l.trim().strip_prefix("BUSY:"))
+            .map(|rest| {
+                rest.split_whitespace()
+                    .filter_map(|p| p.parse::<u16>().ok())
+                    .collect::<Vec<u16>>()
+            })
+            .unwrap_or_default();
+        Ok(busy)
     }
 
     /// 检查指定端口的推理服务是否在运行。

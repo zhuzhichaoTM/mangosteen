@@ -790,18 +790,14 @@ impl Orchestrator {
     ///
     /// 只能关闭状态为 `Ready` 的部署，切换为 `Stopped`。其他状态不变。
     ///
-    /// ## 共享实例保护（实测踩坑后新增）
+    /// ## 关实例判据：引擎端口占用制（用户策略）
     ///
-    /// 实例按 GPU 型号复用，一个实例可并存多个部署。旧实现无条件
-    /// `teardown` 整个实例——stop 其中一个部署会把共享它的其他部署
-    /// 一起关机（实测：stop qwen2.5-0.5b 把同实例的 qwen3.8-27b 节点
-    /// 关机，台账却仍显示 ready）。现在关实例前做两道检查：
-    ///
-    /// 1. 台账：是否还有其他部署引用同一实例（`other_deployments_on_instance`）；
-    /// 2. 远端进程：是否有非本部署的 llama-server 在跑
-    ///    （`has_foreign_service_process`，覆盖手工启动等台账外来源）。
-    ///
-    /// 任一命中 → 只按端口停本部署进程，实例保留，台账备注说明原因。
+    /// stop 一个部署后，实例能否关机只看引擎端口（8080/8081）是否还有
+    /// 进程占用：**全部空闲 → 关实例（teardown）；任一被占 → 实例保留**
+    /// （可能有其他模型在推理），只按模型名停本部署的推理进程。
+    /// 台账里的其他部署记录仅作提示，不再阻止关机——端口空闲即无人推理
+    /// （进程没跑的其他部署，其模型文件随实例磁盘保留，下次 deploy
+    /// 会自动开机复用）。
     pub fn stop(&self, id: &str) -> MnResult<()> {
         let record = self
             .state
@@ -854,27 +850,28 @@ impl Orchestrator {
                         .filter(|m| !m.is_empty());
                     let mut warnings = Vec::new();
 
-                    // 1) 台账检查：同实例是否还有其他部署
+                    // 1) 台账检查：同实例是否还有其他部署（提示用）
                     let others =
                         self.other_deployments_on_instance(&provider, instance_id, id);
-                    // 2) 远端进程检查：是否有台账外的 llama-server 在跑
-                    let mut foreign = false;
-                    if let Some(o) = self.cloud().as_ref() {
-                        match o.has_foreign_service_process(
-                            &provider,
-                            instance_id,
-                            model_name.as_deref(),
-                        ) {
-                            Ok(true) => foreign = true,
-                            Ok(false) => {}
-                            // SSH 不可达（实例已关机等）：无法判断，不阻止
-                            // 关机——已关机的实例上不可能有进程在跑。
-                            Err(e) => warnings.push(format!("远端进程检查跳过：{e}")),
-                        }
-                    }
+                    // 2) 端口占用检查（关实例的唯一判据，用户策略）：
+                    //    引擎端口 8080/8081 都空闲 → 关实例；
+                    //    任一被占 → 实例保留（可能有其他模型在推理）。
+                    const ENGINE_PORTS: [u16; 2] = [8080, 8081];
+                    let busy_ports = match self.cloud().as_ref() {
+                        Some(o) => match o.engine_ports_busy(&provider, instance_id, &ENGINE_PORTS) {
+                            Ok(v) => v,
+                            // SSH 不可达（实例已关机等）：无法探测，
+                            // 视为无占用（已关机的实例上没有监听）。
+                            Err(e) => {
+                                warnings.push(format!("端口占用检查跳过：{e}"));
+                                Vec::new()
+                            }
+                        },
+                        None => Vec::new(),
+                    };
 
-                    if !others.is_empty() || foreign {
-                        // 共享实例：只停本部署进程，实例保留。
+                    if !busy_ports.is_empty() {
+                        // 端口被占：只停本部署进程的模型，实例保留。
                         // eprintln 直达终端：CLI 随后会打印「已停止」，
                         // 必须让用户看到「实例仍在运行/计费」的事实
                         // （用户实测：stop 显示成功但实例 running 计费，
@@ -883,36 +880,37 @@ impl Orchestrator {
                             "[cloud] ⚠ 实例 {}/{} 保留（未关机）：{}",
                             provider,
                             instance_id,
-                            if !others.is_empty() && foreign {
-                                "同实例有其他部署且远端有未知推理进程".to_string()
-                            } else if !others.is_empty() {
-                                format!(
-                                    "同实例仍有其他部署 {}",
-                                    others
-                                        .iter()
-                                        .map(|(did, st)| format!("{did}({st})"))
-                                        .collect::<Vec<_>>()
-                                        .join("、")
-                                )
-                            } else {
-                                "远端有非本部署的推理进程在运行".to_string()
-                            }
+                            format!(
+                                "引擎端口 {} 仍被占用（可能有其他模型在推理）",
+                                busy_ports
+                                    .iter()
+                                    .map(|p| p.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("、")
+                            )
                         );
                         eprintln!(
-                            "[cloud]   本部署模型的推理进程已按模型名停止；实例仍在计费，如需彻底释放：先停掉同实例的其他部署，或执行 `mangosteen cloud instances stop {}`（会中断实例上所有推理）",
+                            "[cloud]   本部署模型的推理进程已按模型名停止；实例仍在计费，如需彻底释放：先停掉占用端口的推理服务，或执行 `mangosteen cloud instances stop {}`（会中断实例上所有推理）",
                             instance_id
                         );
-                        // 共享实例：只停本部署进程的模型，实例保留
+                        // 端口被占：只停本部署进程的模型，实例保留
                         self.stop_shared_instance_service(
                             &provider,
                             instance_id,
                             model_name.as_deref(),
                             &mut warnings,
                         );
-                        let mut note = String::from("实例保留（未关机）：");
+                        let mut note = format!(
+                            "实例保留（未关机）：引擎端口 {} 仍被占用；如需彻底释放，先停掉占用端口的推理服务",
+                            busy_ports
+                                .iter()
+                                .map(|p| p.to_string())
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        );
                         if !others.is_empty() {
                             note.push_str(&format!(
-                                "同实例仍有其他部署 {}；",
+                                "；同实例另有部署记录 {}",
                                 others
                                     .iter()
                                     .map(|(did, st)| format!("{did}({st})"))
@@ -920,10 +918,6 @@ impl Orchestrator {
                                     .join("、")
                             ));
                         }
-                        if foreign {
-                            note.push_str("实例上有非本部署的推理进程在运行；");
-                        }
-                        note.push_str("如需彻底释放，先停掉同实例的其他部署");
                         let note = if warnings.is_empty() {
                             Some(note)
                         } else {
@@ -1034,9 +1028,9 @@ impl Orchestrator {
 
                 // ## 共享实例保护（与 stop 同一规则）
                 //
-                // power_off 关掉的是整个实例。实例按 GPU 型号复用，台账里
-                // 可能还有别的部署引用它，远端还可能有台账外的推理进程
-                // （手工启动等）。任一命中 → 只按模型名停本部署进程，不关机。
+                // power_off 关掉的是整个实例。能否关机只看**引擎端口占用**
+                //（用户策略）：8080/8081 都空闲 → 关机；任一被占 → 只按
+                // 模型名停本部署进程，实例保留（可能有其他模型在推理）。
                 let cloud_ref = record.plan.cloud.as_ref();
                 let model_name = cloud_ref
                     .map(|c| {
@@ -1049,17 +1043,16 @@ impl Orchestrator {
                     .filter(|m| !m.is_empty());
                 let others = self.other_deployments_on_instance(&provider, instance_id, id);
                 let mut warnings = Vec::new();
-                let mut foreign = false;
-                match o.has_foreign_service_process(
-                    &provider,
-                    instance_id,
-                    model_name.as_deref(),
-                ) {
-                    Ok(true) => foreign = true,
-                    Ok(false) => {}
-                    Err(e) => warnings.push(format!("远端进程检查跳过：{e}")),
-                }
-                if !others.is_empty() || foreign {
+                const ENGINE_PORTS: [u16; 2] = [8080, 8081];
+                let busy_ports = match o.engine_ports_busy(&provider, instance_id, &ENGINE_PORTS) {
+                    Ok(v) => v,
+                    // SSH 不可达（实例已关机等）：无法探测，视为无占用。
+                    Err(e) => {
+                        warnings.push(format!("端口占用检查跳过：{e}"));
+                        Vec::new()
+                    }
+                };
+                if !busy_ports.is_empty() {
                     let mut ws = warnings;
                     // 只按模型名停本部署进程；台账缺模型路径时不盲停
                     // （绝不无差别杀全部 llama-server，误伤同节点其它模型）
@@ -1074,10 +1067,17 @@ impl Orchestrator {
                                 .into(),
                         ),
                     }
-                    let mut note = String::from("实例保留（未关机）：");
+                    let mut note = format!(
+                        "实例保留（未关机）：引擎端口 {} 仍被占用；如需彻底释放，先停掉占用端口的推理服务",
+                        busy_ports
+                            .iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    );
                     if !others.is_empty() {
                         note.push_str(&format!(
-                            "同实例仍有其他部署 {}；",
+                            "；同实例另有部署记录 {}",
                             others
                                 .iter()
                                 .map(|(did, st)| format!("{did}({st})"))
@@ -1085,10 +1085,6 @@ impl Orchestrator {
                                 .join("、")
                         ));
                     }
-                    if foreign {
-                        note.push_str("实例上有非本部署的推理进程在运行；");
-                    }
-                    note.push_str("如需彻底释放，先停掉同实例的其他部署");
                     let note = if ws.is_empty() {
                         Some(note)
                     } else {

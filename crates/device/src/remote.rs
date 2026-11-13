@@ -1519,17 +1519,21 @@ pub fn stop_llama_server(target: &SshTarget, workdir: &str) -> MnResult<()> {
     stop_llama_server_on_port(target, workdir, None)
 }
 
-/// 停掉**指定模型**的远端推理进程（模型名模糊匹配）。
+/// 停掉**指定模型**的远端推理进程（模型名模糊匹配 + 确认重试）。
 ///
-/// ## 为什么按模型名而不是端口（用户要求）
+/// ## 按模型名而不是端口（用户要求）
 ///
 /// 端口是部署时分配的资源、会漂移（8080 被占则 8081），pid 文件可能
 /// 陈旧；模型文件名（`--model <path>`）才是远端进程命令行里最稳定的
 /// 锚点。同节点多模型/端口漂移/旧进程残留的场景下，按模型名匹配
 /// 才能精确停掉「这一个模型」的进程。
 ///
-/// 停止脚本：pgrep llama-server 找候选 → 逐 PID 读完整命令行（ps 优先，
-/// /proc 兜底）→ 含模型名才 TERM/KILL → 复查仍残留则报 still-running。
+/// ## 确认-重试机制（用户要求）
+///
+/// 停止脚本执行后**不盲信退出码**：立即用同一套模型名匹配逻辑复查
+/// 进程是否真的没了。首次确认仍有残留 → 重试一次（TERM/KILL 再来一
+/// 轮 + 复查）；重试后仍残留 → 报错，绝不假报成功（「进程还在却被
+/// 标记为已停止」会让关机流程被跳过、节点持续计费）。
 pub fn stop_llama_server_by_model(
     target: &SshTarget,
     workdir: &str,
@@ -1537,14 +1541,36 @@ pub fn stop_llama_server_by_model(
 ) -> MnResult<()> {
     let _ = workdir; // 按模型名停止不依赖 workdir（命令行里含完整路径）
     let script = build_stop_script_by_model(model_name);
-    let out = ssh_exec(target, &script, 90)?;
-    if out.contains("still-running") {
-        return Err(MnError::Network {
-            stage: "停止云端推理服务".to_string(),
-            reason: format!("模型 {model_name} 的 llama-server 在 TERM 与 KILL 之后仍在运行"),
-        });
+    // 最多两轮：首轮 + 确认失败后的重试轮。每轮内部已有 TERM 等待
+    // KILL 复查；两轮都 still-running 才判失败。
+    let mut last_err = None;
+    for round in 1..=2u32 {
+        let out = ssh_exec(target, &script, 90)?;
+        if !out.contains("still-running") {
+            return Ok(());
+        }
+        let still: Vec<&str> = out
+            .lines()
+            .find_map(|l| l.strip_prefix("still-running:"))
+            .map(|rest| rest.split_whitespace().collect())
+            .unwrap_or_default();
+        last_err = Some(format!(
+            "第 {round} 轮停止后模型 {model_name} 的 llama-server 仍在运行（PID: {}）",
+            still.join(",")
+        ));
+        if round == 1 {
+            eprintln!(
+                "[cloud] ⚠ 模型 {} 的进程首次停止未确认（仍有残留），1 轮重试",
+                model_name
+            );
+        }
     }
-    Ok(())
+    Err(MnError::Network {
+        stage: "停止云端推理服务".to_string(),
+        reason: last_err.unwrap_or_else(|| {
+            format!("模型 {model_name} 的 llama-server 经 2 轮停止与确认仍在运行")
+        }),
+    })
 }
 
 /// 生成「按模型名停止」的远端脚本（纯函数，供生产与测试共用）。
