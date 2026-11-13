@@ -215,12 +215,20 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
                 hint: Some("执行 `mangosteen ui status` 查询状态".into()),
             });
         } else {
-            // 被其他程序占用：真正的冲突，需要处理
+            // 被非 mangosteen 进程占用：异常——网关无法监听，
+            // 所有部署/推理入口不可用。带上占用进程信息便于排查。
+            let who = mangosteen_platform::process::find_listener_pid(port)
+                .and_then(|pid| {
+                    mangosteen_platform::process::process_exe(pid).map(|exe| {
+                        format!("（PID {pid}，{}）", exe.display())
+                    })
+                })
+                .unwrap_or_default();
             out.push(Check {
                 name: "网关端口".into(),
-                status: Status::Warn,
-                detail: format!("{port} 已被其他程序占用"),
-                hint: Some("改配置 gateway.port 或加 --port 启动".into()),
+                status: Status::Fail,
+                detail: format!("{port} 被非 Mangosteen 进程占用{who}"),
+                hint: Some("该端口被其他程序占用，网关无法启动。改配置 gateway.port 或加 --port 启动".into()),
             });
         }
 

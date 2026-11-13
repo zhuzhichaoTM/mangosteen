@@ -577,7 +577,10 @@ fn read_gateway_pid() -> Option<u32> {
 }
 
 /// 查询进程的可执行文件路径。
-fn process_exe(pid: u32) -> Option<std::path::PathBuf> {
+///
+/// `pub`：doctor 在「端口被他人占用」时需要展示占用进程信息（PID +
+/// 可执行文件），帮助用户定位是哪个程序抢了端口。
+pub fn process_exe(pid: u32) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "macos")]
     {
         // macOS：ps -o comm= -p <pid> 给出完整路径
