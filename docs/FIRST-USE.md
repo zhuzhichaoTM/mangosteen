@@ -15,7 +15,11 @@
 |----------|----------|
 | Intel | `mangosteen-macos-x86_64.tar.gz` |
 | Apple Silicon（M1/M2/M3/M4） | `mangosteen-macos-aarch64.tar.gz` |
+Intel下载方式:
+curl -L -C - -O "https://gh-proxy.com/https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.1/mangosteen-macos-x86_64.tar.gz"
 
+Apple下载方式:
+curl -L -C - -O "https://gh-proxy.com/https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.1/mangosteen-macos-aarch64.tar.gz"
 > 查看芯片类型：左上角  →「关于本机」，看「芯片」一行。
 
 解压并安装到 PATH：
