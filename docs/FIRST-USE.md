@@ -20,6 +20,10 @@ curl -L -C - -O "https://gh-proxy.com/https://github.com/zhuzhichaoTM/mangosteen
 
 Apple下载方式:
 curl -L -C - -O "https://gh-proxy.com/https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.1/mangosteen-macos-aarch64.tar.gz"
+
+windows下载方式:
+curl -L -C - -O "https://gh-proxy.com/https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.1/mangosteen-windows-x86_64.zip"
+
 > 查看芯片类型：左上角  →「关于本机」，看「芯片」一行。
 
 解压并安装到 PATH：
