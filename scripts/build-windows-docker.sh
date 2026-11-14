@@ -79,7 +79,7 @@ Mangosteen ${VERSION} — mangosteen-windows-x86_64
 1. 把 mangosteen.exe 放到 PATH 中的任意目录：
      Windows: 把所在目录加入「系统环境变量 PATH」
 
-2. 安装推理引擎（Mangosteen 唯一支持的推理引擎）：
+2. 安装推理引擎（Mangosteen 唯一支持的推理引擎，llama.cpp）：
      从 https://github.com/ggml-org/llama.cpp/releases 下载
      并确保 llama-server.exe 在 PATH 中
 
@@ -88,12 +88,15 @@ Mangosteen ${VERSION} — mangosteen-windows-x86_64
      mangosteen.exe doctor
 
 4. 配置云服务商凭证（示例：优云智算）：
-     编辑 %APPDATA%\mangosteen\config.toml
+     编辑 %APPDATA%\\mangosteen\\config.toml
      在 [providers.compshare] 段填写 driver、public_key、secret 等
 
 5. 登记模型并部署：
-     mangosteen.exe models add /path/to/model.gguf
+     mangosteen.exe models add \\path\\to\\model.gguf
      mangosteen.exe deploy <模型名> --context 8192
+
+6. 启动 Web UI（可选）：
+     mangosteen.exe ui
 
 完整文档见 README.md 与 docs/DESIGN.md
 EOF

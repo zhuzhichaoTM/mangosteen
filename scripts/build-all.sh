@@ -14,8 +14,8 @@
 #
 # 注意：
 #   - 此脚本仅支持在 macOS 宿主机上运行
-#   - Windows 通过交叉编译生成（x86_64-pc-windows-msvc）
-#   - Linux 需在 Linux 环境中单独构建
+#   - Windows 通过 Docker 容器交叉编译生成（x86_64-pc-windows-gnu）
+#   - Linux 需在 Linux 环境中单独构建（scripts/build-linux-docker.sh）
 #
 set -euo pipefail
 
