@@ -174,6 +174,33 @@ impl TunnelManager {
         format!("{}:{}:{}", spec.ssh_host, spec.ssh_port, remote_port)
     }
 
+    /// 判断某个进程是否是「本管理器建立的、转发 (local_port → remote_port)
+    /// 的残留 ssh 隧道」。
+    ///
+    /// 识别口径（各平台命令行读取见 [`mangosteen_platform::process::pid_command_line`]）：
+    /// 1. 进程名是 `ssh`（可执行路径按 `/` 与 `\` 双分隔符切末段，兼容 Windows）；
+    /// 2. 命令行含 `-L <local_port>:127.0.0.1:<remote_port>` 形态转发。
+    ///
+    /// 之所以要求同时匹配本地与远端端口：同一台机器上可能有多条隧道
+    /// （多部署并存），只按本地端口杀会把另一条隧道的转发规则错认为残留。
+    /// 读不到命令行（ps/wmic 失败）时保守返回 `false`，宁可报错也不误杀
+    /// 用户进程。
+    fn is_own_tunnel_process(pid: u32, local_port: u16, remote_port: u16) -> bool {
+        let Some(cmd) = process::pid_command_line(pid) else {
+            return false;
+        };
+        // ssh 可执行路径：Unix 是 /usr/bin/ssh，Windows 是 C:\...\ssh.exe。
+        // 双分隔符切末段再判进程名（Windows 端还需兼容带 .exe 后缀）。
+        let exe = cmd.split_whitespace().next().unwrap_or("");
+        let exe_name = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+        let exe_name = exe_name.strip_suffix(".exe").unwrap_or(exe_name);
+        if exe_name != "ssh" {
+            return false;
+        }
+        // 转发参数形态：-L 11435:127.0.0.1:8080（两端都必须在）
+        cmd.contains(&format!("{local_port}:127.0.0.1:{remote_port}"))
+    }
+
     /// 取 ssh 的真实报错文本（管道优先，其次回读日志文件）。
     ///
     /// ssh 的重定向方式决定了线索在哪：
@@ -341,7 +368,43 @@ impl TunnelManager {
         // 分配本地端口
         // 「强制端口固定」：如果 spec 已指定 local_port != 0，则使用指定端口，
         // 跳过 PortAllocator 自动分配，保证本地端口 = 远端端口一一映射。
-        let local_port = if let Some(fwd) = spec.forwards.first() {
+        let forced_port = spec
+            .forwards
+            .iter()
+            .find(|f| f.direction == mangosteen_core::net::TunnelDirection::LocalToRemote)
+            .map(|f| f.local_port)
+            .unwrap_or(0);
+        let local_port = if forced_port != 0 {
+            // 固定端口被占用时的「残留隧道自愈」：
+            // 部署完成后 CLI 退出，若 CLI 侧隧道进程未被回收（或由旧网关
+            // 进程持有），新网关节扭重建隧道时 ssh 会因 bind 失败直接退出
+            // （tunnel-<port>.log 里的 `Address already in use`），隧道永远
+            // 建不起来、探测持续失败、run_status 卡在 unactive。
+            //
+            // 只清理「确认是 mangosteen 自己的 ssh 隧道」进程：命令行里同时
+            // 出现 `-L <port>:` 形态转发与远端端口。其它程序占用（用户自己的
+            // 服务）不能碰，报错让上层感知。
+            if !process::is_port_bindable(forced_port) {
+                if let Some(pid) = process::find_listener_pid(forced_port) {
+                    if Self::is_own_tunnel_process(pid, forced_port, remote_port) {
+                        eprintln!(
+                            "[tunnel] 本地端口 {forced_port} 被残留隧道进程（PID {pid}）占用，先清理再重建"
+                        );
+                        let _ = process::terminate_pid(pid, Duration::from_secs(2));
+                        // 等端口释放（最多 3 秒），避免 kill 后立即 bind 仍失败
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        while !process::is_port_bindable(forced_port)
+                            && Instant::now() < deadline
+                        {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                }
+                // 端口仍不可绑定（非残留隧道占用，或清理失败）时维持原有
+                // 行为：交给 ssh 报错，由重试/上层诊断处理。
+            }
+            forced_port
+        } else if let Some(fwd) = spec.forwards.first() {
             if fwd.local_port != 0 {
                 fwd.local_port
             } else {

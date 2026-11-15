@@ -71,9 +71,13 @@ const RESTORE_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// 单次探测的操作超时。
 ///
-/// 只探测本机回环端口，400 毫秒已远超正常握手时间；给足余量是为了
-/// 容忍机器在编译/推理满载时的调度抖动。
-const PROBE_TIMEOUT: Duration = Duration::from_millis(400);
+/// 2 秒不是拍脑袋：本地回环往返本应是毫秒级，但隧道场景（云端部署）
+/// 的 `/health` 要走 SSH 加密隧道 + 公网 RTT，实测 P40 纯 CPU 推理节点
+/// 常态 1.0~1.7 秒（含远端 llama-server 线程调度抖动），400ms 的旧值
+/// 误判率约 40%——探测线程连续 3 轮失败还会触发不必要的隧道重建
+/// （重建期间端口被占，真正的隧道反而建不起来，状态永久卡 unactive）。
+/// 代价是失败探测要等满 2 秒，但探测在后台线程、5 秒一轮，用户无感。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// `ready` 降级为 `failed` 前必须连续失败的探测轮数。
 ///

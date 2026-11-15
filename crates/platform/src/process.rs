@@ -763,6 +763,84 @@ pub fn is_port_bindable(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
+/// 读取进程完整命令行（用于识别「哪个进程占着端口」）。
+///
+/// | 平台 | 手段 |
+/// |---|---|
+/// | Linux | `/proc/<pid>/cmdline`（NUL 分隔，转空格） |
+/// | macOS | `ps -p <pid> -o command=` |
+/// | Windows | `wmic process where processid=<pid> get commandline`（Win10/11 内置） |
+/// | 其它 Unix（BSD 等） | `ps -p <pid> -o command=`（与 macOS 同路径） |
+///
+/// 读取失败一律返回 `None`，由调用方降级处理（宁可放过也不误杀用户进程）。
+///
+/// ## Windows 的实现取舍
+///
+/// 不用 WMI API（需要额外 COM 依赖），也不用 PowerShell（冷启动约 1 秒，
+/// 探测路径上跑不起）：`wmic` 是 Win10/11 自带的命令行工具，单次调用
+/// 约几十毫秒，且输出就是纯文本。wmic 在新版 Windows 被标记弃用但
+/// 尚未移除；读不到时返回 `None` 自然降级，不引入硬依赖。
+#[cfg(target_os = "linux")]
+pub fn pid_command_line(pid: u32) -> Option<String> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes).replace('\0', " ");
+    Some(text.trim().to_string())
+}
+
+#[cfg(any(target_os = "macos", all(unix, not(target_os = "linux"))))]
+pub fn pid_command_line(pid: u32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+#[cfg(windows)]
+pub fn pid_command_line(pid: u32) -> Option<String> {
+    // wmic 输出含表头与空行：「CommandLine」列可能为空（系统进程），
+    // 也可能带前导空白（wmic 的对齐填充）。逐行找非空、非表头的那一行。
+    let out = Command::new("wmic")
+        .args([
+            "process",
+            "where",
+            &format!("processid={pid}"),
+            "get",
+            "commandline",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.eq_ignore_ascii_case("CommandLine"))
+        .map(str::to_string)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    windows,
+    all(unix, not(target_os = "linux"))
+)))]
+pub fn pid_command_line(_pid: u32) -> Option<String> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
