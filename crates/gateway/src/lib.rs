@@ -44,7 +44,7 @@ pub mod pulljobs;
 pub mod runprobe;
 pub mod server;
 
-pub use cloudmon::{spawn_cloud_monitor, CloudMonitor};
+pub use cloudmon::{refresh_on_demand, CloudMonitor};
 pub use gateway::{
     ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot, Gateway, GatewayBuilder,
     GatewayStatus,

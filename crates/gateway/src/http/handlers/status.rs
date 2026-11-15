@@ -220,11 +220,20 @@ impl GatewayServer {
 
         let disk_free = mangosteen_platform::resmon::available_space(&hardware.1).ok();
 
-        // 云端监控：只读缓存（后台线程每 5 秒刷新一次）。
+        // 云端监控：**按需查询**——请求驱动，TTL 缓存防连击。
         //
-        // 绝不在请求路径里调厂商接口：设备页每 2 秒轮询一次，
-        // 每次都打云端会让页面明显卡顿并触发厂商限流。
-        let cloud = self.cloud_section();
+        // 曾经后台线程每 5 秒打厂商 API（网关一启动就开始，没人看也打），
+        // 现改为只有 `/api/sysinfo` 被请求时才穿透到厂商，10 秒内重复
+        // 请求（多标签页/轮询）直接读缓存。厂商调用不在网关锁内执行
+        // （两段式边界见 cloudmon 模块文档）。
+        let cloud = {
+            let gw = self.gateway.as_ref();
+            if !self.cloud_monitor.is_fresh() {
+                let monitor = self.cloud_monitor.clone();
+                crate::cloudmon::refresh_on_demand(gw, &monitor);
+            }
+            self.cloud_section()
+        };
 
         Response::json(
             200,

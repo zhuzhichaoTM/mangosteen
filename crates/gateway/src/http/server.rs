@@ -146,13 +146,21 @@ impl GatewayServer {
         self
     }
 
-    /// 绑定云端监控缓存，并在后台启动采集线程。
+    /// 绑定云端监控缓存与 SSH 登录信息刷新。
     ///
     /// 由 `serve` / `ui` 在启动时调用。不绑定也能正常工作——
-    /// 此时设备页的云端区域显示「采集中」，不会报错。
+    /// 此时设备页的云端区域显示「未采集」，不会报错。
+    ///
+    /// ## 云端监控改为按需查询（不再有后台采集线程）
+    ///
+    /// 曾经后台线程每 5 秒调厂商 `GetCompShareInstanceMonitor`：
+    /// 网关一启动就开始打厂商 API，与有没有人看设备页无关，挂着不用
+    /// 也持续消耗配额。现改为 `/api/sysinfo` 请求驱动 + TTL 缓存
+    /// （见 [`crate::cloudmon`]），没人看 = 零请求 = 零配额。
+    ///
+    /// SSH 登录信息保留后台刷新：它只在部署页打开时被读取，且端口
+    /// 映射变更属于分钟级事件，20 秒间隔 + 无部署时零调用的成本可接受。
     pub fn with_cloud_monitor(self) -> Self {
-        let monitor = self.cloud_monitor.clone();
-        crate::cloudmon::spawn_cloud_monitor(Arc::clone(&self.gateway), monitor);
         // SSH 登录信息同样走后台刷新：它曾经在 HTTP 请求里持锁调厂商接口，
         // 缓存过期那一刻会把整个网关拖住（下载进度停滞、页面「连接失败」）。
         crate::sshmon::spawn_ssh_info_refresher(Arc::clone(&self.gateway));
