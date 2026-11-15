@@ -42,9 +42,7 @@ pub use mangosteen_orchestration::deployment::{
     CloudCandidateBrief, CloudInstanceBrief, CloudPreview, DeploymentPreview, PreparedDeployment,
 };
 use mangosteen_orchestration::Assessor;
-pub use mangosteen_orchestration::{
-    ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot, GatewayStatus, Orchestrator,
-};
+pub use mangosteen_orchestration::{ActiveDeployment, GatewayStatus, Orchestrator};
 use mangosteen_provider::orchestrator::CloudOrchestrator;
 
 /// 网关门面：第二层只保留编排核心的类型别名，HTTP 层通过它统一收口。

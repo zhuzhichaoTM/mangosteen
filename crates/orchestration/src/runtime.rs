@@ -50,40 +50,6 @@ pub struct GatewayStatus {
     pub active: Vec<ActiveDeployment>,
 }
 
-/// 活跃云端部署的定位信息（不含任何厂商调用）。
-#[derive(Debug, Clone, PartialEq)]
-pub struct CloudDeploymentRef {
-    /// 部署 ID
-    pub deployment_id: String,
-    /// 服务商驱动名
-    pub provider: String,
-    /// 厂商侧实例 ID
-    pub instance_id: String,
-    /// 模型 ID
-    pub model: String,
-    /// 部署状态
-    pub status: mangosteen_base::state::DeploymentStatus,
-}
-
-/// 云端部署的监控快照（设备页签数据源）。
-#[derive(Debug, Clone, PartialEq)]
-pub struct CloudMetricsSnapshot {
-    /// 部署 ID
-    pub deployment_id: String,
-    /// 服务商驱动名
-    pub provider: String,
-    /// 厂商侧实例 ID
-    pub instance_id: String,
-    /// 模型 ID
-    pub model: String,
-    /// 部署状态
-    pub status: mangosteen_base::state::DeploymentStatus,
-    /// 监控指标（`None` 表示服务商未提供监控能力）
-    pub metrics: Option<mangosteen_core::cloud::InstanceMetrics>,
-    /// 查询失败原因（与 `metrics` 互斥，用于就地提示）
-    pub error: Option<String>,
-}
-
 /// 一条活跃部署的概要。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveDeployment {

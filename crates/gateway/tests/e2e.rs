@@ -1885,55 +1885,11 @@ fn e2e_abort_keeps_file_when_not_downloaded_by_this_job() {
     assert!(gguf.is_file(), "delete_file=false 时不得删除模型文件");
 }
 
-// ============================================================ 设备页 · 云端监控
-
-/// `/api/sysinfo` 必须带 `cloud` 段，且本地部署时 `active=false`。
-///
-/// ## 为什么这条必须有守护
-///
-/// 设备页靠 `cloud.active` 决定显示云端区块还是本机区块。若这个字段
-/// 缺失或语义反转，用户在用云端算力时会看到本机 GPU 的读数，
-/// 进而误判「云端 GPU 没跑满」——这是排查性能问题时最耗时的一类错误。
-#[test]
-fn e2e_sysinfo_exposes_cloud_section() {
-    let env = TestEnv::new("syscloud");
-    let engine = env.write_fake_engine();
-    let cfg = env.config(&engine);
-    let gw = env.gateway(cfg);
-
-    let (listener, port) = bind_ephemeral();
-    let server = mangosteen_gateway::GatewayServer::new(
-        std::sync::Arc::new(gw),
-        false,
-        String::new(),
-        Duration::from_secs(20),
-    );
-    std::thread::spawn(move || {
-        let _ = server.serve(listener);
-    });
-    assert!(wait_port("127.0.0.1", port, Duration::from_secs(5)));
-
-    let (status, body) = http("GET", "127.0.0.1", port, "/api/sysinfo", None);
-    assert_eq!(status, 200);
-    let v: serde_json::Value = serde_json::from_str(&body).expect("sysinfo 必须是 JSON");
-
-    // 本地资源字段仍在（云端监控不能破坏原有契约）
-    assert!(v.get("cpu_usage").is_some(), "必须保留本机 CPU 采样");
-    assert!(v.get("deployments").is_some(), "必须保留部署列表");
-
-    let cloud = v.get("cloud").expect("必须带 cloud 段");
-    // 没有云端部署 → 明确标为「不活跃」，而不是缺字段
-    assert_eq!(
-        cloud.get("active").and_then(|x| x.as_bool()),
-        Some(false),
-        "无云端部署时必须给出 active=false：{cloud}"
-    );
-    // 未启用后台采集时 `pending=true`：前端据此显示「采集中」而非「无数据」
-    assert!(
-        cloud.get("pending").is_some(),
-        "必须能区分「采集中」与「无数据」：{cloud}"
-    );
-}
+// ============================================================ 设备页 · 云端监控（已移除）
+//
+// `/api/sysinfo` 不再返回 `cloud` 段：云端实例监控（GetCompShareInstanceMonitor）
+// 之前靠后台线程每 5 秒调用，控制台无页面消费该数据，且厂商有频率限制，
+// 整段采集已彻底移除，避免长期挂机被限流。
 
 /// 设备选择：选了「本地」就绝不静默上云。
 ///

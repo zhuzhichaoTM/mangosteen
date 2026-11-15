@@ -60,7 +60,6 @@ pub struct GatewayServer {
     pub(crate) upstream_timeout: Duration,
     pub(crate) sampler: mangosteen_platform::resmon::CpuSampler,
     pub(crate) pull_jobs: crate::pulljobs::PullJobs,
-    pub(crate) cloud_monitor: crate::cloudmon::CloudMonitor,
     /// 部署运行态探测缓存（`running` 字段）。
     ///
     /// `None` 表示未启用后台探测（测试构造的服务器）：此时
@@ -127,7 +126,6 @@ impl GatewayServer {
             upstream_timeout,
             sampler: mangosteen_platform::resmon::CpuSampler::new(),
             pull_jobs: crate::pulljobs::PullJobs::new(),
-            cloud_monitor: crate::cloudmon::CloudMonitor::new(),
             runtime_probe: None,
             sessions: mangosteen_session::SessionStore::new(
                 mangosteen_platform::paths::sessions_file(
@@ -146,23 +144,20 @@ impl GatewayServer {
         self
     }
 
-    /// 绑定云端监控缓存与 SSH 登录信息刷新。
+    /// 启用 SSH 登录信息的后台刷新。
     ///
-    /// 由 `serve` / `ui` 在启动时调用。不绑定也能正常工作——
-    /// 此时设备页的云端区域显示「未采集」，不会报错。
+    /// 由 `serve` / `ui` 在启动时调用。
     ///
-    /// ## 云端监控改为按需查询（不再有后台采集线程）
+    /// ## 云端实例监控（GetCompShareInstanceMonitor）已整体移除
     ///
-    /// 曾经后台线程每 5 秒调厂商 `GetCompShareInstanceMonitor`：
-    /// 网关一启动就开始打厂商 API，与有没有人看设备页无关，挂着不用
-    /// 也持续消耗配额。现改为 `/api/sysinfo` 请求驱动 + TTL 缓存
-    /// （见 [`crate::cloudmon`]），没人看 = 零请求 = 零配额。
+    /// 曾经后台线程每 5 秒调厂商监控接口（网关一启动就开始打，与有没有
+    /// 人看页面无关），而当前控制台并没有消费这些数据的页面，纯属消耗
+    /// 配额并可能被厂商限流。需要实例指标时走设置页的实例列表（用户
+    /// 主动操作，按需调用），不再有任何周期性查询。
     ///
-    /// SSH 登录信息保留后台刷新：它只在部署页打开时被读取，且端口
-    /// 映射变更属于分钟级事件，20 秒间隔 + 无部署时零调用的成本可接受。
+    /// SSH 登录信息保留后台刷新：它曾经在 HTTP 请求里持锁调厂商接口，
+    /// 缓存过期那一刻会把整个网关拖住（下载进度停滞、页面「连接失败」）。
     pub fn with_cloud_monitor(self) -> Self {
-        // SSH 登录信息同样走后台刷新：它曾经在 HTTP 请求里持锁调厂商接口，
-        // 缓存过期那一刻会把整个网关拖住（下载进度停滞、页面「连接失败」）。
         crate::sshmon::spawn_ssh_info_refresher(Arc::clone(&self.gateway));
         self
     }

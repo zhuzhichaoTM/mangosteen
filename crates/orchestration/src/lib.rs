@@ -42,7 +42,6 @@ pub use deployment::{
     PreparedDeployment, UnloadOutcome,
 };
 pub use orchestrator::{
-    scheduler_config_with_overrides, ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot,
-    GatewayStatus, Orchestrator,
+    scheduler_config_with_overrides, ActiveDeployment, GatewayStatus, Orchestrator,
 };
 pub use scheduler::{Decision, Scheduler, SchedulerOutcome};

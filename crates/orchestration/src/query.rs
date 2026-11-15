@@ -327,62 +327,6 @@ impl Orchestrator {
     ) -> MnResult<Option<DeploymentRecord>> {
         Ok(pick_reusable(self.state.list()?, model_id, gpu_model))
     }
-    /// 当前活跃的云端部署（**只读台账，不发网络请求**）。
-    ///
-    /// 设备页需要「现在用的是哪台云机器」才能去查监控。这里刻意只返回
-    /// 元信息，把厂商接口调用留给调用方在**锁外**执行——云端往返是
-    /// 百毫秒级，绝不能放在网关锁内（否则对话/状态等所有 API 都被拖慢）。
-    ///
-    /// 若有多个云端部署，取台账里**最近更新**的那个（与「当前在用」的直觉
-    /// 一致），避免同时打多个厂商接口。
-    pub fn active_cloud_deployment(&self) -> MnResult<Option<CloudDeploymentRef>> {
-        let Some(rec) = self
-            .state
-            .list_active()?
-            .into_iter()
-            .max_by_key(|r| r.updated_at)
-        else {
-            return Ok(None);
-        };
-
-        let (provider, instance_id) = match &rec.plan.origin {
-            ComputeOrigin::Cloud {
-                provider,
-                instance_id,
-            } => (provider.clone(), instance_id.clone()),
-        };
-
-        Ok(Some(CloudDeploymentRef {
-            deployment_id: rec.plan.id.clone(),
-            provider,
-            instance_id,
-            model: mangosteen_core::model::ModelEntry::derive_id(
-                &rec.plan.model.name,
-                rec.plan.model.quant,
-                rec.plan.model.alias.as_deref(),
-            ),
-            status: rec.status,
-        }))
-    }
-    /// 查询某云端实例的实时监控（**会发起网络请求**）。
-    ///
-    /// 调用方必须确保**不在持有网关锁时调用**它——单次往返约 0.5 秒，
-    /// 持锁会拖慢所有其它 API。后台采集线程（[`the gateway cloud monitor`]）
-    /// 的做法是「持锁取元信息 → 放锁 → 再持锁调用本方法」，看似持锁，
-    /// 但它运行在独立线程且频率被压到 5 秒一次，实际影响可接受；
-    /// HTTP 请求路径**绝不**调用本方法，只读缓存。
-    pub fn cloud_instance_metrics(
-        &self,
-        provider: &str,
-        instance_id: &str,
-    ) -> MnResult<Option<mangosteen_core::cloud::InstanceMetrics>> {
-        let cloud = self.cloud();
-        let Some(orch) = cloud.as_ref() else {
-            // 未配置云服务商：不是错误，设备页显示「未启用云端」即可
-            return Ok(None);
-        };
-        orch.instance_metrics(Some(provider), instance_id)
-    }
     /// 状态快照。（只读，不修改 state.json 数据）
     pub fn status(&self) -> MnResult<GatewayStatus> {
         let records = self.state.list()?;

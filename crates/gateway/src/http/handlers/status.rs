@@ -220,21 +220,6 @@ impl GatewayServer {
 
         let disk_free = mangosteen_platform::resmon::available_space(&hardware.1).ok();
 
-        // 云端监控：**按需查询**——请求驱动，TTL 缓存防连击。
-        //
-        // 曾经后台线程每 5 秒打厂商 API（网关一启动就开始，没人看也打），
-        // 现改为只有 `/api/sysinfo` 被请求时才穿透到厂商，10 秒内重复
-        // 请求（多标签页/轮询）直接读缓存。厂商调用不在网关锁内执行
-        // （两段式边界见 cloudmon 模块文档）。
-        let cloud = {
-            let gw = self.gateway.as_ref();
-            if !self.cloud_monitor.is_fresh() {
-                let monitor = self.cloud_monitor.clone();
-                crate::cloudmon::refresh_on_demand(gw, &monitor);
-            }
-            self.cloud_section()
-        };
-
         Response::json(
             200,
             &serde_json::json!({
@@ -255,54 +240,7 @@ impl GatewayServer {
                 })).collect::<Vec<_>>(),
                 "disk_free_bytes": disk_free,
                 "deployments": dep_json,
-                "cloud": cloud,
             }),
         )
-    }
-    /// 设备页的「云端算力」段。
-    ///
-    /// 返回 `active: false` 表示**当前用的是本地算力**——这不是错误，
-    /// 前端据此隐藏云端区域。只有真的查询失败时才带 `error`。
-    pub(crate) fn cloud_section(&self) -> serde_json::Value {
-        let (snapshot, error, age_ms) = self.cloud_monitor.read();
-
-        let Some(snap) = snapshot else {
-            // 无快照：要么本地部署，要么首轮采集还没完成。
-            // 用 `pending` 让前端区分「不适用」与「稍等就有」。
-            return serde_json::json!({
-                "active": false,
-                "pending": age_ms.is_none(),
-                "error": error,
-            });
-        };
-
-        // 指标保持 0~1 比例，与本地 `cpu_usage` 语义一致，格式化交给前端。
-        let metrics = snap.metrics.as_ref().map(|m| {
-            serde_json::json!({
-                "cpu_usage": m.cpu_usage,
-                "memory_usage": m.memory_usage,
-                "gpu_usage": m.gpu_usage,
-                "gpu_memory_usage": m.gpu_memory_usage,
-                "disk_usage": m.disk_usage,
-                "data_disk_usage": m.data_disk_usage,
-                "sampled_at": m.sampled_at,
-                "has_any": m.has_any(),
-            })
-        });
-
-        serde_json::json!({
-            "active": true,
-            "pending": false,
-            "deployment_id": snap.deployment_id,
-            "provider": snap.provider,
-            "instance_id": snap.instance_id,
-            "model": snap.model,
-            "status": snap.status.as_str(),
-            "metrics": metrics,
-            // 该服务商是否提供监控（`metrics` 为 null 即不支持）
-            "supported": snap.metrics.is_some(),
-            "age_ms": age_ms,
-            "error": error.or(snap.error),
-        })
     }
 }

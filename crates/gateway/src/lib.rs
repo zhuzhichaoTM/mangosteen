@@ -32,7 +32,6 @@
 //!
 //! 这三条由 `tests/layering.rs` 与 `scheduler::tests` 里的不变量测试共同守护。
 
-pub mod cloudmon;
 pub mod gateway;
 pub mod http;
 pub mod sshmon;
@@ -44,11 +43,7 @@ pub mod pulljobs;
 pub mod runprobe;
 pub mod server;
 
-pub use cloudmon::{refresh_on_demand, CloudMonitor};
-pub use gateway::{
-    ActiveDeployment, CloudDeploymentRef, CloudMetricsSnapshot, Gateway, GatewayBuilder,
-    GatewayStatus,
-};
+pub use gateway::{ActiveDeployment, Gateway, GatewayBuilder, GatewayStatus};
 pub use mangosteen_orchestration::progress;
 pub use mangosteen_orchestration::progress::{noop_sink, DeployStage, StageEvent, StageOutcome};
 pub use mangosteen_orchestration::{assess, scheduler};
