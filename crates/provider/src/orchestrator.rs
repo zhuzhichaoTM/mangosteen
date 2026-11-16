@@ -1704,24 +1704,46 @@ fn wait_until_running_on(
 /// 之后所有连接（探测、下载、启动、隧道）一律用密钥 + `BatchMode=yes`。
 /// 密钥认证没有交互、没有临时文件、没有时序依赖，天然可靠。
 ///
-/// 密钥安装失败时才退回密码——那是「能用但脆」的降级路径，不是主路径。
+/// ## 修复（safety 分支）：恢复密钥安装主路径
 ///
-/// `fixed_password` 参数保留以兼容调用点，但所有云端实例均强制
-/// 使用 `vendor_password_target` 返回的固定密码 "1qaz@WSX"，
-/// 跳过公钥安装，直接走密码认证，避免免密探测卡住。
+/// 历史上这里被改成「强制固定密码、跳过公钥安装」，原因是早期免密探测
+/// 卡住。但代价是**守护网关重建隧道时只能走 askpass 密码认证**——macOS
+/// 后台进程无 GUI 会话，`Brokered program policy check unavailable` 会拦下
+/// askpass 脚本，隧道反复断开（表现为「部署突然不可用」）。
+///
+/// 现在恢复主路径：用密码（一次性）把本机公钥幂等装进远端 authorized_keys，
+/// 之后所有连接（含守护网关的隧道重建）一律密钥认证——无交互、无临时
+/// 文件、无 askpass，天然不受 macOS 策略拦截。公钥安装失败（密码错 /
+/// sshd 禁 root）才降级回密码 target。
 fn ensure_key_target(
     instance: &Instance,
     config: &OrchestratorConfig,
     _fixed_password: Option<&str>,
 ) -> MnResult<mangosteen_device::remote::SshTarget> {
-    // vendor_password_target 已经强制返回固定密码 "1qaz@WSX"，
-    // 直接返回，无需安装公钥，避免免密探测卡住。
     let base = vendor_password_target(instance, config)?;
-    eprintln!(
-        "[cloud] ✓ 实例 {} 已使用固定密码认证（免密探测已跳过）",
-        instance.id
-    );
-    Ok(base)
+    // 密钥安装：幂等（装过直接命中），失败不致命——降级回密码 target。
+    match mangosteen_device::remote::install_ssh_copy_id(&base) {
+        Ok(identity_file) => {
+            eprintln!(
+                "[cloud] ✓ 实例 {} 已配置密钥认证（隧道重建将不再依赖 askpass）",
+                instance.id
+            );
+            Ok(mangosteen_device::remote::SshTarget {
+                host: base.host,
+                port: base.port,
+                user: base.user,
+                password: None,
+                identity_file: Some(identity_file),
+            })
+        }
+        Err(e) => {
+            eprintln!(
+                "[cloud] ⚠ 实例 {} 公钥安装失败（{}），降级为密码认证——守护隧道可能受 askpass 拦截影响",
+                instance.id, e
+            );
+            Ok(base)
+        }
+    }
 }
 
 /// 由远端连接信息构造隧道参数（云实例与自建设备共用）。
