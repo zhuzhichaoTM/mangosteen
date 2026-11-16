@@ -1398,7 +1398,12 @@ fn restore_login_credential(
 
             // 重置指令已受理，等待 sshd 加载新密码（厂商异步生效窗口）
             const SETTLE_SECS: u64 = 5;
-            const VERIFY_ROUNDS: u32 = 3;
+            // 验证轮次：2 轮（每轮间隔 3s）足够覆盖厂商密码生效窗口。
+            // 3 轮是历史遗留的过度保守——第 3 轮几乎不会成功（前两轮
+            // 已等 6s+，sshd 早该加载新密码），多等一轮只是把「失败 →
+            // 重启实例」的处置推迟 3s。2 次失败立即进入重启流程，
+            // 重启后还有一轮完整验证兜底，可靠性不降、恢复更快。
+            const VERIFY_ROUNDS: u32 = 2;
             const RETRY_INTERVAL_SECS: u64 = 3;
 
             eprintln!(
