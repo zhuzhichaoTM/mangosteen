@@ -947,18 +947,24 @@ impl CloudOrchestrator {
                 stage: "读取 SSH 信息".to_string(),
                 reason: format!("实例 {} 未返回 SSH 地址，无法建立隧道", instance.id),
             })?;
+        // 与部署路径统一：走 ensure_key_target（幂等装公钥 → 密钥认证）。
+        // 历史上这里硬编码 identity_file: None + 密码，导致守护网关重建隧道
+        // 只能走 askpass 密码认证，macOS 后台进程策略拦截（Brokered program
+        // policy check unavailable）→ 隧道反复断 → 部署突然不可用。
+        // 密钥认证无交互/无 askpass，守护进程也能稳定重建。
+        let ssh = ensure_key_target(instance, &self.config, None)?;
         Ok(TunnelSpec {
-            ssh_host,
-            ssh_port: instance.network.ssh_port.unwrap_or(22),
-            ssh_user: "root".to_string(),
-            identity_file: None,
+            ssh_host: ssh.host,
+            ssh_port: ssh.port,
+            ssh_user: ssh.user,
+            identity_file: ssh.identity_file,
             forwards: vec![mangosteen_core::net::PortForward::loopback(
                 local_port.unwrap_or(0),
                 plan.engine_port,
             )],
             control_master: true,
             allow_unready_remote: false,
-            password: instance.network.ssh_password.clone(),
+            password: ssh.password,
         })
     }
 
