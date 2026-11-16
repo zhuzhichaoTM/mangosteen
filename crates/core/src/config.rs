@@ -192,6 +192,22 @@ pub struct CloudConfig {
     /// API Key 鉴权与安全组限制就位（编排层会打印 safety-warn 提示）。
     #[serde(default = "default_bind_host")]
     pub bind_host: String,
+    /// 上游 llama-server 的固定 API Key（safety 分支，改动点 2）。
+    ///
+    /// 优先级：本配置 → 台账已定钥（同一次部署复用）→ 随机生成。
+    /// 支持引用形式（明文不落配置）：
+    ///
+    /// ```toml
+    /// [cloud]
+    /// api_key = { file = "/path/to/key" }   # 文件内容为单行 key
+    /// # 或
+    /// api_key = { env = "MN_CLOUD_API_KEY" }
+    /// ```
+    ///
+    /// 不配置时行为不变：部署计划阶段随机生成并持久化台账，重启/恢复
+    /// 路径复用同一把 key（不会每次启动换新钥导致网关 400）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<SecretRef>,
 }
 
 fn default_bind_host() -> String {
@@ -214,6 +230,7 @@ impl Default for CloudConfig {
             hf_token: None,
             llama_server_url: default_llama_server_url(),
             bind_host: default_bind_host(),
+            api_key: None,
         }
     }
 }

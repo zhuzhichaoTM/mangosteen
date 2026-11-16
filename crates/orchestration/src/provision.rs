@@ -66,16 +66,30 @@ impl Orchestrator {
             );
         }
         let mut launch = plugin.launch_config(&plan.engine, bind_host, plan.engine_port);
-        // 任务级 API Key（safety 分支，改动点 2）：每次启动生成新随机 key，
-        // 由 start_llama_server_with_key 写入远端密钥文件并追加
-        // --api-key-file。密钥不进 argv、不进日志、不进台账。
-        // 注意：不能用 `InferenceEngine::LlamaCpp` 字面量做引擎分支——
-        // C3 架构约束要求引擎差异收敛在插件层。改为对「插件返回的
-        // launch args 里没有既存 key flag」的通用启动补 key：对未实现
-        // 鉴权的引擎（ollama 等）launch.api_key 为 None，本逻辑照常
-        // 赋 key 但 start 侧的 has_key_flag 检查会跳过注入，行为安全。
+        // 任务级 API Key（safety 分支，改动点 2）解析优先级：
+        //
+        // 1. **config 固定 key**（`[cloud] api_key`，支持 file/env 引用）——
+        //    用户显式配置时所有部署共用一把，网关与上游天然一致；
+        // 2. **台账已定钥**（`plan.api_key`）——同一部署的重启/恢复路径
+        //    复用计划阶段的 key，绝不换钥（历史上这里每次启动重新生成，
+        //    台账存 A、实例用 B，网关持 A 调只认 B 的上游 → 400）；
+        // 3. **随机生成**——全新部署且用户未配置时的兜底。
+        //
+        // 密钥由 start_llama_server_with_key 写入远端 600 文件并追加
+        // --api-key-file，不进 argv、不进日志。
         if launch.api_key.is_none() {
-            launch.api_key = Some(Self::generate_api_key());
+            let env = &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>;
+            let configured = config
+                .cloud
+                .api_key
+                .as_ref()
+                .and_then(|r| r.resolve(env).ok())
+                .filter(|k| !k.trim().is_empty());
+            launch.api_key = Some(
+                configured
+                    .or_else(|| plan.api_key.clone())
+                    .unwrap_or_else(Self::generate_api_key),
+            );
         }
         Ok(launch)
     }
@@ -1232,4 +1246,54 @@ pub(crate) fn generate_api_key_pub() -> String {
             std::process::id() as u64
         )
     })
+}
+
+#[cfg(test)]
+mod safety_key_tests {
+    use super::*;
+
+    /// 纯函数版优先级解析（与 cloud_launch_config 内联逻辑同构）：
+    /// config 配置 → 台账定钥 → 随机生成。
+    fn resolve_key_priority(
+        configured: Option<String>,
+        ledger_key: Option<String>,
+        generated: &str,
+    ) -> String {
+        configured
+            .filter(|k| !k.trim().is_empty())
+            .or(ledger_key)
+            .unwrap_or_else(|| generated.to_string())
+    }
+
+    /// 用户配置固定 key 时，台账与启动一致使用配置值。
+    #[test]
+    fn configured_key_wins_over_ledger_and_random() {
+        let key = resolve_key_priority(
+            Some("my-fixed-key".into()),
+            Some("ledger-key".into()),
+            "random-key",
+        );
+        assert_eq!(key, "my-fixed-key");
+    }
+
+    /// 未配置时复用台账定钥（重启/恢复路径绝不换钥——修复 400 bug）。
+    #[test]
+    fn ledger_key_reused_when_not_configured() {
+        let key = resolve_key_priority(None, Some("ledger-key".into()), "random-key");
+        assert_eq!(key, "ledger-key");
+    }
+
+    /// 全新部署且未配置：随机兜底。
+    #[test]
+    fn random_key_when_nothing_configured() {
+        let key = resolve_key_priority(None, None, "random-key");
+        assert_eq!(key, "random-key");
+    }
+
+    /// 空白配置视同未配置（filter 语义）。
+    #[test]
+    fn blank_config_falls_through_to_ledger() {
+        let key = resolve_key_priority(Some("   ".into()), Some("ledger-key".into()), "r");
+        assert_eq!(key, "ledger-key");
+    }
 }
