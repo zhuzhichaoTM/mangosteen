@@ -956,12 +956,25 @@ pub fn ssh_exec_with_stdin(
     args.push(format!("{}@{}", target.user, target.host));
     args.push(cmd.to_string());
 
-    let mut child = Command::new(mangosteen_platform::ssh::ssh_binary_name())
+    // 关键：密码认证时设置 SSH_ASKPASS——否则 ssh 会从 stdin 读取密码
+    // 提示的响应，而 stdin 里是密钥内容，认证失败导致远端命令根本没执行。
+    // 与 ssh_exec_once_opts 保持一致（safety 实测：少了这段环境变量，
+    // `cat > .llama_api_key` 静默失败，密钥文件不存在）。
+    let mut command = Command::new(mangosteen_platform::ssh::ssh_binary_name());
+    command
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    if let Some(ap) = &askpass {
+        command
+            .env("SSH_ASKPASS", ap.script_arg())
+            .env("SSH_ASKPASS_REQUIRE", "force");
+        #[cfg(not(target_os = "windows"))]
+        command.env("DISPLAY", ":0");
+    }
+
+    let mut child = command.spawn();
     let child = match &mut child {
         Ok(c) => c,
         Err(e) => {
@@ -972,9 +985,8 @@ pub fn ssh_exec_with_stdin(
             });
         }
     };
-    // SSH_ASKPASS 环境必须在 spawn 前设置；Command::spawn 已经执行，
-    // 这里通过 env_clear 重建成本高——askpass 仅密码认证需要，
-    // safety 链路的密钥认证场景不依赖它，失败时错误信息即可定位。
+    // stdin 写入：密钥内容写入管道后关闭写端，ssh 转发 EOF 给远端命令。
+    // （SSH_ASKPASS 已在 spawn 前设置，ssh 不会从 stdin 读密码响应）
     let write_result = child
         .stdin
         .take()

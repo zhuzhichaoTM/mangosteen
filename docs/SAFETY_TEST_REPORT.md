@@ -84,12 +84,43 @@ TOTAL: 917 passed, 0 failed（新增测试全过，无回归）
 | 12 destroy | 平台 API（Q3 已确认）+ 脚本 teardown.sh |
 | 13 prompt 卫生 | 下期（Q6 已确认暂缓） |
 
-## 4. 遗留事项（下期/待实测）
+## 4. 云端实测结果（2026-11-16 17:00，V100S 32GB 实例）
 
-1. **云端实证**：拉一台 3090/V100S 实例跑完整链路——deploy（验证 127.0.0.1 绑定生效）→ 隧道 /health（验证探活带 key）→ 无 key curl 401 / 带 key 200 → teardown destroy。
-2. **`--api-key file:` vs `--api-key-file`**：代码采用 `--api-key-file`（业界主流工具链文档一致）；若远端 llama-server 版本用 `file:` 语法，需按 §2.4 实测结果调整 `start_llama_server_with_key`。
+**发布件安装**：`cargo build --release -p mangosteen-cli` → 打包 → 解压安装到 `/usr/local/bin/mangosteen`（sha256 `8459dda1...`）。
+
+**实测环境与结论**：
+
+| 验证项 | 命令 | 结果 |
+|--------|------|------|
+| llama-server 绑定回环 | 实例内 `ps aux \| grep llama-server` | ✅ `--host 127.0.0.1 --port 8080`（改动点 1 生效，非 0.0.0.0） |
+| API Key 文件 | `ls -la /root/mangosteen/.llama_api_key` | ✅ `-rw------- 1 root root 64`（600 权限、64 字节、无尾换行） |
+| 实例内无 key 鉴权 | `curl http://127.0.0.1:8080/v1/models` | ✅ `401`（正确拒绝） |
+| 实例内带 key 鉴权 | `curl -H "Authorization: Bearer $(cat ...)" ...` | ✅ `200`（正确放行） |
+| 公网直连 8080 | 本地 `curl -m8 http://117.50.131.174:8080/v1/models` | ✅ `000`（不可达——回环绑定 + 安全组生效） |
+| 本地隧道无 key | `curl http://127.0.0.1:11435/v1/models` | ✅ `401` |
+| 本地隧道带 key | `curl -H "Authorization: Bearer <key>" ...` | ✅ `200` |
+| 推理端到端 | `POST /v1/chat/completions`（带 key，max_tokens=32） | ✅ `content: "OK"`，正常返回 |
+
+**结论**：改动点 1（回环绑定）与改动点 2（任务级 API Key）在真实云端 V100S 实例上**全部生效**，鉴权 401/200 行为与预期一致，推理链路端到端可用。
+
+### 实测中发现的问题与处置
+
+1. **`ssh_exec_with_stdin` 缺 SSH_ASKPASS 环境变量（已修复）**：
+   首次部署 llama-server 启动失败——`failed to open file '/root/mangosteen/.llama_api_key'`。根因是 `ssh_exec_with_stdin` 未像 `ssh_exec_once_opts` 那样设置 `SSH_ASKPASS`，ssh 把 stdin 里的密钥内容当成密码提示响应，认证失败导致远端 `cat > file` 没执行。修复：在 spawn 前加 `SSH_ASKPASS`/`SSH_ASKPASS_REQUIRE=force`/`DISPLAY=:0`，重新编译部署后密钥文件正确写入。
+
+2. **实例 SSH 在 23 端口（非 22）**：mangosteen 台账 `node_ssh_port=23`，与安全组放行的 22 不一致——这是平台/镜像配置（实例 `SshLoginCommand = ssh -p 23 root@...`），与 safety 代码无关；用户手动 `ssh` 需带 `-p 23`。
+
+3. **守护网关 askpass 被 macOS 拦截**：`ui restart` 后守护网关重建隧道失败——`Brokered program policy check unavailable / Permission denied`（macOS 对后台守护进程 spawn 子进程的拦截）。**非 safety 代码问题**，CLI 前台 deploy 不受影响；实测用 `expect` + 平台返回密码手动建隧道完成验证。
+
+4. **实例密码由平台生成**：mangosteen 不配置密码——`DescribeCompShareInstance` 响应的 `Password` 字段（base64）实时取回，8 字节随机密码；用户手动 SSH 需从平台 API 或控制台获取。
+
+## 5. 遗留事项（下期/待实测）
+
+1. **teardown destroy**：实测实例仍在 running（V100S，`uhost-1xme1snxs4eo`）——需执行 `mangosteen stop --all` + `mangosteen cloud instances destroy compshare/uhost-1xme1snxs4eo` 停止计费（用户确认后执行）。
+2. **`--api-key file:` vs `--api-key-file`**：代码采用 `--api-key-file`（实测实例版本接受，无需调整）。
 3. **api_key 的 UI 可见性**：`GET /api/status` 会透传 `api_key`（ActiveDeployment）——管理面内网使用可接受，若上公网需确认网关鉴权（`require_key`）已开启。
-4. 存量 5 项失败测试建议单独立 issue 修复（与 safety 无关）。
+4. **守护网关 askpass macOS 拦截**：`ui restart` 后守护隧道重建失败的环境问题，建议单独立 issue（与 safety 无关，但影响长稳运行）。
+5. 存量 5 项失败测试建议单独立 issue 修复（与 safety 无关）。
 
 ---
-*报告版本 v1.0 · 2026-11-16 · 分支 safety · 基于 917 项测试通过（0 新增失败）*
+*报告版本 v1.1 · 2026-11-16 · 分支 safety · 917 项测试通过（0 新增失败）+ 云端 V100S 实测全链路生效*
