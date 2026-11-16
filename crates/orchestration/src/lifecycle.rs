@@ -163,7 +163,12 @@ impl Orchestrator {
                 // 等待健康检查通过
                 let health = format!("http://127.0.0.1:{local_port}/health");
                 let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
-                match mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2)) {
+                // safety 分支（改动点 2）：探活携带 API Key——启用
+                // --api-key-file 的 llama-server 对 /health 同样鉴权
+                let probe_key = cloud_plan.api_key.as_deref();
+                match mangosteen_device::remote::wait_http_ready_with_key(
+                    &health, timeout, Duration::from_secs(2), probe_key,
+                ) {
                     Ok(_) => {
                         // 健康检查通过，更新台账为 ready
                         if let Err(e) = self.state.set_status(&id, DeploymentStatus::Ready, None) {
@@ -1429,9 +1434,14 @@ impl Orchestrator {
                             return Err(e);
                         }
                     };
-                    if let Err(e) =
-                        self.finish_start(id, local_port, &target.host, target.port, sink)
-                    {
+                    if let Err(e) = self.finish_start(
+                        id,
+                        local_port,
+                        &target.host,
+                        target.port,
+                        sink,
+                        cloud_plan.api_key.as_deref(),
+                    ) {
                         mark_failed(&self.state, &e);
                         return Err(e);
                     }
@@ -1500,7 +1510,14 @@ impl Orchestrator {
                     })?;
                 let host = verified_ssh.host.clone();
                 let ssh_port = verified_ssh.port;
-                if let Err(e) = self.finish_start(id, local_port, &host, ssh_port, sink) {
+                if let Err(e) = self.finish_start(
+                    id,
+                    local_port,
+                    &host,
+                    ssh_port,
+                    sink,
+                    cloud_plan.api_key.as_deref(),
+                ) {
                     mark_failed(&self.state, &e);
                     return Err(e);
                 }
@@ -1517,12 +1534,15 @@ impl Orchestrator {
         node_host: &str,
         node_ssh_port: u16,
         sink: crate::progress::ProgressSink<'_>,
+        api_key: Option<&str>,
     ) -> MnResult<()> {
         use crate::progress::{DeployStage, StageOutcome};
 
         let health = format!("http://127.0.0.1:{local_port}/health");
         let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
-        mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2))?;
+        mangosteen_device::remote::wait_http_ready_with_key(
+            &health, timeout, Duration::from_secs(2), api_key,
+        )?;
         sink(
             DeployStage::Launching,
             StageOutcome::Done,

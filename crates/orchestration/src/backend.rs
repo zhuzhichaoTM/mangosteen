@@ -13,6 +13,13 @@ pub struct BackendTarget {
     pub model_id: String,
     /// 算力来源描述（写入响应与健康检查）
     pub origin_label: String,
+    /// 上游 API Key（safety 分支，改动点 2）。
+    ///
+    /// 有值时网关转发（流式 curl 与非流式 http_post_json）会附
+    /// `Authorization: Bearer <key>`——适配启用 `--api-key-file` 的
+    /// llama-server。同源部署（本地 127.0.0.1）无 key 时为 `None`，
+    /// 行为与旧版完全一致。
+    pub api_key: Option<String>,
 }
 
 impl BackendTarget {

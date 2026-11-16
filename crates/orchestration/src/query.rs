@@ -185,6 +185,8 @@ impl Orchestrator {
 
             // 远端推理端口（云端实例上的 llama-server 监听端口）
             let remote_port = r.plan.cloud.as_ref().map(|c| c.engine_port);
+            // 上游 API Key（safety 分支，改动点 2）：随台账透传给网关
+            let api_key = r.plan.cloud.as_ref().and_then(|c| c.api_key.clone());
 
             out.push(ActiveDeployment {
                 id: id.clone(),
@@ -203,6 +205,7 @@ impl Orchestrator {
                 port: r.plan.local_access_port(),
                 remote_port,
                 ready,
+                api_key,
             });
         }
         Ok(out)
@@ -218,6 +221,9 @@ impl Orchestrator {
                 port: *port,
                 model_id: model_id.clone(),
                 origin_label: "remote-inference".to_string(),
+                // 配置态远端路由（remote_inference）：key 由调用方自行配置，
+                // 这里保持 None（不假设鉴权形态）。
+                api_key: None,
             });
         }
         let active = self.refresh()?;
@@ -229,6 +235,7 @@ impl Orchestrator {
                 port: a.port.unwrap(),
                 model_id: a.model.clone(),
                 origin_label: a.origin.label(),
+                api_key: a.api_key.clone(),
             });
         }
         Err(MnError::bad_request(
@@ -251,6 +258,7 @@ impl Orchestrator {
                     port: *port,
                     model_id: id.to_string(),
                     origin_label: "remote-inference".to_string(),
+                    api_key: None,
                 });
             }
         } else if let Some((model_id, port)) = self.routes().iter().next() {
@@ -259,6 +267,7 @@ impl Orchestrator {
                 port: *port,
                 model_id: model_id.clone(),
                 origin_label: "remote-inference".to_string(),
+                api_key: None,
             });
         }
         let Some(id) = want
@@ -286,6 +295,7 @@ impl Orchestrator {
                 port: a.port.unwrap(),
                 model_id: a.model.clone(),
                 origin_label: a.origin.label(),
+                api_key: a.api_key.clone(),
             }),
             None => {
                 let running: Vec<&str> = active
@@ -346,6 +356,7 @@ impl Orchestrator {
                 port: r.plan.local_access_port(),
                 remote_port: r.plan.cloud.as_ref().map(|c| c.engine_port),
                 ready: r.run_status == mangosteen_base::state::RunStatus::Active,
+                api_key: r.plan.cloud.as_ref().and_then(|c| c.api_key.clone()),
             })
             .collect();
         Ok(GatewayStatus {
@@ -428,6 +439,7 @@ mod tests {
                 engine_port: 8080,
                 mmproj_path: None,
                 draft_model_path: None,
+                api_key: None,
                 auxiliary_downloads: Vec::new(),
                 local_port: 0,
                 engine,

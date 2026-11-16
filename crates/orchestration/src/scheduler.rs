@@ -420,6 +420,9 @@ impl Scheduler {
             engine_port: mangosteen_device::remote::LLAMA_CPP_PORT,
             mmproj_path: mmproj_file,
             draft_model_path: draft_file,
+            // 任务级 API Key（safety 分支，改动点 2）：部署计划生成即定钥，
+            // 随台账持久化；启动时写远端密钥文件、网关转发时附 Bearer 头。
+            api_key: Some(crate::orchestrator::generate_api_key_pub()),
             auxiliary_downloads: deploy_spec
                 .aux_files
                 .iter()
@@ -961,6 +964,7 @@ mod tests {
             engine_port: 8080,
             mmproj_path: None,
             draft_model_path: None,
+            api_key: None,
             auxiliary_downloads: Vec::new(),
             download_url: None,
             download_bytes: None,

@@ -7,7 +7,7 @@ use mangosteen_core::openai::{ChatRequest, ErrorResponse};
 use mangosteen_core::{MnError, MnResult};
 
 use crate::http::server::*;
-use crate::http::upstream::{http_post_json, summarize_body};
+use crate::http::upstream::{http_post_json_with_key, summarize_body};
 use crate::protocol::{self, BackendTarget};
 
 impl GatewayServer {
@@ -149,7 +149,7 @@ impl GatewayServer {
     /// 转发 JSON 请求到上游，并把上游响应归一化。
     pub(crate) fn forward_json(&self, path: &str, body: &[u8], target: &BackendTarget) -> Response {
         let url = target.url_for(path);
-        match http_post_json(&url, body, self.upstream_timeout) {
+        match http_post_json_with_key(&url, body, self.upstream_timeout, target.api_key.as_deref()) {
             Ok((status, resp_body)) => {
                 // 上游错误 → 归一化
                 if !(200..300).contains(&status) {
@@ -311,6 +311,7 @@ pub(crate) fn rebuild_snapshot(
                 port,
                 model_id,
                 origin_label: record.plan.origin.label(),
+                api_key: record.plan.cloud.as_ref().and_then(|c| c.api_key.clone()),
             },
         );
     }

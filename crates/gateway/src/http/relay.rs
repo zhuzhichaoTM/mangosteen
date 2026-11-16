@@ -82,8 +82,8 @@ impl GatewayServer {
 
         // ---- 拉起 curl ----
         let timeout = self.upstream_timeout.max(Duration::from_secs(600));
-        let mut child = std::process::Command::new("curl")
-            .arg("--no-buffer")
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("--no-buffer")
             .arg("--silent")
             .arg("--show-error")
             .arg("--noproxy")
@@ -93,7 +93,14 @@ impl GatewayServer {
             .arg("-X")
             .arg("POST")
             .arg("-H")
-            .arg("Content-Type: application/json")
+            .arg("Content-Type: application/json");
+        // safety 分支（改动点 2）：上游启用 --api-key-file 时携带 Bearer。
+        // 密钥从内存构造 curl argv（本地进程短暂可见，与「远端 argv/日志」
+        // 的封堵目标不冲突）；绝不落盘、绝不进日志。
+        if let Some(key) = &target.api_key {
+            cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
+        }
+        let mut child = cmd
             .arg("--data-binary")
             .arg("@-")
             .arg(&url)

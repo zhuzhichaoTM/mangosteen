@@ -257,4 +257,20 @@ mod tests {
         );
         assert!(args.contains(&"/models/q.gguf".to_string()));
     }
+
+    /// safety 分支（改动点 1）：bind_host 由调用方注入——回环地址产出
+    /// 回环监听参数，保证「默认安全」在适配器层原样传导。
+    #[test]
+    fn bind_host_loopback_is_passed_through() {
+        let p = plan();
+        let args = llama_cpp_args(&p, "127.0.0.1", 8080);
+        assert_eq!(
+            args[args.iter().position(|a| a == "--host").unwrap() + 1],
+            "127.0.0.1",
+            "回环 bind_host 必须原样出现在 --host 后"
+        );
+        // 显式非回环（用户自担风险配置）同样透传，绑定语义唯一来源是配置
+        let args2 = llama_cpp_args(&p, "0.0.0.0", 8080);
+        assert_eq!(args2[args2.iter().position(|a| a == "--host").unwrap() + 1], "0.0.0.0");
+    }
 }

@@ -2439,11 +2439,19 @@ pub fn start_node_engine(
     };
     // 启动命令包含动态库路径：官方压缩包中的 llama-server 依赖同目录的
     // libllama-server-impl.so，不能假设远端系统已配置 ld.so.cache。
+    // safety 分支（改动点 2）：`launch.api_key` 为 Some 时走带密钥启动——
+    // 密钥写远端 600 文件 + 追加 --api-key-file，不进 argv/日志。
     // 启动失败时清理残留进程并重试 3 次（初次尝试 + 3 次重试）。
     const MAX_START_RETRIES: u32 = 3;
     let mut last_error = None;
     for attempt in 0..=MAX_START_RETRIES {
-        match mangosteen_device::remote::start_llama_server(target, &bin, &launch.args, &workdir) {
+        match mangosteen_device::remote::start_llama_server_with_key(
+            target,
+            &bin,
+            &launch.args,
+            &workdir,
+            launch.api_key.as_deref(),
+        ) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last_error = Some(e.to_string());
@@ -2879,6 +2887,7 @@ mod tests {
             engine_port: 8080,
             mmproj_path: None,
             draft_model_path: None,
+            api_key: None,
             auxiliary_downloads: Vec::new(),
             local_port: 11435,
             engine,

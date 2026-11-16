@@ -11,6 +11,10 @@ mod cloud;
 #[path = "evaluate.rs"]
 mod evaluate;
 
+// safety 分支（改动点 2）：任务级 API Key 生成函数 re-export，
+// 供 scheduler 构建部署计划时调用（CloudPlan::api_key 定钥）。
+pub(crate) use cloud::generate_api_key_pub;
+
 /// 本地部署移除后的固定说明（评估与拒绝路径共用，避免文案漂移）。
 const LOCAL_REMOVED: &str = "本地推理已交由 Ollama 承担，Mangosteen 只部署到远端节点";
 

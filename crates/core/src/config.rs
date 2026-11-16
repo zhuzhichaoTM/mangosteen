@@ -185,6 +185,17 @@ pub struct CloudConfig {
     /// 远端没有 `llama-server` 时会下载这个包并解压。统一发布包源。
     #[serde(default = "default_llama_server_url")]
     pub llama_server_url: String,
+    /// 云端 llama-server 的监听地址（safety 分支，改动点 1）。
+    ///
+    /// **安全默认 `127.0.0.1`**：服务只绑回环，公网不可达，访问经 SSH
+    /// 隧道转发。需要直接对外暴露时显式改为 `"0.0.0.0"`，并自行确保
+    /// API Key 鉴权与安全组限制就位（编排层会打印 safety-warn 提示）。
+    #[serde(default = "default_bind_host")]
+    pub bind_host: String,
+}
+
+fn default_bind_host() -> String {
+    "127.0.0.1".to_string()
 }
 
 fn default_remote_workdir() -> String {
@@ -202,6 +213,7 @@ impl Default for CloudConfig {
             remote_workdir: default_remote_workdir(),
             hf_token: None,
             llama_server_url: default_llama_server_url(),
+            bind_host: default_bind_host(),
         }
     }
 }

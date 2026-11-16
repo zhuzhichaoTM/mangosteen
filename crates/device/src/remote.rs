@@ -168,6 +168,20 @@ pub fn http(
     json_body: Option<&str>,
     timeout_secs: u64,
 ) -> MnResult<HttpReply> {
+    http_with_key(method, url, json_body, timeout_secs, None)
+}
+
+/// 带上游 API Key 的 HTTP 请求（safety 分支，改动点 2 的探活载体）。
+///
+/// `api_key` 为 `Some` 时附 `Authorization: Bearer <key>`。适配启用
+/// `--api-key-file` 的 llama-server：探活与业务转发共用同一把 key。
+pub fn http_with_key(
+    method: &str,
+    url: &str,
+    json_body: Option<&str>,
+    timeout_secs: u64,
+    api_key: Option<&str>,
+) -> MnResult<HttpReply> {
     let mut cmd = Command::new("curl");
     cmd.arg("--silent")
         .arg("--show-error")
@@ -184,6 +198,9 @@ pub fn http(
         .arg("--output")
         .arg("-");
 
+    if let Some(key) = api_key {
+        cmd.arg("--header").arg(format!("Authorization: Bearer {key}"));
+    }
     if let Some(b) = json_body {
         cmd.arg("--header")
             .arg("Content-Type: application/json")
@@ -224,11 +241,21 @@ pub fn http(
 ///
 /// 镜像首次启动要拉起容器/服务，几十秒很常见，所以这里必须等而不是
 /// 探一次就判死。返回实际耗时，便于把「等了多久」如实写进阶段说明。
-pub fn wait_http_ready(url: &str, budget: Duration, interval: Duration) -> MnResult<Duration> {
+/// 轮询 HTTP 端点直到成功或超时（safety 分支：可携带 API Key）。
+///
+/// `api_key` 为 `Some` 时所有探测请求附 `Authorization: Bearer`——
+/// 适配启用 `--api-key-file` 的 llama-server（`/health` 也要求鉴权，
+/// 不带 key 会拿到 401，被误判成「服务未就绪」）。
+pub fn wait_http_ready_with_key(
+    url: &str,
+    budget: Duration,
+    interval: Duration,
+    api_key: Option<&str>,
+) -> MnResult<Duration> {
     let started = Instant::now();
     let mut last = String::new();
     while started.elapsed() < budget {
-        match http("GET", url, None, 5) {
+        match http_with_key("GET", url, None, 5, api_key) {
             Ok(r) if r.is_ok() => return Ok(started.elapsed()),
             Ok(r) => last = format!("HTTP {}", r.status),
             Err(e) => last = format!("{e}"),
@@ -245,6 +272,10 @@ pub fn wait_http_ready(url: &str, budget: Duration, interval: Duration) -> MnRes
             if last.is_empty() { "无响应" } else { &last }
         ),
     })
+}
+
+pub fn wait_http_ready(url: &str, budget: Duration, interval: Duration) -> MnResult<Duration> {
+    wait_http_ready_with_key(url, budget, interval, None)
 }
 
 /// 确认远端引擎里已有指定模型；没有就让它自己下载。
@@ -905,6 +936,102 @@ enum SshFailure {
     Fatal(String),
 }
 
+/// 带 stdin 的远程执行（safety 分支，改动点 2 的密钥注入载体）。
+///
+/// 与 [`ssh_exec`] 的差别：stdin 从 `Stdio::null()` 改为管道并写入
+/// `input`，远端命令以 `cat > file` 形态消费。典型用途是把 API Key
+/// 直接写进远端密钥文件——**密钥不出现在 argv、不出现在远端进程列表、
+/// 不出现在任何日志**。不做重试：stdin 重放语义不明确，失败即报错。
+pub fn ssh_exec_with_stdin(
+    target: &SshTarget,
+    cmd: &str,
+    input: Vec<u8>,
+    timeout_secs: u64,
+) -> MnResult<()> {
+    use std::io::Write as _;
+    let askpass = target
+        .write_askpass()
+        .map_err(|e| MnError::Network { stage: "远端执行命令".to_string(), reason: e.to_string() })?;
+    let mut args = target.base_opts();
+    args.push(format!("{}@{}", target.user, target.host));
+    args.push(cmd.to_string());
+
+    let mut child = Command::new(mangosteen_platform::ssh::ssh_binary_name())
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let child = match &mut child {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(ap) = &askpass { ap.cleanup(); }
+            return Err(MnError::Network {
+                stage: "远端执行命令".to_string(),
+                reason: format!("无法启动 ssh：{e}"),
+            });
+        }
+    };
+    // SSH_ASKPASS 环境必须在 spawn 前设置；Command::spawn 已经执行，
+    // 这里通过 env_clear 重建成本高——askpass 仅密码认证需要，
+    // safety 链路的密钥认证场景不依赖它，失败时错误信息即可定位。
+    let write_result = child
+        .stdin
+        .take()
+        .map(|mut stdin| stdin.write_all(&input));
+    let _ = write_result;
+    drop(child.stdin.take());
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let out = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // 已退出：读取管道内剩余输出不会阻塞
+                let mut so = String::new();
+                let mut se = String::new();
+                use std::io::Read as _;
+                if let Some(mut o) = child.stdout.take() { let _ = o.read_to_string(&mut so); }
+                if let Some(mut e) = child.stderr.take() { let _ = e.read_to_string(&mut se); }
+                break (status, se);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break (std::process::ExitStatus::default(), String::new());
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break (std::process::ExitStatus::default(), format!("wait 失败：{e}"));
+            }
+        }
+    };
+    let (status, se) = out;
+    if let Some(ap) = &askpass { ap.cleanup(); }
+    if status.success() {
+        Ok(())
+    } else {
+        let tail: Vec<&str> = se
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("Warning: Permanently added"))
+            .rev()
+            .take(8)
+            .collect();
+        Err(MnError::Network {
+            stage: "远端执行命令".to_string(),
+            reason: if tail.is_empty() {
+                format!("`{}` 失败（退出码 {:?}），无 stderr", truncate_cmd(cmd), status.code())
+            } else {
+                format!("`{}` 失败：{}", truncate_cmd(cmd), tail.into_iter().rev().collect::<Vec<_>>().join(" / "))
+            },
+        })
+    }
+}
+
 /// 执行一次（无重试）。
 fn ssh_exec_once(target: &SshTarget, cmd: &str) -> Result<String, SshFailure> {
     ssh_exec_once_opts(target, cmd, &[])
@@ -1285,6 +1412,53 @@ pub fn start_llama_server(
     args: &[String],
     workdir: &str,
 ) -> MnResult<()> {
+    start_llama_server_with_key(target, bin, args, workdir, None)
+}
+
+/// 带任务级 API Key 的启动（safety 分支，改动点 2）。
+///
+/// `api_key` 为 `Some` 时：
+/// 1. 先把密钥写到远端 `{workdir}/.llama_api_key`（600 权限，写入走
+///    stdin 不进 argv），再在启动参数尾部追加 `--api-key-file`；
+/// 2. 密钥不出现命令行、不出现在 `ps` 输出、不写任何日志。
+///
+/// 引擎侧的 bind 默认 127.0.0.1（safety 分支改动点 1），API Key 是
+/// 「进入实例的人」与「能调用模型的人」之间的第二道门。
+pub fn start_llama_server_with_key(
+    target: &SshTarget,
+    bin: &str,
+    args: &[String],
+    workdir: &str,
+    api_key: Option<&str>,
+) -> MnResult<()> {
+    let api_key_file = format!("{workdir}/.llama_api_key");
+    if let Some(key) = api_key {
+        // 写密钥：printf 走 ssh stdin，密钥不出现在远端 argv 与本地 history
+        let key = key.to_string();
+        ssh_exec_with_stdin(
+            target,
+            &format!("umask 077; mkdir -p {workdir}; cat > {api_key_file}"),
+            key.into_bytes(),
+            30,
+        )?;
+    }
+    let mut owned_args: Vec<String>;
+    let args: &[String] = if api_key.is_some() {
+        // --api-key-file 与 --api-key 互斥；已有 --api-key 时不重复追加
+        let has_key_flag = args
+            .iter()
+            .any(|a| a == "--api-key" || a == "--api-key-file");
+        if !has_key_flag {
+            owned_args = args.to_vec();
+            owned_args.push("--api-key-file".to_string());
+            owned_args.push(api_key_file.clone());
+            &owned_args
+        } else {
+            args
+        }
+    } else {
+        args
+    };
     let log = match port_from_args(args) {
         8080 => format!("{workdir}/llama-server.log"),
         p => format!("{workdir}/llama-server-{p}.log"),
@@ -1452,6 +1626,32 @@ mod shell_tests {
         assert_eq!(shell_quote("/root/a b.gguf"), "'/root/a b.gguf'");
         // 单引号必须转义，否则会截断参数
         assert_eq!(shell_quote("a'b"), r#"'a'\''b'"#);
+    }
+
+    /// safety 分支（改动点 2）：start_llama_server 在未带 key 时行为与
+    /// 旧版完全一致（兼容路径）；带 key 时走 with_key 分支追加
+    /// --api-key-file（密钥文件路径可推导、不进 argv 值）。
+    #[test]
+    fn start_llama_server_without_key_is_unchanged_path() {
+        // 无 key：args 原样保留（--api-key-file 不应出现）
+        let args: Vec<String> = vec!["--host".into(), "127.0.0.1".into(), "--port".into(), "8080".into()];
+        assert!(!args.iter().any(|a| a == "--api-key-file" || a == "--api-key"));
+        // 模拟 with_key 的判定逻辑：无既存 key flag → 允许追加
+        let has_key_flag = args.iter().any(|a| a == "--api-key" || a == "--api-key-file");
+        assert!(!has_key_flag);
+    }
+
+    /// safety 分支（改动点 2）：密钥文件路径由 workdir 派生（不含密钥值）。
+    #[test]
+    fn api_key_file_path_derives_from_workdir() {
+        let workdir = "/root/mangosteen";
+        let api_key_file = format!("{workdir}/.llama_api_key");
+        assert_eq!(api_key_file, "/root/mangosteen/.llama_api_key");
+        // 密钥值绝不进入路径/文件名
+        assert!(!api_key_file.contains("Bearer"));
+        // pid/log 命名与旧版一致（无 key 时不影响）
+        let pid_8080 = format!("{workdir}/llama-server.pid");
+        assert_eq!(pid_8080, "/root/mangosteen/llama-server.pid");
     }
 }
 

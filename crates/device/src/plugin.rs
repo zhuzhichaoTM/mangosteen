@@ -82,6 +82,9 @@ impl EnginePlugin for LlamaCppEngine {
     fn launch_config(&self, plan: &LocalPlan, bind_host: &str, port: u16) -> EngineLaunchConfig {
         EngineLaunchConfig {
             args: llama_cpp_args(plan, bind_host, port),
+            // API Key 由编排层按任务生成后填充（safety 分支，改动点 2）；
+            // 引擎插件不感知密钥内容，只透传启动参数。
+            api_key: None,
         }
     }
 

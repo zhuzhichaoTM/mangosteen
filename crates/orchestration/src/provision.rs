@@ -17,15 +17,36 @@
 
 use super::*;
 use mangosteen_device::remote::SshTarget;
+use std::process::Command;
 
 use crate::deployment::DeviceTarget;
 use crate::perf::DeployPerfTrace;
 
 impl Orchestrator {
+    /// 生成任务级 API Key（safety 分支，改动点 2）。
+    ///
+    /// 首选 `openssl rand -hex 32`（与执行脚本包的 SOP 一致）；openssl
+    /// 不可用时退化 `/dev/urandom`（二者都是 CSPRNG，uit 均可接受）。
+    /// 64 位 hex 串：128 bit 熵，无分隔符，可安全进 `--api-key-file`。
+    /// 每次部署计划生成时调用一次，随台账持久化（`CloudPlan::api_key`）。
+    pub(crate) fn generate_api_key() -> String {
+        generate_api_key_pub()
+    }
+
     /// 为云端节点按部署时记录的引擎生成启动配置。
     ///
     /// 编排层作为第三层入口负责调用引擎 SPI；CloudOrchestrator 只执行
     /// 收到的标准配置，不依赖 `mangosteen-device`，也不解释引擎 flags。
+    ///
+    /// ## 安全（safety 分支）
+    ///
+    /// bind_host 从硬编码 `"0.0.0.0"` 改为读取 `[cloud] bind_host` 配置，
+    /// **默认 `127.0.0.1`**：llama-server 只监听回环，公网完全不可达，
+    /// 访问一律走 SSH 隧道。历史上写死 0.0.0.0 意味着只要安全组放行了
+    /// llama 端口，明文推理接口就直接暴露公网（prompt 裸奔 + 白嫖）。
+    ///
+    /// 需要直接对外暴露（如内网可信环境）时显式配置
+    /// `bind_host = "0.0.0.0"`，并自行确保鉴权与防火墙就位。
     pub(crate) fn cloud_launch_config(
         &self,
         plan: &mangosteen_core::plan::CloudPlan,
@@ -36,7 +57,27 @@ impl Orchestrator {
                 plan.engine.engine.display_name()
             )));
         };
-        Ok(plugin.launch_config(&plan.engine, "0.0.0.0", plan.engine_port))
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let bind_host = config.cloud.bind_host.as_str();
+        if bind_host != "127.0.0.1" && bind_host != "localhost" {
+            eprintln!(
+                "[safety-warn] cloud.bind_host = \"{bind_host}\"：llama-server 将对非回环地址监听，\
+                 请确认鉴权（--api-key-file）与安全组限制已就位"
+            );
+        }
+        let mut launch = plugin.launch_config(&plan.engine, bind_host, plan.engine_port);
+        // 任务级 API Key（safety 分支，改动点 2）：每次启动生成新随机 key，
+        // 由 start_llama_server_with_key 写入远端密钥文件并追加
+        // --api-key-file。密钥不进 argv、不进日志、不进台账。
+        // 注意：不能用 `InferenceEngine::LlamaCpp` 字面量做引擎分支——
+        // C3 架构约束要求引擎差异收敛在插件层。改为对「插件返回的
+        // launch args 里没有既存 key flag」的通用启动补 key：对未实现
+        // 鉴权的引擎（ollama 等）launch.api_key 为 None，本逻辑照常
+        // 赋 key 但 start 侧的 has_key_flag 检查会跳过注入，行为安全。
+        if launch.api_key.is_none() {
+            launch.api_key = Some(Self::generate_api_key());
+        }
+        Ok(launch)
     }
 
     /// 解析部署目标节点：已保存设备优先，其次云厂商创建。
@@ -1155,4 +1196,40 @@ impl Orchestrator {
             .state
             .set_status(id, DeploymentStatus::Failed, Some(note));
     }
+}
+
+/// 生成任务级 API Key（safety 分支，改动点 2）——自由函数版。
+///
+/// 供 `scheduler` 在构建部署计划时调用（`CloudPlan::api_key` 定钥）。
+/// 逻辑与 [`Orchestrator::generate_api_key`] 相同：openssl 优先、
+/// `/dev/urandom` 兜底、极端环境降级混合并打 safety-warn。
+pub(crate) fn generate_api_key_pub() -> String {
+    fn urandom_hex(n: usize) -> Option<String> {
+        use std::io::Read as _;
+        let mut f = std::fs::File::open("/dev/urandom").ok()?;
+        let mut buf = vec![0u8; n];
+        f.read_exact(&mut buf).ok()?;
+        Some(buf.iter().map(|b| format!("{b:02x}")).collect())
+    }
+    if let Ok(out) = Command::new("openssl").args(["rand", "-hex", "32"]).output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                return s;
+            }
+        }
+    }
+    urandom_hex(32).unwrap_or_else(|| {
+        // 最后兜底：时间 + pid 混合（仅当 openssl 与 /dev/urandom 均不可用的
+        // 极端环境；安全性弱于 CSPRNG，触发时打日志提醒）
+        eprintln!("[safety-warn] openssl 与 /dev/urandom 均不可用，API Key 熵降级");
+        format!(
+            "{:016x}{:016x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+            std::process::id() as u64
+        )
+    })
 }

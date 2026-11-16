@@ -29,7 +29,10 @@ use crate::scheduler::{Decision, Scheduler};
 mod cloud_ops;
 pub use cloud_ops::InstanceSshInfo;
 #[path = "deploy.rs"]
-mod deploy;
+pub(crate) mod deploy;
+// safety 分支（改动点 2）：任务级 API Key 生成函数对外 re-export，
+// 供 crate 级 scheduler 模块构建部署计划时调用。
+pub(crate) use deploy::generate_api_key_pub;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 #[path = "preview.rs"]
@@ -69,6 +72,12 @@ pub struct ActiveDeployment {
     pub remote_port: Option<u16>,
     /// 是否就绪（基于 run_status）
     pub ready: bool,
+    /// 上游 API Key（safety 分支，改动点 2）。
+    ///
+    /// 从台账 `CloudPlan::api_key` 透传：网关构造 `BackendTarget` 时
+    /// 携带，转发请求附 `Authorization: Bearer`。旧台账 `None`（该部署
+    /// 启动于加固前，llama-server 未开鉴权），保持兼容。
+    pub api_key: Option<String>,
 }
 
 /// 部署编排核心。

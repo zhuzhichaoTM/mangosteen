@@ -35,6 +35,20 @@ pub(crate) fn write_chunk(stream: &mut TcpStream, data: &[u8]) -> bool {
 ///
 /// 上游一定是 `127.0.0.1`，因此不需要 TLS。
 pub fn http_post_json(url: &str, body: &[u8], timeout: Duration) -> MnResult<(u16, String)> {
+    http_post_json_with_key(url, body, timeout, None)
+}
+
+/// 带上游 API Key 的 JSON POST（safety 分支，改动点 2 的网关侧）。
+///
+/// `api_key` 为 `Some` 时附 `Authorization: Bearer <key>`——适配启用
+/// `--api-key-file` 的 llama-server。`None` 时行为与旧版逐字节一致
+/// （兼容未加固的部署与本地 Ollama 链路）。
+pub fn http_post_json_with_key(
+    url: &str,
+    body: &[u8],
+    timeout: Duration,
+    api_key: Option<&str>,
+) -> MnResult<(u16, String)> {
     let (host_port, path) = split_url(url)?;
     let mut stream = TcpStream::connect_timeout(
         &host_port.parse().map_err(|_| MnError::Network {
@@ -50,8 +64,11 @@ pub fn http_post_json(url: &str, body: &[u8], timeout: Duration) -> MnResult<(u1
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
 
+    let auth_header = api_key
+        .map(|k| format!("Authorization: Bearer {k}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\n{auth_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream

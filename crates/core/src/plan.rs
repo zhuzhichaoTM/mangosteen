@@ -21,6 +21,17 @@ use crate::model::ModelSpec;
 pub struct EngineLaunchConfig {
     /// 已由对应引擎插件生成的进程参数。
     pub args: Vec<String>,
+    /// 任务级 API Key 的**值**（safety 分支，改动点 2）。
+    ///
+    /// 生成方式：部署请求发起时 `openssl rand -hex 32` 级别的随机串。
+    /// 启动时由 `start_llama_server` 写到远端密钥文件
+    /// （`{workdir}/.llama_api_key`，600 权限），并把
+    /// `--api-key-file` 追加进 `args`——**密钥不进 argv、不进日志、不进台账**。
+    ///
+    /// 鉴权叠加 SSH 隧道构成纵深防御：隧道控制「谁能连」，API Key 控制
+    /// 「连上后谁能用」，二者独立失效互不影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 /// 算力来源。调度决策器的核心输出，也是一切审计日志的分组维度。
@@ -171,6 +182,15 @@ pub struct AuxiliaryDownload {
 pub struct CloudPlan {
     /// 服务商驱动名，如 `autodl`
     pub provider: String,
+    /// 云端 llama-server 的任务级 API Key（safety 分支，改动点 2）。
+    ///
+    /// 生命周期：部署请求时生成 → 持久化进台账（重启/恢复路径
+    /// `cloud_launch_config` 仍可取回同一把 key）→ 网关转发时附
+    /// `Authorization: Bearer` → teardown 后随台账删除。
+    ///
+    /// 旧台账没有该字段 → 反序列化 `None`，恢复路径会重新生成。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     /// 目标加速卡型号（归一化名，如 `RTX 4090`）
     pub gpu_model: String,
     /// 卡数。个人级场景固定 1，保留字段以便扩展多卡非核心场景。
@@ -410,6 +430,7 @@ mod tests {
             device_id: None,
             reuse_instance_id: None,
             reuse_provider: None,
+            api_key: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -461,6 +482,7 @@ mod tests {
             device_id: None,
             reuse_instance_id: None,
             reuse_provider: None,
+            api_key: None,
             provider: "autodl".into(),
             gpu_model: "RTX 4090".into(),
             gpu_count: 1,
@@ -524,6 +546,7 @@ mod tests {
                 // 丢失会导致「选了复用节点却新建实例」。
                 reuse_instance_id: Some("i-keep".into()),
                 reuse_provider: Some("autodl".into()),
+                api_key: None,
                 provider: "autodl".into(),
                 gpu_model: "RTX 4090".into(),
                 gpu_count: 1,
