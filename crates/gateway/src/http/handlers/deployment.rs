@@ -291,10 +291,12 @@ impl GatewayServer {
     ///
     /// ```text
     /// ① 持锁（微秒级）：只读缓存快照
-    /// ② 未命中 → 返回 available=false，由后台线程刷新（不进请求路径）
+    /// ② 未命中 → **锁外**就地刷新一次（请求驱动，2026-11-17 删除后台
+    ///    轮询后唯一填充途径之一；部署完成时也会预填一次）
+    /// ③ 刷新失败/超时 → 返回 available=false，前端继续轮询重试
     /// ```
     ///
-    /// 宁可让「登陆方式」晚几十秒才有值，也不能让整个网关跟着厂商接口一起卡。
+    /// 宁可让「登陆方式」晚几秒才有值，也不能让整个网关跟着厂商接口一起卡。
     pub(crate) fn ssh_info(&self, id: &str) -> Response {
         let cached = {
             let gw = self.gateway.as_ref();
@@ -302,20 +304,40 @@ impl GatewayServer {
             gw.cached_ssh_info(id)
         };
 
-        let Some(info) = cached else {
-            // 未命中：**不在请求路径里刷新**。前端会继续轮询，
-            // 后台任务填好缓存后自然就拿到了。
-            return Response::json(
+        let info = match cached {
+            Some(info) => Some(info),
+            None => {
+                // 未命中：锁外就地刷新一次（不进全局锁，厂商接口慢也不卡 HTTP 层）
+                let gw = self.gateway.as_ref();
+                match gw.refresh_ssh_info(id) {
+                    Ok(info) => info,
+                    Err(e) => {
+                        return Response::json(
+                            200,
+                            &serde_json::json!({
+                                "ok": true,
+                                "available": false,
+                                "pending": true,
+                                "message": format!("正在向云厂商获取登录信息：{e}"),
+                            }),
+                        );
+                    }
+                }
+            }
+        };
+
+        match info {
+            Some(info) => ssh_info_response(info),
+            None => Response::json(
                 200,
                 &serde_json::json!({
                     "ok": true,
                     "available": false,
                     "pending": true,
-                    "message": "正在向云厂商获取登录信息，稍后自动刷新",
+                    "message": "该部署没有云端实例信息",
                 }),
-            );
-        };
-        ssh_info_response(info)
+            ),
+        }
     }
     pub(crate) fn stop(&self, id: &str) -> Response {
         let gw = self.gateway.as_ref();

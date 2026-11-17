@@ -1566,6 +1566,11 @@ impl Orchestrator {
         // Provisioning → Ready 是合法迁移，走状态机而不是直接写字段，
         // 否则非法状态组合会悄悄落盘。
         self.state.set_status(id, DeploymentStatus::Ready, None)?;
+        // 请求驱动刷新 ssh_info 缓存（2026-11-17 删除 sshmon 后台轮询后
+        // 的两个填充点之一）：部署刚完成，实例 describe 数据是新鲜的，
+        // 顺手填缓存让部署页「登陆方式」立即可用，用户无需再等一轮刷新。
+        // 失败不致命——ssh_info HTTP 处理器未命中时会就地刷新兜底。
+        let _ = self.refresh_ssh_info(id);
         sink(
             DeployStage::Tunneling,
             StageOutcome::Done,

@@ -30,6 +30,7 @@ use crate::compshare::client::{
 };
 use crate::compshare::config::CompshareConfig;
 use crate::compshare::mapping::{self, units};
+use crate::compshare::model::CapacityResponse;
 use crate::compshare::model::{
     state, BandwidthSwitchResponse, InstancePortsResponse, NetOptimizerResponse, PriceDetail,
     PriceResponse, RefundPriceResponse, SoftwarePortResponse, UHost, UpgradePriceResponse,
@@ -601,29 +602,51 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
     ///
     /// 调用量控制：每个 GPU 型号 1 次库存检查 + 每个候选 1 次价格查询，
     /// 价格查询总量受 `max_price_queries` 限制（默认 10）。
+    ///
+    /// ## 库存检查并发化（2026-11-17）
+    ///
+    /// 原为逐型号串行：6 个型号 × 单次 ~1-2s = 6-12s 墙钟，期间占着
+    /// 部署主流程。现在用 `thread::scope` 并发发起全部型号的
+    /// `check_capacity`（scoped 线程借用 &self.client，无需 'static），
+    /// 墙钟降到最慢一次调用的时长。调用总量不变（仍是每型号 1 次），
+    /// 厂商限频按次数计算而非并发数，且 6 个并发远低于常见 QPS 阈值。
     fn list_available_specs(&self) -> MnResult<Vec<AvailableSpec>> {
         let types = self.client.available_types()?;
         let mut out = Vec::new();
         let mut price_budget = self.config.max_price_queries;
 
-        for item in &types.types {
-            if !item.is_on_sale() || !self.config.allows_gpu(&item.name) {
-                continue;
-            }
+        // 型号过滤（在发起并发前完成，只为存活型号查库存）
+        let candidates: Vec<_> = types
+            .types
+            .iter()
+            .filter(|item| item.is_on_sale() && self.config.allows_gpu(&item.name))
+            .collect();
 
-            // 一次库存检查覆盖该型号下所有 (GPU, CPU, 内存) 组合
-            let capacity_req = CapacityRequest {
-                gpu_type: item.name.clone(),
-                machine_type: self.config.machine_type.clone(),
-                cpu_platform: self.config.cpu_platform.clone(),
-                image_id: self.config.image_id.clone(),
-                charge_type: self.config.charge_type.clone(),
-                disk_type: self.config.disk_type.clone(),
-                disk_size_gb: self.config.disk_size_gb,
-            };
-            // 库存查询失败不应让整个列举失败：用「未知库存」继续，
-            // 让上层仍能看到价格与规格（真实创建时还会再查一次）
-            let capacity = self.client.check_capacity(&capacity_req).ok();
+        // 并发库存检查：每型号一个 scoped 线程，结果按输入顺序回收
+        let capacities: Vec<Option<CapacityResponse>> = std::thread::scope(|s| {
+            let handles: Vec<_> = candidates
+                .iter()
+                .map(|item| {
+                    let client = &self.client;
+                    let capacity_req = CapacityRequest {
+                        gpu_type: item.name.clone(),
+                        machine_type: self.config.machine_type.clone(),
+                        cpu_platform: self.config.cpu_platform.clone(),
+                        image_id: self.config.image_id.clone(),
+                        charge_type: self.config.charge_type.clone(),
+                        disk_type: self.config.disk_type.clone(),
+                        disk_size_gb: self.config.disk_size_gb,
+                    };
+                    s.spawn(move || client.check_capacity(&capacity_req).ok())
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or(None))
+                .collect()
+        });
+
+        for (item, capacity) in candidates.into_iter().zip(capacities) {
 
             for size in &item.machine_sizes {
                 if size.gpu == 0 || size.gpu > self.config.max_gpu_count {

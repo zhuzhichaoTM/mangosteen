@@ -3283,6 +3283,9 @@ mod tests {
 
     #[test]
     fn provision_rolls_back_when_start_fails() {
+        // 2026-11-17 语义更新：start 失败不再立即抛错报废部署，而是由
+        // wait_until_running 容错重试（限频恢复后接管），最终以
+        // start_timeout 失败——回滚（stop 不 destroy）仍然必须发生。
         let mut d = FakeDriver::new("alpha", vec![InstanceState::Created]);
         d.fail_start = true;
         let calls = d.calls.clone();
@@ -3296,9 +3299,10 @@ mod tests {
             )
             .unwrap_err();
         let msg = e.to_string();
-        // 失败信息里必须说明回滚结果
+        // 失败信息里必须说明回滚结果或失败原因（start_timeout 属于后者：
+        // 回滚由 cleanup 路径保证，下面用 calls 断言验证）。
         assert!(
-            msg.contains("已自动关闭") || msg.contains("可能仍在计费"),
+            msg.contains("已自动关闭") || msg.contains("可能仍在计费") || msg.contains("未进入 Running"),
             "got {msg}"
         );
 

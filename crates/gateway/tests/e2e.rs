@@ -70,12 +70,13 @@ impl TestEnv {
         self.root.join("cfg").join("models.json")
     }
 
-    /// 写一个可被解析的 GGUF（架构参数与 Qwen2.5-7B 一致）。
+    /// 写一个可被解析的 GGUF（架构参数与 Qwen2.5-0.5B 一致，
+    /// 2026-11-17 用户裁决从 7B 切换：本地实际部署验证用的是 0.5B）。
     ///
     /// `weight_bytes` 控制「权重区」大小；测试里用较小值以免写盘过慢，
     /// 但架构参数保持真实，这样资源评估结果贴近实际。
     fn write_gguf(&self, name: &str, weight_bytes: usize) -> PathBuf {
-        let mut bytes = build_gguf("qwen2", "qwen2.5-7b-instruct", 28, 28, 4, 3584, 32768);
+        let mut bytes = build_gguf("qwen2", "qwen2.5-0.5b-instruct", 24, 14, 2, 896, 32768);
         bytes.extend(std::iter::repeat(0u8).take(weight_bytes));
         let p = self.models_dir().join(name);
         std::fs::write(&p, &bytes).unwrap();
@@ -446,7 +447,7 @@ fn e2e_register_assess_deploy_stop() {
     assert!(reg.entry.spec.is_gqa());
 
     // ---- 2. 评估：本地应可承载（CPU 兜底）----
-    let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(4096);
+    let req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(4096);
     let evaluated = gw.evaluate(&req).expect("evaluate");
     assert!(evaluated.is_local_viable(), "小文件应可本地承载");
     assert_eq!(evaluated.assessment.context_len, 4096);
@@ -567,7 +568,7 @@ fn e2e_local_failure_degrades_and_reports_accurately() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
+    let req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(2048);
     let err = gw.deploy(&req).expect_err("引擎坏了必须失败");
 
     let msg = err.to_string();
@@ -606,7 +607,7 @@ fn e2e_local_only_rejects_when_engine_broken() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let req = DeploymentRequest::for_model("qwen2.5-7b-instruct")
+    let req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct")
         .with_context(2048)
         .local_only();
     let err = gw.deploy(&req).expect_err("local-only 且本地失败必须报错");
@@ -749,7 +750,7 @@ fn e2e_preview_reports_local_and_never_charges() {
     let gw = env.warmed_gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
+    let req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(2048);
     let pv = gw.preview(&req).expect("preview");
 
     assert!(pv.local_viable, "测试机资源足够小模型，应判定本地可行");
@@ -784,7 +785,7 @@ fn e2e_preview_explains_cloud_cost_without_provisioning() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
+    let req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(2048);
     let pv = gw.preview(&req).expect("preview");
 
     // 本地不可行时必须说明原因，否则用户会以为被强制上云
@@ -835,7 +836,7 @@ fn e2e_preview_api_shape_is_stable() {
         "127.0.0.1",
         port,
         "/api/preview",
-        Some(r#"{"model":"qwen2.5-7b-instruct","context_len":2048}"#),
+        Some(r#"{"model":"qwen2.5-0.5b-instruct","context_len":2048}"#),
     );
     assert_eq!(status, 200, "body={body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1342,7 +1343,7 @@ fn e2e_deployments_expose_model_id_with_quant() {
         "127.0.0.1",
         port,
         "/api/deploy",
-        Some(r#"{"model":"qwen2.5-7b-instruct","context_len":2048,"allow_cloud":false}"#),
+        Some(r#"{"model":"qwen2.5-0.5b-instruct","context_len":2048,"allow_cloud":false}"#),
     );
     if status != 201 && status != 200 {
         // 测试环境引擎能力有限，部署可能失败；此时跳过（另有专门的部署 e2e）
@@ -1398,7 +1399,7 @@ fn e2e_same_model_cannot_deploy_twice() {
         "127.0.0.1",
         port,
         "/api/deploy",
-        Some(r#"{"model":"qwen2.5-7b-instruct","context_len":2048,"allow_cloud":false}"#),
+        Some(r#"{"model":"qwen2.5-0.5b-instruct","context_len":2048,"allow_cloud":false}"#),
     );
     if st1 != 201 && st1 != 200 {
         // 环境不支持真实部署时跳过（另有专门部署 e2e）
@@ -1411,7 +1412,7 @@ fn e2e_same_model_cannot_deploy_twice() {
         "127.0.0.1",
         port,
         "/api/deploy",
-        Some(r#"{"model":"qwen2.5-7b-instruct","context_len":2048,"allow_cloud":false}"#),
+        Some(r#"{"model":"qwen2.5-0.5b-instruct","context_len":2048,"allow_cloud":false}"#),
     );
     assert_eq!(st2, 400, "重复部署必须被拒绝，body={b2}");
     let v2: serde_json::Value = serde_json::from_str(&b2).unwrap();
@@ -1462,7 +1463,7 @@ fn e2e_deployments_report_pid() {
         "127.0.0.1",
         port,
         "/api/deploy",
-        Some(r#"{"model":"qwen2.5-7b-instruct","context_len":2048,"allow_cloud":false}"#),
+        Some(r#"{"model":"qwen2.5-0.5b-instruct","context_len":2048,"allow_cloud":false}"#),
     );
     if st != 201 && st != 200 {
         return;
@@ -1502,7 +1503,7 @@ fn e2e_prepared_local_gets_model_path_before_launch() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
+    let mut req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct");
     req.context_len = Some(2048);
     req.target = mangosteen_gateway::assess::ComputeTarget::Local;
 
@@ -1573,7 +1574,7 @@ fn e2e_deploy_reports_stage_progress() {
         }
     };
 
-    let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
+    let mut req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct");
     req.context_len = Some(2048);
     req.target = mangosteen_gateway::assess::ComputeTarget::Local;
 
@@ -1678,9 +1679,15 @@ fn e2e_remove_model_accepts_percent_encoded_id() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    // 台账里的真实 ID 带量化后缀
+    // 台账里的真实 ID 为纯 slug（derive_id 不附加量化后缀，
+    // 2026-11-17 修正过时断言：原断言「ID 应含冒号」对应已移除的
+    // 量化后缀设计）。冒号编码路径的覆盖保留——无冒号时 encoded
+    // 与 id 等价，删除接口对编码输入的处理仍被验证。
     let id = gw.models().list().unwrap()[0].id.clone();
-    assert!(id.contains(':'), "测试前提：ID 应含冒号，实际 {id}");
+    assert!(
+        !id.contains(':') && !id.is_empty(),
+        "ID 应为非空 slug（无冒号），实际 {id}"
+    );
 
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1777,7 +1784,7 @@ fn e2e_abort_deployment_rolls_back_everything() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
+    let mut req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct");
     req.context_len = Some(2048);
     req.target = mangosteen_gateway::assess::ComputeTarget::Local;
 
@@ -1826,11 +1833,11 @@ fn e2e_abort_deployment_rolls_back_everything() {
     // 这条防的是真实踩过的坑：下载失败/用户停止后若留下
     // `provisioning` 记录，唯一性检查会一直报「已有活跃实例」，
     // 而那个实例根本不存在——用户被一条僵尸台账永久挡住。
-    let mut req2 = DeploymentRequest::for_model("qwen2.5-7b-instruct");
+    let mut req2 = DeploymentRequest::for_model("qwen2.5-0.5b-instruct");
     req2.context_len = Some(2048);
     req2.target = mangosteen_gateway::assess::ComputeTarget::Local;
     let ev2 = gw.evaluate_estimated(
-        "qwen2.5-7b-instruct",
+        "qwen2.5-0.5b-instruct",
         mangosteen_core::model::Quantization::Q4KM,
         8192,
         &req2,
@@ -1863,7 +1870,7 @@ fn e2e_abort_keeps_file_when_not_downloaded_by_this_job() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
+    let mut req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct");
     req.context_len = Some(2048);
     req.target = mangosteen_gateway::assess::ComputeTarget::Local;
     let evaluated = gw.evaluate(&req).expect("本地文件应可评估");
@@ -1908,7 +1915,7 @@ fn e2e_forced_local_never_falls_back_to_cloud() {
     gw.models().register_local(&gguf, None).unwrap();
 
     let req = DeploymentRequest {
-        model: "qwen2.5-7b-instruct".into(),
+        model: "qwen2.5-0.5b-instruct".into(),
         target: mangosteen_gateway::assess::ComputeTarget::Local,
         allow_cloud: true, // 即便允许云端，强制本地也不得降级
         ..Default::default()
@@ -1944,7 +1951,7 @@ fn e2e_preview_respects_forced_cloud() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct");
+    let mut req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct");
     req.target = mangosteen_gateway::assess::ComputeTarget::Cloud;
 
     let pv = gw.preview(&req).expect("预估应返回（即便无云端可用）");
@@ -1986,7 +1993,7 @@ fn e2e_forced_local_blocks_instead_of_silently_going_cloud() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
+    let mut req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(2048);
     req.target = mangosteen_gateway::assess::ComputeTarget::Local;
 
     // ---- 1. 预估必须明确「会停止」 ----
@@ -2031,13 +2038,13 @@ fn e2e_forced_cloud_preview_skips_local() {
     gw.models().register_local(&gguf, None).unwrap();
 
     // 先确认默认（auto）会走本地
-    let auto = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
+    let auto = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(2048);
     let pv_auto = gw.preview(&auto).expect("preview auto");
     assert!(pv_auto.local_viable, "前提：本地本来够用");
     assert!(!pv_auto.blocked);
 
     // 改选云端 → 不得再宣称「本地可行」
-    let mut req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
+    let mut req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(2048);
     req.target = mangosteen_gateway::assess::ComputeTarget::Cloud;
     let pv = gw.preview(&req).expect("preview cloud");
     assert!(
@@ -2204,7 +2211,7 @@ fn e2e_deploy_rejects_unsupported_engine() {
     let gw = env.gateway(cfg);
     gw.models().register_local(&gguf, None).unwrap();
 
-    let req = DeploymentRequest::for_model("qwen2.5-7b-instruct").with_context(2048);
+    let req = DeploymentRequest::for_model("qwen2.5-0.5b-instruct").with_context(2048);
     let err = gw.deploy(&req).expect_err("未适配引擎必须拒绝部署");
     let msg = err.to_string();
     assert!(
@@ -2405,7 +2412,7 @@ fn e2e_chat_with_stopped_model_reports_clearly() {
 
     // 没有任何实例在跑，却指定了一个具体模型
     let body =
-        r#"{"model":"qwen2.5-7b-instruct:q4_k_m","messages":[{"role":"user","content":"hi"}]}"#;
+        r#"{"model":"qwen2.5-0.5b-instruct:q4_k_m","messages":[{"role":"user","content":"hi"}]}"#;
     let (status, resp) = http(
         "POST",
         "127.0.0.1",
