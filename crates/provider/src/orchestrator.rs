@@ -1286,8 +1286,8 @@ fn bootstrap_deploy_target(
     config: &OrchestratorConfig,
 ) -> MnResult<mangosteen_device::remote::SshTarget> {
     // 1. 幂等短路：已加固的实例直接返回 deploy 密钥 target。
-    //    但不能只短路——workdir 可能还没建（首次加固早于 workdir 逻辑的
-    //    存量实例）：用 root 密钥通道幂等确保 workdir 存在且归属 deploy。
+    //    但不能只短路——存量实例可能缺 workdir 或 aria2（旧引导没装）：
+    //    用 root 密钥通道幂等补齐（mkdir workdir + apt 装 aria2）。
     if let Some(target) = deploy_key_target(instance) {
         if let Some(root_target) = root_key_target(instance) {
             let workdir = config.remote_workdir.trim_end_matches('/').to_string();
@@ -1295,6 +1295,16 @@ fn bootstrap_deploy_target(
                 &root_target,
                 &format!("mkdir -p {workdir} && chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}"),
                 15,
+            );
+            // aria2c 幂等安装（root 权限）：模型/引擎下载的唯一下载器，
+            // 缺失会让 node-config 直接失败（无 curl 兜底，2026-11-17）
+            let _ = mangosteen_device::remote::ssh_exec(
+                &root_target,
+                "command -v aria2c >/dev/null 2>&1 || \
+                 (apt-get install -y aria2 2>/dev/null || \
+                  dnf install -y aria2 2>/dev/null || \
+                  yum install -y aria2 2>/dev/null || true)",
+                120,
             );
         }
         eprintln!("[cloud] ✓ 实例 {} deploy 密钥认证已就绪（跳过引导）", instance.id);
@@ -1366,35 +1376,83 @@ fn bootstrap_deploy_target(
     mangosteen_device::remote::ssh_exec(&root, &root_key_cmd, 15)
         .map_err(|e| describe_bootstrap_error(instance, "配置 root 密钥通道", &e))?;
 
-    // 5. sshd 加固：禁 root 登录 + 禁密码认证（deploy 也只留密钥）
-    let harden_cmd = format!(
-        "mkdir -p /etc/ssh/sshd_config.d && \
-         printf '%s\\n' \
-           'PermitRootLogin no' \
-           'PasswordAuthentication no' \
-           'KbdInteractiveAuthentication no' \
-           > /etc/ssh/sshd_config.d/99-mangosteen.conf && \
-         chmod 600 /etc/ssh/sshd_config.d/99-mangosteen.conf && \
-         sshd -t && \
-         (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || \
-          kill -HUP $(pgrep -o -x sshd) 2>/dev/null || true)"
-    );
-    mangosteen_device::remote::ssh_exec(&root, &harden_cmd, 30)
-        .map_err(|e| describe_bootstrap_error(instance, "sshd 加固", &e))?;
+    // 4d. 外部依赖安装（2026-11-17 用户裁决：root 密码登录成功后立即执行）。
+    //
+    // 依赖（aria2 等）必须在 root 密码可用时装好——deploy 用户没有
+    // apt-get 权限（旧实现 deploy 静默装 aria2 失败后静默回退 curl
+    // 单连接，600MB 下十几分钟，用户实测「非常缓慢」）。现在 root
+    // 引导时一次装齐：aria2（多连接下载器，唯一下载路径）+ curl/wget/
+    // tar/unzip（node-config 验证用），幂等可重入。
+    let deps_cmd = "export DEBIAN_FRONTEND=noninteractive; \
+        (apt-get update -y >/dev/null 2>&1 || true); \
+        (apt-get install -y aria2 curl wget tar unzip 2>/dev/null || \
+         dnf install -y aria2 curl wget tar unzip 2>/dev/null || \
+         yum install -y aria2 curl wget tar unzip 2>/dev/null || true); \
+        printf 'deps:'; \
+        for c in aria2c curl wget tar unzip; do command -v $c >/dev/null 2>&1 && printf \" $c\"; done; echo";
+    let deps_out = mangosteen_device::remote::ssh_exec(&root, deps_cmd, 300)
+        .map_err(|e| describe_bootstrap_error(instance, "安装外部依赖", &e))?;
+    // aria2c 是模型/引擎下载的唯一通道，缺失即失败（不静默降级）
+    if !deps_out.contains("aria2c") {
+        return Err(MnError::Network {
+            stage: "deploy 引导".to_string(),
+            reason: format!(
+                "实例 {} 外部依赖安装后 aria2c 仍缺失（输出：{}）。请检查节点软件源后重试",
+                instance.id,
+                deps_out.trim()
+            ),
+        });
+    }
+    eprintln!("[cloud] ✓ 实例 {} 外部依赖就绪：{}", instance.id, deps_out.trim());
 
-    // 6. 验证 deploy 密钥（加固后密码认证已禁用，必须成功）
+    // 5. 验证 deploy 密钥（公钥认证必须成功）。
+    //    注意：sshd 加固（禁 root/禁密码）不在这里做——按用户裁决
+    //    延后到设备配置（node-config）全部完成后由
+    //    harden_sshd_after_node_config 统一执行。设备配置期间
+    //    root 密码登录保持可用（依赖安装/故障修复可能需要）。
     let target = deploy_key_target(instance).ok_or_else(|| MnError::Network {
         stage: "deploy 引导".to_string(),
         reason: format!(
-            "实例 {} sshd 已加固但 deploy 密钥登录仍失败——请检查实例 authorized_keys",
+            "实例 {} deploy 密钥登录仍失败——请检查实例 authorized_keys",
             instance.id
         ),
     })?;
     eprintln!(
-        "[cloud] ✓ 实例 {} deploy 引导完成：密钥认证就绪，root/密码登录已禁用",
+        "[cloud] ✓ 实例 {} deploy 引导完成：密钥认证就绪（sshd 加固延后至设备配置完成后）",
         instance.id
     );
     Ok(target)
+}
+
+/// 设备配置完成后执行 sshd 加固（2026-11-17 用户裁决：不过早禁用
+/// root 密码登录——设备配置期间依赖安装/故障修复可能还需要它）。
+///
+/// 加固内容：禁 root 登录 + 禁密码认证 + 禁键盘交互（deploy 也只留
+/// 密钥）。root 密钥通道已在引导链装好（4c），加固后 root 密钥登录
+/// 仍可用。root 密钥不可用时回落 root 密码（sshd 尚未加固，密码可用）。
+pub fn harden_sshd_after_node_config(ssh_host: &str, ssh_port: u16) -> MnResult<()> {
+    let root_target = root_key_target_on(ssh_host, ssh_port);
+    let Some(root_target) = root_target else {
+        eprintln!(
+            "[cloud] ⚠ 实例 {ssh_host} root 密钥通道不可用，跳过 sshd 加固（root 密码登录保持开启）"
+        );
+        return Ok(());
+    };
+    let harden_cmd = "mkdir -p /etc/ssh/sshd_config.d && \
+        printf '%s\\n' \
+          'PermitRootLogin no' \
+          'PasswordAuthentication no' \
+          'KbdInteractiveAuthentication no' \
+          > /etc/ssh/sshd_config.d/99-mangosteen.conf && \
+        chmod 600 /etc/ssh/sshd_config.d/99-mangosteen.conf && \
+        sshd -t && \
+        (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || \
+         kill -HUP $(pgrep -o -x sshd) 2>/dev/null || true)";
+    mangosteen_device::remote::ssh_exec(&root_target, harden_cmd, 30)?;
+    eprintln!(
+        "[cloud] ✓ 实例 {ssh_host} sshd 加固完成：root/密码登录已禁用（root 密钥通道保留）"
+    );
+    Ok(())
 }
 
 /// 引导失败的错误上下文包装（阶段名 + 原始错误）。
@@ -1412,10 +1470,17 @@ fn describe_bootstrap_error(
 /// 探测 root 密钥是否已可用（引导后运维通道，幂等判断）。
 fn root_key_target(instance: &Instance) -> Option<mangosteen_device::remote::SshTarget> {
     let host = instance.network.ssh_host.clone()?;
+    let port = instance.network.ssh_port.unwrap_or(22);
+    root_key_target_on(&host, port)
+}
+
+/// root 密钥 target（host/port 版，供 DeviceTarget/ProvisionedResources
+/// 等无 Instance 的调用路径使用）。
+fn root_key_target_on(host: &str, port: u16) -> Option<mangosteen_device::remote::SshTarget> {
     let key = mangosteen_device::remote::default_identity_key()?;
     let probe = mangosteen_device::remote::SshTarget {
-        host,
-        port: instance.network.ssh_port.unwrap_or(22),
+        host: host.to_string(),
+        port,
         user: "root".to_string(),
         password: None,
         identity_file: Some(key),

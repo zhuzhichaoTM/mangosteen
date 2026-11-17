@@ -651,6 +651,19 @@ impl Orchestrator {
             &device.workdir,
             &self.config().cloud.llama_server_url,
         )?;
+        // 节点配置完成后才禁用 root 密码登录（2026-11-17 用户裁决）：
+        // 设备配置期间依赖安装/故障修复可能还需要 root 密码通道，
+        // 加固过早会把运维窗口关掉。配置成功返回 = 加固条件满足。
+        // 失败不致命（仅安全降级）：deploy 密钥通道不受影响。
+        if let Err(e) = mangosteen_provider::orchestrator::harden_sshd_after_node_config(
+            &device.ssh.host,
+            device.ssh.port,
+        ) {
+            eprintln!(
+                "[cloud] ⚠ 实例 {} sshd 加固失败（安全降级，不影响部署）：{e}",
+                device.ssh.host
+            );
+        }
         // 节点配置完成后才开始模型下载。
         sink(
             crate::progress::DeployStage::Configuring,
@@ -852,6 +865,19 @@ impl Orchestrator {
             &p.workdir,
             &self.config().cloud.llama_server_url,
         )?;
+        // 节点配置完成后才禁用 root 密码登录（2026-11-17 用户裁决，
+        // 与上方 deploy_instance 路径一致）：失败仅安全降级。
+        if let Some(inst) = p.instance.as_ref() {
+            if let Err(e) = mangosteen_provider::orchestrator::harden_sshd_after_node_config(
+                &inst.network.ssh_host.clone().unwrap_or_default(),
+                inst.network.ssh_port.unwrap_or(22),
+            ) {
+                eprintln!(
+                    "[cloud] ⚠ 实例 {} sshd 加固失败（安全降级，不影响部署）：{e}",
+                    inst.id
+                );
+            }
+        }
         perf.leave("节点配置完成");
         sink(
             crate::progress::DeployStage::Configuring,

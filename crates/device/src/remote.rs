@@ -1351,13 +1351,16 @@ pub fn ensure_llama_server(
         });
     }
 
-    // 下载器：aria2c 多连接优先（-x16 -s16 -k1M），缺失或失败回退 curl。
+    // 下载器：aria2c 多连接（唯一路径，2026-11-17 用户裁决删 curl 兜底）。
     //
-    // ## 为什么不再直接用 curl
+    // 历史教训：curl 兜底「静默降级」是有害的——单连接几百 KB/s，
+    // 600MB 预编译包要下十几分钟，用户看着像卡死；且 fallback 无声，
+    // 排查「为什么这么慢」要翻代码才知道走了 curl。aria2c 缺失/失败
+    // 现在直接报错并提示安装方式，快速失败优于缓慢成功。
     //
-    // 预编译包约 600 MB，跨境单连接 curl 实测只有几百 KB/s，十几分钟都下
-    // 不完，节点配置阶段就长时间卡在「准备引擎」，用户看着像卡死。aria2c
-    // 用 16 段并发能显著提速，参数与模型权重下载保持一致。
+    // aria2c 的安装由引导链负责（root 身份 apt-get，deploy 用户无权限
+    // 装系统包——旧实现让 deploy 静默装 aria2 失败后静默回退 curl，
+    // 两个静默叠加成「又慢又查不出」）。
     //
     // `--allow-overwrite` + `--auto-file-renaming=false` 是必须的：
     // 上一次失败的残留同名文件如果不覆盖，aria2 会改写成
@@ -1377,16 +1380,14 @@ pub fn ensure_llama_server(
     let q_file = shell_quote(file);
     let q_tmp = shell_quote(&format!("{workdir}/tmp"));
     let fetch = format!(
-        "if command -v aria2c >/dev/null 2>&1; then \
-           echo '使用 aria2c -x16 多连接下载 llama-server 预编译包'; \
-           aria2c -x16 -s16 -k1M --timeout=15 --max-tries=15 --retry-wait=2 \
-             --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-             -d {q_tmp} -o {q_file} {q_url} \
-           || curl -fL --retry 5 --retry-delay 3 --connect-timeout 20 -o {file} {q_url}; \
-         else \
-           echo '未找到 aria2c，回退 curl 下载 llama-server 预编译包'; \
-           curl -fL --retry 5 --retry-delay 3 --connect-timeout 20 -o {file} {q_url}; \
-         fi"
+        "if ! command -v aria2c >/dev/null 2>&1; then \
+           echo '错误：未找到 aria2c（多连接下载器）。请在节点安装后重试：apt-get install -y aria2' >&2; \
+           exit 1; \
+         fi; \
+         echo '使用 aria2c -x16 多连接下载 llama-server 预编译包'; \
+         aria2c -x16 -s16 -k1M --timeout=15 --max-tries=15 --retry-wait=2 \
+           --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
+           -d {q_tmp} -o {q_file} {q_url}"
     );
     let script = format!(
         "set -e; \
