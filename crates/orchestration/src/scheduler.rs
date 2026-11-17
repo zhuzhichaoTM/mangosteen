@@ -366,18 +366,18 @@ impl Scheduler {
         let mmproj_file = deploy_spec
             .mmproj
             .as_ref()
-            .map(|f| format!("/root/mangosteen/models/{f}"));
+            .map(|f| format!("/home/deploy/mangosteen/models/{f}"));
         let draft_file = deploy_spec
             .draft_model
             .as_ref()
-            .map(|f| format!("/root/mangosteen/models/{f}"));
+            .map(|f| format!("/home/deploy/mangosteen/models/{f}"));
         // 主模型下载地址同样来自模板（仓库 + 文件名），不再写死厂商路径
         let template_download_url = Some(deploy_spec.download_url.clone());
 
         // 引擎参数：与本地同一套语义，仅端口/绑定不同
         let engine = LocalPlan::from_assessment(
             &evaluated.spec,
-            format!("/root/mangosteen/models/{remote_file}"),
+            format!("/home/deploy/mangosteen/models/{remote_file}"),
             &evaluated.assessment,
             // 云端跑的是 llama.cpp，端口用 `LLAMA_CPP_PORT`（8080）。
             // 隧道必须转发到服务真正监听的端口，否则隧道建好了也连不上。
@@ -416,7 +416,7 @@ impl Scheduler {
             // 下载目标必须与引擎读取路径**完全一致**。此前这里独立按模型名
             // 推导（qwen2.5-0.5b → qwen2.5-0.5b.gguf），而下发给 llama-server
             // 的是模板文件名，于是「下了一份、启动找另一份」。
-            model_path: format!("/root/mangosteen/models/{remote_file}"),
+            model_path: format!("/home/deploy/mangosteen/models/{remote_file}"),
             engine_port: mangosteen_device::remote::LLAMA_CPP_PORT,
             mmproj_path: mmproj_file,
             draft_model_path: draft_file,
@@ -428,7 +428,7 @@ impl Scheduler {
                 .iter()
                 .map(|a| mangosteen_core::plan::AuxiliaryDownload {
                     url: a.url.clone(),
-                    path: format!("/root/mangosteen/models/{}", a.file_name),
+                    path: format!("/home/deploy/mangosteen/models/{}", a.file_name),
                     bytes: None,
                 })
                 .collect(),
@@ -871,7 +871,7 @@ mod tests {
         let Decision::Cloud { plan, .. } = d else {
             panic!("expected cloud");
         };
-        let expected = "/root/mangosteen/models/qwen2.5-0.5b-instruct-q4_k_m.gguf";
+        let expected = "/home/deploy/mangosteen/models/qwen2.5-0.5b-instruct-q4_k_m.gguf";
         assert_eq!(plan.model_path, expected, "下载目标必须使用模板文件名");
         assert_eq!(plan.engine.model_path, expected, "启动路径必须与下载一致");
     }

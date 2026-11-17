@@ -136,7 +136,7 @@ impl Default for OrchestratorConfig {
             tunnel_timeout: Duration::from_secs(30),
             poll_interval: Duration::from_secs(2),
             ssh_password: None,
-            remote_workdir: "/root/mangosteen".to_string(),
+            remote_workdir: "/home/deploy/mangosteen".to_string(),
             llama_server_url: String::new(),
         }
     }
@@ -1246,10 +1246,10 @@ const DEPLOY_USER: &str = "deploy";
 /// 已加固的实例（sshd 禁 root/禁密码）直接命中返回；未加固返回 None，
 /// 交由 [`bootstrap_deploy_target`] 引导。
 ///
-/// 必须用 `ssh_probe`（BatchMode=yes）而非 `ssh_exec`：deploy 用户尚不
-/// 存在时 sshd 同样会走密码认证流程，非 BatchMode 的 ssh 在 CLI 前台
-/// 会卡在 `deploy@host's password:` 交互提示——部署直接挂死。
-/// BatchMode 让认证失败立即返回，正确归类为「需要引导」。
+/// 必须用 `ssh_key_auth_ok`（真实验证公钥认证）而非 `ssh_probe`
+/// （探活语义——Permission denied 也返回 true，会把「deploy 用户不
+/// 存在」误判为「密钥已就绪」，引导被跳过，密钥永远装不上）。
+/// 同时 BatchMode 避免 deploy 用户不存在时卡在交互式密码提示。
 fn deploy_key_target(instance: &Instance) -> Option<mangosteen_device::remote::SshTarget> {
     let host = instance.network.ssh_host.clone()?;
     let key = mangosteen_device::remote::default_identity_key()?;
@@ -1260,7 +1260,7 @@ fn deploy_key_target(instance: &Instance) -> Option<mangosteen_device::remote::S
         password: None,
         identity_file: Some(key),
     };
-    if mangosteen_device::remote::ssh_probe(&probe, 8).unwrap_or(false) {
+    if mangosteen_device::remote::ssh_key_auth_ok(&probe) {
         Some(probe)
     } else {
         None
@@ -1285,8 +1285,18 @@ fn bootstrap_deploy_target(
     instance: &Instance,
     config: &OrchestratorConfig,
 ) -> MnResult<mangosteen_device::remote::SshTarget> {
-    // 1. 幂等短路：已加固的实例直接返回
+    // 1. 幂等短路：已加固的实例直接返回 deploy 密钥 target。
+    //    但不能只短路——workdir 可能还没建（首次加固早于 workdir 逻辑的
+    //    存量实例）：用 root 密钥通道幂等确保 workdir 存在且归属 deploy。
     if let Some(target) = deploy_key_target(instance) {
+        if let Some(root_target) = root_key_target(instance) {
+            let workdir = config.remote_workdir.trim_end_matches('/').to_string();
+            let _ = mangosteen_device::remote::ssh_exec(
+                &root_target,
+                &format!("mkdir -p {workdir} && chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}"),
+                15,
+            );
+        }
         eprintln!("[cloud] ✓ 实例 {} deploy 密钥认证已就绪（跳过引导）", instance.id);
         return Ok(target);
     }
@@ -1330,6 +1340,32 @@ fn bootstrap_deploy_target(
     mangosteen_device::remote::ssh_exec(&root, &append_cmd, 20)
         .map_err(|e| describe_bootstrap_error(instance, "安装 deploy 公钥", &e))?;
 
+    // 4b. workdir 创建与授权（2026-11-17 用户裁决 workdir = /home/deploy/mangosteen）：
+    // 不是 deploy 的家目录（/home/deploy），root 引导时显式创建并 chown，
+    // 否则 deploy 用户对 workdir 无写权限，mkdir 模型目录直接失败。
+    let workdir = config.remote_workdir.trim_end_matches('/').to_string();
+    let mkdir_cmd = format!(
+        "mkdir -p {workdir} && chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}"
+    );
+    mangosteen_device::remote::ssh_exec(&root, &mkdir_cmd, 15)
+        .map_err(|e| describe_bootstrap_error(instance, "创建远端工作目录", &e))?;
+
+    // 4c. root 密钥通道（加固禁密码后的运维通道，幂等）：
+    // sshd 加固后 PasswordAuthentication no，root 密码登录被禁——如果
+    // 此时 root 的 authorized_keys 没有我们的公钥，root 将彻底进不去
+    // （密码禁了、密钥没装），后续 workdir 维护/故障排查都做不了。
+    // 公钥对 root 的授权让「禁密码、留密钥」闭环： root 密钥登录可用，
+    // 密码登录依然被 sshd 拒绝。
+    let root_key_cmd = format!(
+        "install -d -m 700 /root/.ssh && \
+         touch /root/.ssh/authorized_keys && \
+         chmod 600 /root/.ssh/authorized_keys && \
+         grep -qxF '{pub_text}' /root/.ssh/authorized_keys || \
+         printf '%s\\n' '{pub_text}' >> /root/.ssh/authorized_keys"
+    );
+    mangosteen_device::remote::ssh_exec(&root, &root_key_cmd, 15)
+        .map_err(|e| describe_bootstrap_error(instance, "配置 root 密钥通道", &e))?;
+
     // 5. sshd 加固：禁 root 登录 + 禁密码认证（deploy 也只留密钥）
     let harden_cmd = format!(
         "mkdir -p /etc/ssh/sshd_config.d && \
@@ -1370,6 +1406,24 @@ fn describe_bootstrap_error(
     MnError::Network {
         stage: format!("deploy 引导 / {stage}"),
         reason: format!("实例 {}：{e}", instance.id),
+    }
+}
+
+/// 探测 root 密钥是否已可用（引导后运维通道，幂等判断）。
+fn root_key_target(instance: &Instance) -> Option<mangosteen_device::remote::SshTarget> {
+    let host = instance.network.ssh_host.clone()?;
+    let key = mangosteen_device::remote::default_identity_key()?;
+    let probe = mangosteen_device::remote::SshTarget {
+        host,
+        port: instance.network.ssh_port.unwrap_or(22),
+        user: "root".to_string(),
+        password: None,
+        identity_file: Some(key),
+    };
+    if mangosteen_device::remote::ssh_key_auth_ok(&probe) {
+        Some(probe)
+    } else {
+        None
     }
 }
 
@@ -3064,7 +3118,7 @@ mod tests {
 
     fn cfg() -> OrchestratorConfig {
         OrchestratorConfig {
-            remote_workdir: "/root/mangosteen".to_string(),
+            remote_workdir: "/home/deploy/mangosteen".to_string(),
             llama_server_url: String::new(),
             provision_timeout: Duration::from_millis(200),
             start_timeout: Duration::from_millis(300),

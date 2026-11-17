@@ -853,6 +853,24 @@ pub fn has_gpu_processes(target: &SshTarget) -> MnResult<bool> {
 /// 探活的判定与**凭据无关**：连接层失败（超时/拒绝/重置）说明 TCP 都
 /// 连不上，机器必然不可用；认证失败（Permission denied）说明 TCP 通了、
 /// 机器活着——返回 `Err` 但调用方应把认证失败与连接失败区分开。
+/// 密钥认证真实验证（deploy 引导幂等入口专用，2026-11-17 修复假阳性）。
+///
+/// 与 [`ssh_probe`] 的区别：ssh_probe 是**探活**语义——Permission denied
+/// 也返回 true（机器活着即算通）；本函数只有**公钥认证成功**才返回 true。
+///
+/// 历史 bug：deploy_key_target 用 ssh_probe 做幂等判断——deploy 用户
+/// 不存在时 sshd 同样应答 Permission denied，被误判为「密钥已就绪」，
+/// 引导被跳过，deploy 密钥永远装不上（表现为「deploy 无法通过密钥
+/// 登录」，而日志却显示「密钥认证已就绪」）。
+pub fn ssh_key_auth_ok(target: &SshTarget) -> bool {
+    ssh_exec_once_opts(
+        target,
+        "true",
+        &["-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey"],
+    )
+    .is_ok()
+}
+
 pub fn ssh_probe(target: &SshTarget, timeout_secs: u64) -> MnResult<bool> {
     let _ = timeout_secs; // 实际超时由 base_opts 的 ConnectTimeout 约束
     // BatchMode=yes：探活必须非交互。password 为 None 时若不加，

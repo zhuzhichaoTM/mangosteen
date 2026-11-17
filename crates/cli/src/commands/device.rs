@@ -160,7 +160,7 @@ fn add(args: Args) -> MnResult<i32> {
     let workdir = args
         .get("workdir")
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "/root/mangosteen".to_string());
+        .unwrap_or_else(|| "/home/deploy/mangosteen".to_string());
     let name = args.get("name").map(|s| s.to_string());
 
     let gw = build_gateway(&args)?;
@@ -327,7 +327,7 @@ fn print_device_help() {
     println!();
     println!("{}", output::bold("device add 选项"));
     println!("  {:<w$}  {}", "--user <用户>", "SSH 登录用户名（默认 root）", w = 22);
-    println!("  {:<w$}  {}", "--workdir <目录>", "远端工作目录（默认 /root/mangosteen）", w = 22);
+    println!("  {:<w$}  {}", "--workdir <目录>", "远端工作目录（默认 /home/deploy/mangosteen）", w = 22);
     println!("  {:<w$}  {}", "--password <密码>", "SSH 登录密码", w = 22);
     println!("  {:<w$}  {}", "--name <名称>", "节点显示名称", w = 22);
     println!();
