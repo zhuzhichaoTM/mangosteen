@@ -2680,19 +2680,44 @@ pub fn configure_node(
     // 一次 `true` 只花几百毫秒，却能把故障定位到「连不上」，
     // 而不是等到十分钟后误报成下载或解压失败。
     confirm_remote_reachable(target)?;
+
+    // ---- safety 加固（2026-11-17 用户裁决）：swap/core/tmpfs 禁用 ----
+    // swapoff：防 KV Cache 明文换出落盘；core_pattern：防崩溃转储含 prompt；
+    // swappiness=0：最小化换出倾向；tmpfs 工作区：推理临时文件只进内存。
+    // 失败不致命（仅安全降级）：记录警告但不中断部署。
+    let workdir = workdir.trim_end_matches('/').to_string();
+    let harden_cmd = format!(
+        "swapoff -a 2>/dev/null || true; \
+         sysctl -w vm.swappiness=0 2>/dev/null || true; \
+         echo 'kernel.core_pattern=|/bin/false' > /proc/sys/kernel/core_pattern 2>/dev/null || \
+         sysctl -w kernel.core_pattern='|/bin/false' 2>/dev/null || true; \
+         mkdir -p {workdir}/tmp && mount -t tmpfs -o size=512m tmpfs {workdir}/tmp 2>/dev/null || true"
+    );
+    if let Err(e) = mangosteen_device::remote::ssh_exec(target, &harden_cmd, 15) {
+        eprintln!("[node-config] ⚠ 远端加固部分失败（安全降级，不影响部署）：{e}");
+    }
+
     // SSH 免密登录确认成功后，先完成依赖安装并逐项验证；依赖不完整时
     // 立即失败，不允许继续下载 llama.cpp。
     let deps = mangosteen_device::remote::ensure_node_download_dependencies(target)?;
     eprintln!("[node-config] 远端下载依赖已就绪：{}", deps.trim());
-    let workdir = workdir.trim_end_matches('/').to_string();
     mangosteen_device::remote::ssh_exec(target, &format!("mkdir -p {workdir}/models"), 60)?;
     // 依赖确认成功后才下载/准备 llama-server；函数返回成功路径后，
-    // 调用方才会把阶段推进到“模型下载”。
-    let llama_path = mangosteen_device::remote::ensure_llama_server_from_archive(
+    // 调用方才会把阶段推进到"模型下载"。
+    let result = mangosteen_device::remote::ensure_llama_server_from_archive(
         target,
         &workdir,
         llama_server_url,
-    )?;
+    );
+    if result.is_err() {
+        // 失败路径清理 {workdir}/tmp（半成品下载/解压残留）
+        let _ = mangosteen_device::remote::ssh_exec(
+            target,
+            &format!("rm -rf {workdir}/tmp/* 2>/dev/null || true"),
+            10,
+        );
+    }
+    let llama_path = result?;
     // 不在节点配置阶段执行 `llama-server --version`：部分 CUDA 发行包
     // 初始化动态库/设备上下文会耗时几十秒，甚至触发一次不必要的 CUDA
     // 探测，导致模型下载迟迟不开始。这里只确认文件可执行；真正的

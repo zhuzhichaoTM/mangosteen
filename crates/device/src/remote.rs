@@ -715,10 +715,21 @@ pub fn default_identity_key() -> Option<PathBuf> {
 /// 会在 ssh 启动时卡在交互输入上。
 fn ensure_identity_key() -> MnResult<PathBuf> {
     let ssh_dir = ssh_home_dir()?;
-    let key = ssh_dir.join("id_ed25519");
-    let pub_key = ssh_dir.join("id_ed25519.pub");
+    // 独立密钥 mangosteen_ed25519（safety 加固）：与日常 git/办公密钥分离，
+    // 丢失只影响 mangosteen 一个应用，可单独吊销。
+    // 兼容旧版：若 mangosteen_ed25519 不存在但 id_ed25519 存在，优先用旧的
+    // （避免已部署实例的公钥失配）；都没有则生成新密钥。
+    let key = ssh_dir.join("mangosteen_ed25519");
+    let pub_key = ssh_dir.join("mangosteen_ed25519.pub");
     if key.is_file() && pub_key.is_file() {
         return Ok(key);
+    }
+    // 兼容旧版 id_ed25519
+    let legacy_key = ssh_dir.join("id_ed25519");
+    let legacy_pub = ssh_dir.join("id_ed25519.pub");
+    if legacy_key.is_file() && legacy_pub.is_file() {
+        eprintln!("[ssh] 使用兼容旧版 id_ed25519（建议迁移到 mangosteen_ed25519）");
+        return Ok(legacy_key);
     }
     let status = Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-f"])

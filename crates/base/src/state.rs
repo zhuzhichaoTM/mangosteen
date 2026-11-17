@@ -261,7 +261,9 @@ impl StateStore {
             state.deployments.len(),
             text.len()
         );
-        let result = mangosteen_platform::fs::atomic_write_str(&self.path, &text);
+        // 台账含明文 api_key（CloudPlan::api_key），必须 600 权限。
+        // 与 config.toml 一致的 atomic_write_private（含 fsync + rename + 回读校验 + chmod 600）。
+        let result = mangosteen_platform::fs::atomic_write_private(&self.path, text.as_bytes());
         match &result {
             Ok(()) => {
                 eprintln!("[state] save: written OK path={:?}", self.path);
