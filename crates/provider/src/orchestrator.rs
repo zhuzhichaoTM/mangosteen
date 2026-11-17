@@ -1288,6 +1288,10 @@ fn bootstrap_deploy_target(
     // 1. 幂等短路：已加固的实例直接返回 deploy 密钥 target。
     //    但不能只短路——存量实例可能缺 workdir 或 aria2（旧引导没装）：
     //    用 root 密钥通道幂等补齐（mkdir workdir + apt 装 aria2）。
+    //    注意：加固后的实例 root 登录被 sshd 完全拒绝（PermitRootLogin
+    //    no，用户裁决）——root_key_target 验证失败，补装自然跳过；
+    //    而补装内容在引导链 4b/4d 已做过，跳过无影响。补装兜底只对
+    //    「未加固存量实例」（root 密码/密钥可用）有意义。
     if let Some(target) = deploy_key_target(instance) {
         if let Some(root_target) = root_key_target(instance) {
             let workdir = config.remote_workdir.trim_end_matches('/').to_string();
@@ -1449,8 +1453,12 @@ pub fn harden_sshd_after_node_config(ssh_host: &str, ssh_port: u16) -> MnResult<
         (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || \
          kill -HUP $(pgrep -o -x sshd) 2>/dev/null || true)";
     mangosteen_device::remote::ssh_exec(&root_target, harden_cmd, 30)?;
+    // 加固语义（2026-11-17 用户裁决最终版）：root 的密码与密钥**全部**
+    // 禁止（PermitRootLogin no 拒绝一切 root 登录方式），实例上唯一
+    // 登录通道 = deploy 密钥认证。4c 装的 root authorized_keys 在加固
+    // 后自动失效（sshd 直接拒 root），仅作加固前运维通道用。
     eprintln!(
-        "[cloud] ✓ 实例 {ssh_host} sshd 加固完成：root/密码登录已禁用（root 密钥通道保留）"
+        "[cloud] ✓ 实例 {ssh_host} sshd 加固完成：root 密码与密钥均已禁用，仅保留 deploy 密钥认证"
     );
     Ok(())
 }
