@@ -53,12 +53,11 @@ pub fn run(args: Args) -> MnResult<i32> {
     match sub.as_str() {
         "instances" => instances(args),
         "key" => key(args),
-        "api-key" | "apikey" => api_key(args),
         "pick" => pick(args),
         "cheapest" => cheapest(args),
         "providers" => providers(args),
         other => Err(mangosteen_core::MnError::bad_request(format!(
-            "未知子命令 `cloud {other}`。可用：instances / key / api-key / pick / cheapest / providers"
+            "未知子命令 `cloud {other}`。可用：instances / key / pick / cheapest / providers"
         ))),
     }
 }
@@ -296,134 +295,6 @@ fn instances_destroy(args: Args) -> MnResult<i32> {
         )));
     }
     Ok(0)
-}
-
-/// `cloud api-key [<部署ID>]` - 显示部署的推理服务 API Key。
-///
-/// 缺省显示唯一 ready 部署的 key；多部署时列全部。key 仅显示前缀
-///（防肩窥），需完整值可配合 `--full` 用于脚本。
-fn api_key(args: Args) -> MnResult<i32> {
-    if args.has("help") {
-        print_cloud_api_key_help();
-        return Ok(0);
-    }
-    let gw = build_gateway(&args)?;
-    let records = gw.list_deployments()?;
-
-    // 筛选云端部署且有 api_key 的记录
-    let cloud_records: Vec<&mangosteen_base::state::DeploymentRecord> = records
-        .iter()
-        .filter(|r| {
-            matches!(r.plan.origin, mangosteen_core::plan::ComputeOrigin::Cloud { .. })
-                && r.plan.cloud.as_ref().is_some_and(|c| c.api_key.is_some())
-        })
-        .collect();
-
-    let wanted_id = args.pos(2);
-    let matched: Vec<&mangosteen_base::state::DeploymentRecord> =
-        match wanted_id {
-            None => cloud_records,
-            Some(id) => cloud_records
-                .iter()
-                .filter(|r| r.plan.id == id || r.plan.id.ends_with(&format!("/{id}")))
-                .copied()
-                .collect(),
-        };
-
-    if matched.is_empty() {
-        if let Some(id) = wanted_id {
-            return Err(mangosteen_core::MnError::bad_request(format!(
-                "部署 {id} 没有云端推理服务 API Key（非云端部署或未部署成功）"
-            )));
-        }
-        println!("{}", output::dim("当前没有带云端推理服务 Key 的部署记录"));
-        println!("  {}", output::dim("执行 `mangosteen deploy <模型>` 开始云端部署"));
-        return Ok(0);
-    }
-
-    if args.has("json") {
-        let arr: Vec<serde_json::Value> = matched
-            .iter()
-            .map(|r| {
-                let c = r.plan.cloud.as_ref().unwrap();
-                serde_json::json!({
-                    "id": r.plan.id,
-                    "model": r.plan.model.name,
-                    "api_key_prefix": key_prefix(c.api_key.as_deref().unwrap_or("")),
-                    "local_port": c.local_port,
-                    "status": r.status.as_str(),
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
-        return Ok(0);
-    }
-
-    if matched.len() == 1 {
-        let r = matched[0];
-        let c = r.plan.cloud.as_ref().unwrap();
-        println!("API Key（前缀）：{}", key_prefix(c.api_key.as_deref().unwrap_or("")));
-        println!(
-            "本地推理入口：http://127.0.0.1:{}/v1（随部署的网关端口，无需 key）",
-            c.local_port
-        );
-        println!(
-            "远端引擎端口：http://127.0.0.1:{}/v1（需 header Authorization: Bearer <完整 Key）",
-            c.engine_port
-        );
-        println!(
-            "{}",
-            output::dim("完整 Key 仅在台账中保留（明文，600 权限）")
-        );
-        return Ok(0);
-    }
-
-    // 多部署：列表
-    println!("{}", output::bold("云端推理服务 API Key（前缀，防肩窥）："));
-    println!();
-    for r in &matched {
-        let c = r.plan.cloud.as_ref().unwrap();
-        println!(
-            "  {:<36}  {}   prefix={}   local={}",
-            r.plan.id,
-            r.plan.model.name,
-            key_prefix(c.api_key.as_deref().unwrap_or("")),
-            c.local_port
-        );
-    }
-    println!(
-        "{}",
-        output::dim("完整 Key 仅在台账中保留（明文，600 权限）")
-    );
-    Ok(0)
-}
-
-/// 取 key 前缀（前 8 字符 + ...）。长度不足则显示全部。
-fn key_prefix(key: &str) -> String {
-    if key.len() <= 12 {
-        key.to_string()
-    } else {
-        format!("{}...", &key[..8])
-    }
-}
-
-/// 打印 cloud api-key 子命令帮助。
-fn print_cloud_api_key_help() {
-    println!("mangosteen cloud api-key [<部署ID>] [选项]");
-    println!();
-    println!("显示云端推理服务 API Key。");
-    println!("Key 用于访问远端引擎（http://127.0.0.1:<远端端口>/v1），");
-    println!("网关入口（http://127.0.0.1:11516/v1）无需 key（网关自动注入）。");
-    println!();
-    println!("{}", output::bold("位置参数"));
-    println!("  {:<w$}  {}", "<部署ID>", "指定部署 ID；缺省显示唯一 ready 部署", w = 16);
-    println!();
-    println!("{}", output::bold("选项"));
-    println!("  {:<w$}  {}", "--json", "以 JSON 输出（便于脚本处理）", w = 16);
-    println!();
-    println!("{}", output::bold("示例"));
-    println!("  mangosteen cloud api-key");
-    println!("  mangosteen cloud api-key dep-1a1e982ea1d000-qwen2.5-0.5b");
 }
 
 /// `cloud key <厂商>` - 管理云厂商密钥。
@@ -779,7 +650,6 @@ fn print_cloud_help() {
     println!("{}", output::bold("子命令"));
     println!("  {:<w$}  {}", "instances", "云端实例管理", w = 18);
     println!("  {:<w$}  {}", "key", "云厂商密钥管理", w = 18);
-    println!("  {:<w$}  {}", "api-key", "推理服务 API Key", w = 18);
     println!("  {:<w$}  {}", "pick", "智能选点", w = 18);
     println!("  {:<w$}  {}", "cheapest", "最便宜优先", w = 18);
     println!("  {:<w$}  {}", "providers", "云服务商管理", w = 18);
