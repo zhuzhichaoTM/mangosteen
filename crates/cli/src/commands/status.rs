@@ -122,12 +122,13 @@ fn print_all_deployments(
                     a.run_status.as_str().to_string(),
                     a.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
                     a.remote_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                    a.api_key.as_deref().map(key_prefix).unwrap_or_else(|| "-".into()),
                     if a.ready { "就绪" } else { "未就绪" }.to_string(),
                 ]
             })
             .collect();
         output::print_table(
-            &["部署 ID", "模型", "算力来源", "状态", "运行状态", "本地端口", "远端端口", "健康"],
+            &["部署 ID", "模型", "算力来源", "状态", "运行状态", "本地端口", "远端端口", "API Key", "健康"],
             &rows,
         );
         println!();
@@ -155,6 +156,13 @@ fn print_all_deployments(
                     mangosteen_core::model::ModelEntry::derive_id(&r.plan.model.name, r.plan.model.quant, r.plan.model.alias.as_deref());
                 let local_port = r.plan.local_access_port();
                 let remote_port = r.plan.cloud.as_ref().map(|c| c.engine_port);
+                let api_key_prefix = r
+                    .plan
+                    .cloud
+                    .as_ref()
+                    .and_then(|c| c.api_key.as_deref())
+                    .map(key_prefix)
+                    .unwrap_or_else(|| "-".into());
                 vec![
                     r.plan.id.clone(),
                     model_id,
@@ -163,6 +171,7 @@ fn print_all_deployments(
                     r.run_status.as_str().to_string(),
                     local_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
                     remote_port.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                    api_key_prefix,
                     if r.run_status == mangosteen_base::state::RunStatus::Active {
                         "就绪".to_string()
                     } else {
@@ -172,9 +181,18 @@ fn print_all_deployments(
             })
             .collect();
         output::print_table(
-            &["部署 ID", "模型", "算力来源", "状态", "运行状态", "本地端口", "远端端口", "健康"],
+            &["部署 ID", "模型", "算力来源", "状态", "运行状态", "本地端口", "远端端口", "API Key", "健康"],
             &rows,
         );
+    }
+}
+
+/// 取 key 前缀（前 8 字符 + ...）。长度不足则显示全部。
+fn key_prefix(key: &str) -> String {
+    if key.len() <= 12 {
+        key.to_string()
+    } else {
+        format!("{}...", &key[..8])
     }
 }
 
