@@ -2457,27 +2457,57 @@ fn finish_provision(
 /// 重试用尽后仍然失败，就把「连不上」这个事实**明确**报出来——
 /// 不要让调用方把它误读成下载失败或解压失败。
 fn confirm_remote_reachable(target: &mangosteen_device::remote::SshTarget) -> MnResult<()> {
-    // 认证重试至多 2 次（用户裁决 2026-11-17）：历史上这里是 15 次 × 6s
-    // ≈ 90s 的窗口，设计意图是跨过「厂商报 Running 但 sshd 未就绪」的
-    // 冷启动窗口。但实测表明该窗口远超 90s 时（如 3080Ti 节点开机后
-    // 端口长时间不可达），15 次重试只是把失败推迟 90s，还让用户干等。
-    // 现在 2 次 × 3s：快速失败，交由上层「重启实例/回滚」流程处置——
-    // 那边的恢复手段（stop/start）比继续重试同一台机器更有效。
-    const ATTEMPTS: u32 = 2;
-    const RETRY_WAIT: Duration = Duration::from_secs(3);
+    // 连接层等待与认证重试分离（用户裁决 2026-11-17，两次裁决的最终形态）：
+    //
+    // ① **认证失败**（Permission denied / publickey——sshd 已就绪、机器活着，
+    //    只是凭据不对）：重试至多 2 次（每 3s）。多试无益——密码/密钥不会
+    //    自己变对，快速失败交由上层「重启实例/回滚」处置。
+    //
+    // ② **连接层失败**（banner exchange timeout / Connection timed out /
+    //    refused / reset——sshd 未就绪或厂商共享网关转发窗口未开）：给
+    //    120s 长窗口（12 次 × 10s）。这是「节点冷启动」场景：新实例从厂商
+    //    报 Running 到 sshd 真正接受连接要经过 OS 引导 + sshd 启动 + 共享
+    //    网关转发就绪，实测 30-90s 常见，与 wait_until_running 的状态轮询
+    //    是同一等待语义的延续（状态绿了，连接层还没绿）。
+    //
+    // 历史教训：第一版 2×3s 把两者混同——新实例冷启动撞窗口直接失败
+    // （实测 RTX 3090 新建实例 banner exchange timeout，deploy 引导被误杀）；
+    // 更早的 15×6s 又让「认证失败」干等 90s。分开计数各用各的窗口。
+    const AUTH_ATTEMPTS: u32 = 2;
+    const AUTH_WAIT: Duration = Duration::from_secs(3);
+    const CONN_ATTEMPTS: u32 = 12;
+    const CONN_WAIT: Duration = Duration::from_secs(10);
+
+    let is_conn_failure = |e: &MnError| {
+        let s = e.to_string();
+        s.contains("banner exchange")
+            || s.contains("timed out") || s.contains("Connection refused")
+            || s.contains("Connection reset") || s.contains("Connection closed")
+            || s.contains("No route") || s.contains("Network is unreachable")
+            || s.contains("EOF")
+    };
+
+    let mut auth_fails: u32 = 0;
+    let mut conn_fails: u32 = 0;
     let mut last_reason = String::new();
-    for attempt in 1..=ATTEMPTS {
+    loop {
         match mangosteen_device::remote::ssh_exec(target, "true", 15) {
-            Ok(_) => {
-                if attempt > 1 {
-                    eprintln!("[node-config] SSH 通道在重试 {attempt} 次后可用了");
-                }
-                return Ok(());
-            }
+            Ok(_) => return Ok(()),
             Err(e) => {
                 last_reason = e.to_string();
-                if attempt < ATTEMPTS {
-                    std::thread::sleep(RETRY_WAIT);
+                if is_conn_failure(&e) {
+                    conn_fails += 1;
+                    if conn_fails >= CONN_ATTEMPTS {
+                        break;
+                    }
+                    std::thread::sleep(CONN_WAIT);
+                } else {
+                    // 认证失败（或其余致命错误）：2 次即止
+                    auth_fails += 1;
+                    if auth_fails >= AUTH_ATTEMPTS {
+                        break;
+                    }
+                    std::thread::sleep(AUTH_WAIT);
                 }
             }
         }
@@ -2485,10 +2515,13 @@ fn confirm_remote_reachable(target: &mangosteen_device::remote::SshTarget) -> Mn
     Err(MnError::Network {
         stage: "节点配置环境 / 确认远端连接".to_string(),
         reason: format!(
-            "远端 {user}@{host}:{port} 暂时无法执行命令（已重试 {ATTEMPTS} 次，每次间隔 {}s）：\
-             {last_reason}。常见原因：实例刚开机 sshd 尚未就绪、厂商端口转发未生效、\
-             安全组拦截、实例已被关机或销毁",
-            RETRY_WAIT.as_secs(),
+            "远端 {user}@{host}:{port} 无法执行命令（认证失败 {auth_fails} 次上限 {AUTH_ATTEMPTS}；\
+             连接层失败 {conn_fails} 次上限 {CONN_ATTEMPTS} × {conn}s）：{last_reason}。\
+             常见原因：实例刚开机 sshd 尚未就绪、厂商端口转发未生效、\
+             凭据未同步（认证类错误请查密码/公钥）、安全组拦截、实例已被关机或销毁",
+            AUTH_ATTEMPTS = AUTH_ATTEMPTS,
+            CONN_ATTEMPTS = CONN_ATTEMPTS,
+            conn = CONN_WAIT.as_secs(),
             user = target.user,
             host = target.host,
             port = target.port,
