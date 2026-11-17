@@ -531,8 +531,21 @@ impl CloudOrchestrator {
                     })
                 }
                 InstanceState::Created | InstanceState::Stopped if !started => {
-                    // 创建后处于关机态 → 主动启动
-                    *instance = driver.start(&instance.id)?;
+                    // 创建后处于关机态 → 主动启动。start 失败不立即抛错
+                    // （多为厂商限频 226619 瞬时拒绝）：等 30s 后下一轮
+                    // 循环重试，deadline 兜底。历史上这里 `?` 直接抛出，
+                    // 一次限频就报废整个部署。
+                    match driver.start(&instance.id) {
+                        Ok(fresh) => {
+                            *instance = fresh;
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[cloud] ⚠ 实例 {} 启动指令失败（{}），30s 后重试",
+                                instance.id, e
+                            );
+                        }
+                    }
                     started = true;
                     if instance.network.ssh_password.is_none() {
                         instance.network.ssh_password = login_password.clone();
@@ -558,7 +571,13 @@ impl CloudOrchestrator {
                     ),
                 });
             }
-            std::thread::sleep(self.config.poll_interval);
+            // describe 轮询 30s（2026-11-17 用户裁决）：实例启动 1-2 分钟，
+            // 30s 采样只需 2-4 次厂商调用，300s 窗口最多 10 次，避免
+            // 226619 接口限频（原 2s 轮询会打 30-60 次，必然触发限频，
+            // 把「等待中」误判成「部署失败」）。注意 poll_interval（2s）
+            // 仍用于本地 HTTP 探活（wait_http_ready），那是本机 curl，
+            // 不经过厂商 API，无需放宽。
+            std::thread::sleep(Duration::from_secs(30));
             *instance = driver.describe(&instance.id)?;
             if instance.network.ssh_password.is_none() {
                 instance.network.ssh_password = login_password.clone();
@@ -1218,6 +1237,142 @@ impl CloudOrchestrator {
 /// `Permission denied`，而错误信息看起来像「网络不通」。厂商已经下发了
 /// 密码就不用再设——AutoDL 直接给 `root_password`，再调一次「重置密码」
 /// 反而会把密码改成一个我们并不知道的值。
+/// deploy 引导用户名（2026-11-17 用户裁决）：mangosteen 所有远端操作
+/// 一律通过 deploy 用户密钥认证；root 仅在部署引导时用密码登录一次。
+const DEPLOY_USER: &str = "deploy";
+
+/// 探测 deploy 密钥是否已可用（幂等入口）。
+///
+/// 已加固的实例（sshd 禁 root/禁密码）直接命中返回；未加固返回 None，
+/// 交由 [`bootstrap_deploy_target`] 引导。
+///
+/// 必须用 `ssh_probe`（BatchMode=yes）而非 `ssh_exec`：deploy 用户尚不
+/// 存在时 sshd 同样会走密码认证流程，非 BatchMode 的 ssh 在 CLI 前台
+/// 会卡在 `deploy@host's password:` 交互提示——部署直接挂死。
+/// BatchMode 让认证失败立即返回，正确归类为「需要引导」。
+fn deploy_key_target(instance: &Instance) -> Option<mangosteen_device::remote::SshTarget> {
+    let host = instance.network.ssh_host.clone()?;
+    let key = mangosteen_device::remote::default_identity_key()?;
+    let probe = mangosteen_device::remote::SshTarget {
+        host,
+        port: instance.network.ssh_port.unwrap_or(22),
+        user: DEPLOY_USER.to_string(),
+        password: None,
+        identity_file: Some(key),
+    };
+    if mangosteen_device::remote::ssh_probe(&probe, 8).unwrap_or(false) {
+        Some(probe)
+    } else {
+        None
+    }
+}
+
+/// deploy 引导 + sshd 加固（幂等，全新实例与已加固实例都安全）。
+///
+/// ## 流程（root 密码仅用于此引导，一次性）
+///
+/// 1. **幂等短路**：deploy 密钥可登录 → 直接返回（已加固实例零开销）；
+/// 2. root 密码登录（厂商重置后的固定密码）→ 建 deploy 用户（useradd，幂等）；
+/// 3. 本机公钥写入 deploy 的 authorized_keys（700/600/属主 deploy）；
+/// 4. sshd 加固：`/etc/ssh/sshd_config.d/99-mangosteen.conf`
+///    （PermitRootLogin no + PasswordAuthentication no + KbdInteractive no）
+///    → `sshd -t` 校验 → systemd reload 或 SIGHUP（容器兼容）；
+/// 5. 验证 deploy 密钥登录成功 → 返回 deploy target。
+///
+/// 引导后 root 密码登录与所有密码认证被禁用，mangosteen 后续所有操作
+/// （配置/下载/启动/隧道/探活）都走 deploy 密钥。
+fn bootstrap_deploy_target(
+    instance: &Instance,
+    config: &OrchestratorConfig,
+) -> MnResult<mangosteen_device::remote::SshTarget> {
+    // 1. 幂等短路：已加固的实例直接返回
+    if let Some(target) = deploy_key_target(instance) {
+        eprintln!("[cloud] ✓ 实例 {} deploy 密钥认证已就绪（跳过引导）", instance.id);
+        return Ok(target);
+    }
+
+    // 2. root 密码引导 target（密码仅此一次使用）
+    let root = vendor_password_target(instance, config)?;
+
+    // 3. 建 deploy 用户（幂等：已存在则跳过）
+    mangosteen_device::remote::ssh_exec(
+        &root,
+        &format!("id {DEPLOY_USER} >/dev/null 2>&1 || useradd -m -s /bin/bash {DEPLOY_USER}"),
+        20,
+    )
+    .map_err(|e| describe_bootstrap_error(instance, "创建 deploy 用户", &e))?;
+
+    // 4. 本机公钥写入 deploy 的 authorized_keys（幂等去重）
+    let key = mangosteen_device::remote::default_identity_key().ok_or_else(|| {
+        MnError::Network {
+            stage: "deploy 引导".to_string(),
+            reason: "本机没有可用的 SSH 密钥（~/.ssh/id_ed25519 不存在）".to_string(),
+        }
+    })?;
+    let pub_text = std::fs::read_to_string(format!("{}.pub", key.display()))
+        .map_err(|e| MnError::io(format!("读取公钥 {}", key.display()), &e))?
+        .trim()
+        .to_string();
+    if pub_text.is_empty() {
+        return Err(MnError::Network {
+            stage: "deploy 引导".to_string(),
+            reason: format!("公钥文件为空：{}.pub", key.display()),
+        });
+    }
+    let append_cmd = format!(
+        "install -d -m 700 -o {DEPLOY_USER} -g {DEPLOY_USER} /home/{DEPLOY_USER}/.ssh && \
+         touch /home/{DEPLOY_USER}/.ssh/authorized_keys && \
+         chown {DEPLOY_USER}:{DEPLOY_USER} /home/{DEPLOY_USER}/.ssh/authorized_keys && \
+         chmod 600 /home/{DEPLOY_USER}/.ssh/authorized_keys && \
+         grep -qxF '{pub_text}' /home/{DEPLOY_USER}/.ssh/authorized_keys || \
+         printf '%s\\n' '{pub_text}' >> /home/{DEPLOY_USER}/.ssh/authorized_keys"
+    );
+    mangosteen_device::remote::ssh_exec(&root, &append_cmd, 20)
+        .map_err(|e| describe_bootstrap_error(instance, "安装 deploy 公钥", &e))?;
+
+    // 5. sshd 加固：禁 root 登录 + 禁密码认证（deploy 也只留密钥）
+    let harden_cmd = format!(
+        "mkdir -p /etc/ssh/sshd_config.d && \
+         printf '%s\\n' \
+           'PermitRootLogin no' \
+           'PasswordAuthentication no' \
+           'KbdInteractiveAuthentication no' \
+           > /etc/ssh/sshd_config.d/99-mangosteen.conf && \
+         chmod 600 /etc/ssh/sshd_config.d/99-mangosteen.conf && \
+         sshd -t && \
+         (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || \
+          kill -HUP $(pgrep -o -x sshd) 2>/dev/null || true)"
+    );
+    mangosteen_device::remote::ssh_exec(&root, &harden_cmd, 30)
+        .map_err(|e| describe_bootstrap_error(instance, "sshd 加固", &e))?;
+
+    // 6. 验证 deploy 密钥（加固后密码认证已禁用，必须成功）
+    let target = deploy_key_target(instance).ok_or_else(|| MnError::Network {
+        stage: "deploy 引导".to_string(),
+        reason: format!(
+            "实例 {} sshd 已加固但 deploy 密钥登录仍失败——请检查实例 authorized_keys",
+            instance.id
+        ),
+    })?;
+    eprintln!(
+        "[cloud] ✓ 实例 {} deploy 引导完成：密钥认证就绪，root/密码登录已禁用",
+        instance.id
+    );
+    Ok(target)
+}
+
+/// 引导失败的错误上下文包装（阶段名 + 原始错误）。
+fn describe_bootstrap_error(
+    instance: &Instance,
+    stage: &str,
+    e: &MnError,
+) -> MnError {
+    MnError::Network {
+        stage: format!("deploy 引导 / {stage}"),
+        reason: format!("实例 {}：{e}", instance.id),
+    }
+}
+
 fn vendor_password_target(
     instance: &Instance,
     config: &OrchestratorConfig,
@@ -1383,6 +1538,16 @@ fn restore_login_credential(
     instance: &mut Instance,
     config: &OrchestratorConfig,
 ) {
+    // deploy 幂等短路（2026-11-17）：已加固实例（deploy 密钥可登录）
+    // 不需要重置 root 密码——密码认证已被 sshd 禁用，重置+密码验证流程
+    // 必然失败。直接返回，后续 ensure_key_target 走 deploy 密钥。
+    if deploy_key_target(instance).is_some() {
+        eprintln!(
+            "[cloud] ✓ 实例 {} deploy 密钥认证已就绪，跳过密码重置流程",
+            instance.id
+        );
+        return;
+    }
     let password = "1qaz@WSX".to_string();
     eprintln!(
         "[cloud] 实例 {} 开始重置登录密码，当前状态：{}",
@@ -1635,15 +1800,20 @@ fn force_reboot_if_unreachable(
         Some(h) if !h.trim().is_empty() => h,
         _ => return Ok(()), // 没有 SSH 地址，交由后续流程报错
     };
-    let probe = mangosteen_device::remote::SshTarget {
-        host,
-        port: instance.network.ssh_port.unwrap_or(22),
-        user: "root".to_string(),
-        password: Some("1qaz@WSX".to_string()),
-        identity_file: None,
+    debug_assert!(!host.is_empty()); // host 仅用于存在性检查，探活走下方凭据链
+    // 探活顺序（2026-11-17）：deploy 密钥优先——已加固实例密码认证被禁，
+    // 用密码探活必然误判不可达。deploy 密钥不可用（未加固实例/网络层不通）
+    // 才回落 root 密码探活。连接层失败（超时/拒绝）时两者都判不可达。
+    let reachable = deploy_key_target(instance).is_some() || {
+        let probe = mangosteen_device::remote::SshTarget {
+            host,
+            port: instance.network.ssh_port.unwrap_or(22),
+            user: "root".to_string(),
+            password: Some("1qaz@WSX".to_string()),
+            identity_file: None,
+        };
+        mangosteen_device::remote::ssh_probe(&probe, 10).unwrap_or(false)
     };
-    let reachable =
-        mangosteen_device::remote::ssh_probe(&probe, 10).unwrap_or(false);
     if reachable {
         return Ok(());
     }
@@ -1692,6 +1862,17 @@ fn wait_until_running_on(
     driver: &dyn mangosteen_core::cloud::ProviderDriver,
     instance: &mut Instance,
 ) -> MnResult<()> {
+    // 节点状态等待（非认证重试，2026-11-17 用户裁决明确分离）：
+    // 这是「厂商状态机 Running」的轮询窗口——实例重启本身耗时 1-2 分钟
+    // 起步（OS 引导 + sshd 启动 + 厂商转发恢复），300s 窗口覆盖冷启动
+    // 与慢重启，与 SSH 登录认证重试（confirm_remote_reachable 的
+    // 2 次 × 3s）是两条独立链路：Running 之前轮询状态，Running
+    // 之后才做认证探测。两者语义不同，窗口不可互相替代。
+    //
+    // 轮询间隔 30s（用户裁决 2026-11-17，原 3s 会触发厂商 226619 限频）：
+    // 1-2 分钟的启动只需 2-4 次 describe；300s 窗口最多 10 次调用，
+    // 把「等待中」误判成「部署失败」的风险彻底消除。状态机粒度足够
+    // （厂商 Running 状态本身的最小驻留单位是秒级，30s 采样无损）。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
         if instance.state == InstanceState::Running {
@@ -1707,7 +1888,7 @@ fn wait_until_running_on(
                 ),
             });
         }
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(30));
         *instance = driver.describe(&instance.id)?;
     }
 }
@@ -1731,28 +1912,18 @@ fn ensure_key_target(
     config: &OrchestratorConfig,
     _fixed_password: Option<&str>,
 ) -> MnResult<mangosteen_device::remote::SshTarget> {
-    let base = vendor_password_target(instance, config)?;
-    // 密钥安装：幂等（装过直接命中），失败不致命——降级回密码 target。
-    match mangosteen_device::remote::install_ssh_copy_id(&base) {
-        Ok(identity_file) => {
-            eprintln!(
-                "[cloud] ✓ 实例 {} 已配置密钥认证（隧道重建将不再依赖 askpass）",
-                instance.id
-            );
-            Ok(mangosteen_device::remote::SshTarget {
-                host: base.host,
-                port: base.port,
-                user: base.user,
-                password: None,
-                identity_file: Some(identity_file),
-            })
-        }
+    // deploy 引导（2026-11-17 裁决）：幂等——已加固实例直接返回 deploy
+    // 密钥 target；新实例用 root 密码一次性引导（建 deploy + 装公钥 +
+    // sshd 加固禁 root/禁密码）后返回 deploy 密钥 target。
+    // 引导失败才降级回 root 密码 target（保底，sshd 未加固的老实例）。
+    match bootstrap_deploy_target(instance, config) {
+        Ok(target) => Ok(target),
         Err(e) => {
             eprintln!(
-                "[cloud] ⚠ 实例 {} 公钥安装失败（{}），降级为密码认证——守护隧道可能受 askpass 拦截影响",
+                "[cloud] ⚠ 实例 {} deploy 引导失败（{}），降级为 root 密码认证",
                 instance.id, e
             );
-            Ok(base)
+            vendor_password_target(instance, config)
         }
     }
 }
@@ -1854,7 +2025,16 @@ impl CloudOrchestrator {
             // **秒级探活**（ssh_probe：单次连接、无重试、判定与凭据无关）：
             // 不可达 → stop → 等真实 Stopped → start 强制重启，这是伪
             // Running 唯一有效的处置。
-            let _ = driver.start(&instance.id);
+            // start 结果处理同 GPU 匹配分支：状态赋回 instance，避免
+            // wait_until_running 重复 start 撞 226619 限频。
+            match driver.start(&instance.id) {
+                Ok(fresh) => {
+                    instance = fresh;
+                }
+                Err(e) => {
+                    eprintln!("[cloud] ⚠ 实例 {} 启动指令失败：{e}", instance.id);
+                }
+            }
             self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
             force_reboot_if_unreachable(driver, &mut instance, &self.config)?;
             // 开机后恢复登录凭证：统一重置为固定密码 "1qaz@WSX"
@@ -1908,11 +2088,21 @@ impl CloudOrchestrator {
                     "[cloud] 实例 {} 开始启动，当前状态：{}",
                     instance.id, instance.state
                 );
-                let _ = driver.start(&instance.id);
-                eprintln!(
-                    "[cloud] ✓ 实例 {} 启动指令已发送",
-                    instance.id
-                );
+                // start 结果必须处理（历史 bug：let _ 丢弃 + 无条件打印
+                // 「启动指令已发送」误导排查）：成功则把 Starting 状态赋回
+                // instance，wait_until_running 首轮直接进轮询，不再重复
+                // start（重复 start 会让 API 调用翻倍，撞厂商 226619 限频，
+                // 把「启动中」误判成「部署失败」）；失败则保留原状态，
+                // 由 wait_until_running 的重试分支在限频恢复后接管。
+                match driver.start(&instance.id) {
+                    Ok(fresh) => {
+                        instance = fresh;
+                        eprintln!("[cloud] ✓ 实例 {} 启动指令已发送", instance.id);
+                    }
+                    Err(e) => {
+                        eprintln!("[cloud] ⚠ 实例 {} 启动指令失败：{e}", instance.id);
+                    }
+                }
                 self.wait_until_running(driver, &mut instance, Some(plan.engine_port))?;
                 eprintln!(
                     "[cloud] ✓ 实例 {} 已进入 Running 状态",
@@ -2267,11 +2457,14 @@ fn finish_provision(
 /// 重试用尽后仍然失败，就把「连不上」这个事实**明确**报出来——
 /// 不要让调用方把它误读成下载失败或解压失败。
 fn confirm_remote_reachable(target: &mangosteen_device::remote::SshTarget) -> MnResult<()> {
-    // 15 次 × 6s ≈ 90s 窗口：实测压测中，实例从厂商报 Running 到 sshd
-    // 真正接受登录（含密码同步）最长超过 36s——12 次 × 3s 的窗口依然
-    // 全部撞在 `Permission denied` 上。冷启动慢不是失败，窗口跨过去即可。
-    const ATTEMPTS: u32 = 15;
-    const RETRY_WAIT: Duration = Duration::from_secs(6);
+    // 认证重试至多 2 次（用户裁决 2026-11-17）：历史上这里是 15 次 × 6s
+    // ≈ 90s 的窗口，设计意图是跨过「厂商报 Running 但 sshd 未就绪」的
+    // 冷启动窗口。但实测表明该窗口远超 90s 时（如 3080Ti 节点开机后
+    // 端口长时间不可达），15 次重试只是把失败推迟 90s，还让用户干等。
+    // 现在 2 次 × 3s：快速失败，交由上层「重启实例/回滚」流程处置——
+    // 那边的恢复手段（stop/start）比继续重试同一台机器更有效。
+    const ATTEMPTS: u32 = 2;
+    const RETRY_WAIT: Duration = Duration::from_secs(3);
     let mut last_reason = String::new();
     for attempt in 1..=ATTEMPTS {
         match mangosteen_device::remote::ssh_exec(target, "true", 15) {

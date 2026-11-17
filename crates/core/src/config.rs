@@ -215,7 +215,9 @@ fn default_bind_host() -> String {
 }
 
 fn default_remote_workdir() -> String {
-    "/root/mangosteen".to_string()
+    // deploy 用户家目录（2026-11-17 裁决）：mangosteen 全链路以 deploy
+    // 身份密钥认证操作，workdir 必须落在 deploy 可写的家目录下。
+    "/home/deploy/mangosteen".to_string()
 }
 
 fn default_llama_server_url() -> String {
