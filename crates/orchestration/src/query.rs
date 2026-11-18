@@ -187,6 +187,8 @@ impl Orchestrator {
             let remote_port = r.plan.cloud.as_ref().map(|c| c.engine_port);
             // 上游 API Key（safety 分支，改动点 2）：随台账透传给网关
             let api_key = r.plan.cloud.as_ref().and_then(|c| c.api_key.clone());
+            // TLS（P1）：随台账透传（引导链证书就绪后为 true）
+            let tls = r.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false);
 
             out.push(ActiveDeployment {
                 id: id.clone(),
@@ -205,6 +207,7 @@ impl Orchestrator {
                 port: r.plan.local_access_port(),
                 remote_port,
                 ready,
+                tls,
                 api_key,
             });
         }
@@ -224,6 +227,7 @@ impl Orchestrator {
                 // 配置态远端路由（remote_inference）：key 由调用方自行配置，
                 // 这里保持 None（不假设鉴权形态）。
                 api_key: None,
+                tls: false,
             });
         }
         let active = self.refresh()?;
@@ -236,6 +240,7 @@ impl Orchestrator {
                 model_id: a.model.clone(),
                 origin_label: a.origin.label(),
                 api_key: a.api_key.clone(),
+                tls: a.tls,
             });
         }
         Err(MnError::bad_request(
@@ -259,6 +264,7 @@ impl Orchestrator {
                     model_id: id.to_string(),
                     origin_label: "remote-inference".to_string(),
                     api_key: None,
+                    tls: false,
                 });
             }
         } else if let Some((model_id, port)) = self.routes().iter().next() {
@@ -268,6 +274,7 @@ impl Orchestrator {
                 model_id: model_id.clone(),
                 origin_label: "remote-inference".to_string(),
                 api_key: None,
+                tls: false,
             });
         }
         let Some(id) = want
@@ -296,6 +303,7 @@ impl Orchestrator {
                 model_id: a.model.clone(),
                 origin_label: a.origin.label(),
                 api_key: a.api_key.clone(),
+                tls: a.tls,
             }),
             None => {
                 let running: Vec<&str> = active
@@ -357,6 +365,7 @@ impl Orchestrator {
                 remote_port: r.plan.cloud.as_ref().map(|c| c.engine_port),
                 ready: r.run_status == mangosteen_base::state::RunStatus::Active,
                 api_key: r.plan.cloud.as_ref().and_then(|c| c.api_key.clone()),
+                tls: r.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false),
             })
             .collect();
         Ok(GatewayStatus {

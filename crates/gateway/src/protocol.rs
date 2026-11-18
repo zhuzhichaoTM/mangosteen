@@ -601,6 +601,7 @@ mod tests {
             model_id: "qwen2.5-7b-instruct:q4_k_m".into(),
             origin_label: "本地算力".into(),
             api_key: None,
+            tls: false,
         }
     }
 

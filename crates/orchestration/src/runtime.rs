@@ -72,6 +72,9 @@ pub struct ActiveDeployment {
     pub remote_port: Option<u16>,
     /// 是否就绪（基于 run_status）
     pub ready: bool,
+    /// TLS 是否启用（P1 传输加密）：从台账 CloudPlan.tls 透传，
+    /// 网关按此决定转发 https 还是 http。
+    pub tls: bool,
     /// 上游 API Key（safety 分支，改动点 2）。
     ///
     /// 从台账 `CloudPlan::api_key` 透传：网关构造 `BackendTarget` 时

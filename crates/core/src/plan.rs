@@ -191,6 +191,14 @@ pub struct CloudPlan {
     /// 旧台账没有该字段 → 反序列化 `None`，恢复路径会重新生成。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// TLS 是否启用（P1 传输加密，2026-11-18）。
+    ///
+    /// 引导链生成自签证书 `{workdir}/tls/server.{key,crt}` 时为 true，
+    /// llama-server 以 `--ssl-key-file/--ssl-cert-file` 启动——推理流量
+    /// 在 SSH 隧道内再套一层 TLS。探活/relay/健康检查按此走 https
+    /// （自签证书，curl `-k`）。旧台账无此字段 → `false`（明文 HTTP）。
+    #[serde(default)]
+    pub tls: bool,
     /// 目标加速卡型号（归一化名，如 `RTX 4090`）
     pub gpu_model: String,
     /// 卡数。个人级场景固定 1，保留字段以便扩展多卡非核心场景。

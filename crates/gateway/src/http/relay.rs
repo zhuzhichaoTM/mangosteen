@@ -100,6 +100,11 @@ impl GatewayServer {
         if let Some(key) = &target.api_key {
             cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
         }
+        // https 上游（P1 TLS，自签证书）：跳过证书链校验——证书是
+        // 引导链自签的，加密本身仍有效（SSH 隧道内再套一层 TLS）。
+        if target.tls {
+            cmd.arg("--insecure");
+        }
         let mut child = cmd
             .arg("--data-binary")
             .arg("@-")

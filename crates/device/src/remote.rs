@@ -201,6 +201,11 @@ pub fn http_with_key(
     if let Some(key) = api_key {
         cmd.arg("--header").arg(format!("Authorization: Bearer {key}"));
     }
+    // https 上游（P1 TLS，自签证书）：跳过证书链校验——证书是引导链
+    // 自签的，信任根是本机台账，无第三方 CA 可校验；加密本身仍有效。
+    if url.starts_with("https://") {
+        cmd.arg("--insecure");
+    }
     if let Some(b) = json_body {
         cmd.arg("--header")
             .arg("Content-Type: application/json")
@@ -1503,6 +1508,10 @@ pub fn start_llama_server_with_key(
             30,
         )?;
     }
+    // TLS 参数（P1 传输加密）：引导链生成 `{workdir}/tls/server.{key,crt}`
+    // 时追加 `--ssl-key-file/--ssl-cert-file`（llama.cpp 参数名）；证书
+    // 缺失则不加（llama-server 走明文 HTTP，SSH 隧道仍加密）。
+    // 已有 ssl 参数时不重复追加（幂等）。
     let mut owned_args: Vec<String>;
     let args: &[String] = if api_key.is_some() {
         // --api-key-file 与 --api-key 互斥；已有 --api-key 时不重复追加
@@ -1520,6 +1529,33 @@ pub fn start_llama_server_with_key(
     } else {
         args
     };
+    // TLS 参数追加（P1）：引导链生成的证书存在则加 `--ssl-key-file/--ssl-cert-file`
+    // （llama.cpp 参数名）；证书缺失则明文。已在 args 里则不重复（幂等）。
+    let has_ssl = args.iter().any(|a| a == "--ssl-key-file" || a == "--ssl-cert-file");
+    let tls_args: Vec<String> = if has_ssl {
+        Vec::new()
+    } else {
+        let key = format!("{workdir}/tls/server.key");
+        let crt = format!("{workdir}/tls/server.crt");
+        // 探测证书是否存在（单次 ssh 往返，~0.5s）
+        let check = format!("test -f {crt} && test -f {key} && echo yes || echo no");
+        let exists = ssh_exec(target, &check, 15)
+            .map(|o| o.trim() == "yes")
+            .unwrap_or(false);
+        if exists {
+            vec![
+                "--ssl-key-file".to_string(),
+                key,
+                "--ssl-cert-file".to_string(),
+                crt,
+            ]
+        } else {
+            Vec::new()
+        }
+    };
+    let mut all_args: Vec<String> = args.to_vec();
+    all_args.extend(tls_args);
+    let args: &[String] = &all_args;
     let log = match port_from_args(args) {
         8080 => format!("{workdir}/llama-server.log"),
         p => format!("{workdir}/llama-server-{p}.log"),

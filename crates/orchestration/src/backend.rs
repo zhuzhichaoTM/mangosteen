@@ -20,12 +20,17 @@ pub struct BackendTarget {
     /// llama-server。同源部署（本地 127.0.0.1）无 key 时为 `None`，
     /// 行为与旧版完全一致。
     pub api_key: Option<String>,
+    /// TLS 是否启用（P1 传输加密）：true 时 base_url 用 https——
+    /// llama-server 由引导链证书以 `--ssl-key-file/--ssl-cert-file`
+    /// 启动，网关转发走 https（自签证书，curl `-k`）。
+    pub tls: bool,
 }
 
 impl BackendTarget {
-    /// base URL（不含 `/v1`）。
+    /// base URL（不含 `/v1`）。TLS 启用时 https（自签证书）。
     pub fn base_url(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{scheme}://{}:{}", self.host, self.port)
     }
 
     /// OpenAI 兼容 base URL。

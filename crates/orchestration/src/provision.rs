@@ -951,7 +951,8 @@ impl Orchestrator {
             ssh,
             workdir,
         } = prepared;
-        let cloud_plan = plan
+        // mut：TLS 探测（P1）按实际证书状态回填 tls 标记，随台账持久化
+        let mut cloud_plan = plan
             .cloud
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
@@ -1019,6 +1020,19 @@ impl Orchestrator {
         );
 
         perf.enter("拉起llama-server进程");
+        // TLS 探测（P1）：引导链已生成证书则启动参数含 --ssl-*（start_node_
+        // engine 内部自动追加），这里探测证书存在性写台账——后续探活/relay
+        // 按此走 https。探测失败按 false（明文）处理，不阻断部署。
+        {
+            let tls_check = format!(
+                "test -f {workdir}/tls/server.crt && test -f {workdir}/tls/server.key && echo yes || echo no"
+            );
+            if let Ok(out) = mangosteen_device::remote::ssh_exec(&ssh, &tls_check, 15) {
+                if out.trim() == "yes" {
+                    cloud_plan.tls = true;
+                }
+            }
+        }
         let started =
             mangosteen_provider::orchestrator::start_node_engine(&ssh, &workdir, &launch_config);
         perf.leave("llama-server启动完成");
@@ -1068,7 +1082,10 @@ impl Orchestrator {
             updated.plan.cloud = Some(c);
             self.state.upsert(updated)?;
         }
-        let health = format!("http://127.0.0.1:{local_port}/health");
+        // TLS（P1）：台账标记 tls 时走 https（自签证书，curl -k 已内置）
+        let tls_on = cloud_plan.tls;
+        let scheme = if tls_on { "https" } else { "http" };
+        let health = format!("{scheme}://127.0.0.1:{local_port}/health");
         let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
         perf.enter("健康检查(/health就绪)");
         if let Err(e) =

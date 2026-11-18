@@ -423,6 +423,9 @@ impl Scheduler {
             // 任务级 API Key（safety 分支，改动点 2）：部署计划生成即定钥，
             // 随台账持久化；启动时写远端密钥文件、网关转发时附 Bearer 头。
             api_key: Some(crate::orchestrator::generate_api_key_pub()),
+            // TLS（P1 传输加密）：引导链生成自签证书后启动时探测写入；
+            // 计划构造时为 false，部署流程随后按实际状态回填。
+            tls: false,
             auxiliary_downloads: deploy_spec
                 .aux_files
                 .iter()
@@ -965,6 +968,7 @@ mod tests {
             mmproj_path: None,
             draft_model_path: None,
             api_key: None,
+            tls: false,
             auxiliary_downloads: Vec::new(),
             download_url: None,
             download_bytes: None,

@@ -1409,6 +1409,40 @@ fn bootstrap_deploy_target(
     }
     eprintln!("[cloud] ✓ 实例 {} 外部依赖就绪：{}", instance.id, deps_out.trim());
 
+    // 4d-2. TLS 证书生成（P1 传输加密，root 身份）：为 llama-server 生成
+    // 自签证书 `{workdir}/tls/server.{key,crt}`（10 年有效期）——推理流量
+    // 在 SSH 隧道内再套一层 TLS，防隧道端点（本地网关/中间进程）明文读取
+    // prompt/回复。密钥 600、证书 644，属主 deploy。失败仅降级（裸 HTTP
+    // 仍可用，记日志）。
+    {
+        let workdir = config.remote_workdir.trim_end_matches('/').to_string();
+        let tls_cmd = format!(
+            "mkdir -p {workdir}/tls && \
+             if [ ! -f {workdir}/tls/server.crt ]; then \
+               openssl req -x509 -newkey rsa:2048 -keyout {workdir}/tls/server.key \
+                 -out {workdir}/tls/server.crt -days 3650 -nodes \
+                 -subj '/CN=llama-server' >/dev/null 2>&1 || true; \
+             fi; \
+             if [ -f {workdir}/tls/server.crt ] && [ -f {workdir}/tls/server.key ]; then \
+               chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}/tls/server.key {workdir}/tls/server.crt && \
+               chmod 600 {workdir}/tls/server.key && chmod 644 {workdir}/tls/server.crt && \
+               echo tls-ready; \
+             else \
+               echo tls-unavailable; \
+             fi"
+        );
+        match mangosteen_device::remote::ssh_exec(&root, &tls_cmd, 30) {
+            Ok(out) if out.contains("tls-ready") => {
+                eprintln!("[cloud] ✓ 实例 {} TLS 证书已就绪（llama-server 将启用 https）", instance.id);
+            }
+            Ok(_) => eprintln!(
+                "[cloud] ⚠ 实例 {} TLS 证书生成失败（openssl 缺失？），推理走明文 HTTP（SSH 隧道仍加密）",
+                instance.id
+            ),
+            Err(e) => eprintln!("[cloud] ⚠ 实例 {} TLS 证书生成失败（{e}），推理走明文 HTTP", instance.id),
+        }
+    }
+
     // 4e. 远端主机加固（2026-11-17 用户裁决，root 身份执行）。
     //
     // ⚠️ 平台现实：优云智算实例是 Docker 容器——/proc/sys 只读（swappiness/

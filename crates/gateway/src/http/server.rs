@@ -125,6 +125,7 @@ impl GatewayServer {
                                 model_id,
                                 origin_label: record.plan.origin.label(),
                                 api_key: record.plan.cloud.as_ref().and_then(|c| c.api_key.clone()),
+                                tls: record.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false),
                             },
                         );
                     }

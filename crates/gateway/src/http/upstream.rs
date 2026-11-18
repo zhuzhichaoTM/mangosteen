@@ -49,6 +49,87 @@ pub fn http_post_json_with_key(
     timeout: Duration,
     api_key: Option<&str>,
 ) -> MnResult<(u16, String)> {
+    http_post_json_with_key_tls(url, body, timeout, api_key, false)
+}
+
+/// 带 TLS 标志的版本（P1 传输加密）：tls=true 时 URL 是 https（自签
+/// 证书），裸 TcpStream 无法完成 TLS 握手——改走系统 curl（`-k` 跳过
+/// 证书链校验，证书是引导链自签的）。tls=false 时保持裸 TCP 快路径。
+pub fn http_post_json_with_key_tls(
+    url: &str,
+    body: &[u8],
+    timeout: Duration,
+    api_key: Option<&str>,
+    tls: bool,
+) -> MnResult<(u16, String)> {
+    if tls {
+        // curl 快路径：--silent 拿状态码+体（-w 分隔），-k 自签证书
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("--silent")
+            .arg("--show-error")
+            .arg("--noproxy")
+            .arg("*")
+            .arg("--insecure")
+            .arg("--max-time")
+            .arg(timeout.as_secs().to_string())
+            .arg("-X")
+            .arg("POST")
+            .arg("-H")
+            .arg("Content-Type: application/json")
+            .arg("--data-binary")
+            .arg("@-")
+            .arg("--write-out")
+            .arg("\n%{http_code}")
+            .arg(url);
+        if let Some(key) = api_key {
+            cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
+        }
+        use std::io::Write as _;
+        let mut child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| MnError::Network {
+                stage: "启动 curl".to_string(),
+                reason: format!("{e}"),
+            })?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| MnError::Network {
+                stage: "curl stdin".to_string(),
+                reason: "stdin 不可用".to_string(),
+            })?
+            .write_all(body)
+            .map_err(|e| MnError::Network {
+                stage: "curl stdin 写入".to_string(),
+                reason: format!("{e}"),
+            })?;
+        let out = child
+            .wait_with_output()
+            .map_err(|e| MnError::Network {
+                stage: "curl 等待".to_string(),
+                reason: format!("{e}"),
+            })?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut lines = stdout.rsplitn(2, '\n');
+        let code = lines
+            .next()
+            .and_then(|c| c.trim().parse::<u16>().ok())
+            .unwrap_or(0);
+        let resp_body = lines.next().unwrap_or("").to_string();
+        if code == 0 {
+            return Err(MnError::Network {
+                stage: "上游推理服务".to_string(),
+                reason: format!(
+                    "curl 失败：{}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            });
+        }
+        return Ok((code, resp_body));
+    }
     let (host_port, path) = split_url(url)?;
     let mut stream = TcpStream::connect_timeout(
         &host_port.parse().map_err(|_| MnError::Network {
