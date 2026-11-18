@@ -660,19 +660,9 @@ impl Orchestrator {
             &device.workdir,
             &self.config().cloud.llama_server_url,
         )?;
-        // 节点配置完成后才禁用 root 密码登录（2026-11-17 用户裁决）：
-        // 设备配置期间依赖安装/故障修复可能还需要 root 密码通道，
-        // 加固过早会把运维窗口关掉。配置成功返回 = 加固条件满足。
-        // 失败不致命（仅安全降级）：deploy 密钥通道不受影响。
-        if let Err(e) = mangosteen_provider::orchestrator::harden_sshd_after_node_config(
-            &device.ssh.host,
-            device.ssh.port,
-        ) {
-            eprintln!(
-                "[cloud] ⚠ 实例 {} sshd 加固失败（安全降级，不影响部署）：{e}",
-                device.ssh.host
-            );
-        }
+        // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署
+        // 成功后」统一加固——下载/启动/健康检查期间 root 通道保持可用
+        // （失败修复、依赖补装可能需要），部署成功才是真正的加固时机。
         // 节点配置完成后才开始模型下载。
         sink(
             crate::progress::DeployStage::Configuring,
@@ -874,19 +864,9 @@ impl Orchestrator {
             &p.workdir,
             &self.config().cloud.llama_server_url,
         )?;
-        // 节点配置完成后才禁用 root 密码登录（2026-11-17 用户裁决，
-        // 与上方 deploy_instance 路径一致）：失败仅安全降级。
-        if let Some(inst) = p.instance.as_ref() {
-            if let Err(e) = mangosteen_provider::orchestrator::harden_sshd_after_node_config(
-                &inst.network.ssh_host.clone().unwrap_or_default(),
-                inst.network.ssh_port.unwrap_or(22),
-            ) {
-                eprintln!(
-                    "[cloud] ⚠ 实例 {} sshd 加固失败（安全降级，不影响部署）：{e}",
-                    inst.id
-                );
-            }
-        }
+        // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署
+        // 成功后」统一加固——与 deploy_instance 路径一致，下载/启动/健康
+        // 检查期间 root 通道保持可用。
         perf.leave("节点配置完成");
         sink(
             crate::progress::DeployStage::Configuring,
@@ -1123,6 +1103,19 @@ impl Orchestrator {
             return Err(e);
         }
         perf.leave("健康检查通过");
+        // sshd 加固（2026-11-18 用户裁决：root 密码与密钥的禁止时机调整到
+        // 「模型部署成功后」）：部署完全成功（健康检查通过）才禁用 root——
+        // 下载/启动/健康检查期间 root 通道保持可用（失败修复、依赖补装、
+        // 证书/密钥重生成都可能用到），避免加固过早把运维窗口关掉。
+        // 失败不致命（仅安全降级）：deploy 密钥通道不受影响。
+        if let Err(e) =
+            mangosteen_provider::orchestrator::harden_sshd_after_node_config(&ssh.host, ssh.port)
+        {
+            eprintln!(
+                "[cloud] ⚠ 实例 {} sshd 加固失败（安全降级，不影响部署）：{e}",
+                ssh.host
+            );
+        }
         // 性能统计：启动阶段完成
         perf.finish(true);
 
