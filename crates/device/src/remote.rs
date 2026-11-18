@@ -1561,9 +1561,52 @@ pub fn start_llama_server_with_key(
             Vec::new()
         }
     };
-    let mut all_args: Vec<String> = args.to_vec();
-    all_args.extend(tls_args);
-    let args: &[String] = &all_args;
+    // P2 模型静态解密（2026-11-18）：args 里 --model/-m 指向 .enc 加密
+    // 文件时，解密到 /dev/shm（tmpfs 内存盘）并把 -m 指向明文副本。
+    // 解密失败返回 Err（启动失败快照里能看到原因）；.enc 不存在（明文
+    // 部署/加密跳过）时 args 原样透传。
+    let mut decrypted_args: Vec<String> = args.to_vec();
+    decrypted_args.extend(tls_args);
+    let mut args: Vec<String> = decrypted_args;
+    {
+        let model_arg = args.iter().position(|a| a == "--model" || a == "-m");
+        if let Some(pos) = model_arg {
+            if let Some(model_path) = args.get(pos + 1).cloned() {
+                if model_path.ends_with(".enc") {
+                    let key_path = "/home/deploy/mangosteen/tls/.model_key";
+                    let plain = format!(
+                        "/dev/shm/mangosteen-models/{}",
+                        model_path.rsplit('/').next().unwrap_or("model.gguf")
+                    );
+                    let dec_cmd = format!(
+                        "mkdir -p /dev/shm/mangosteen-models; \
+                         if [ ! -s {q_plain} ]; then \
+                           openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 \
+                             -in {q_enc} -out {q_plain} -pass file:{q_key} || exit 1; \
+                         fi; echo decrypted-ok",
+                        q_plain = shell_quote(&plain),
+                        q_enc = shell_quote(&model_path),
+                        q_key = shell_quote(key_path),
+                    );
+                    let dec = ssh_exec(target, &dec_cmd, 600).map_err(|e| {
+                        MnError::Network {
+                            stage: "模型解密".to_string(),
+                            reason: format!("加密模型解密失败：{e}"),
+                        }
+                    })?;
+                    if !dec.contains("decrypted-ok") {
+                        return Err(MnError::Network {
+                            stage: "模型解密".to_string(),
+                            reason: format!("解密命令未确认成功：{dec}"),
+                        });
+                    }
+                    // args 里的 .enc 路径替换为 /dev/shm 明文路径
+                    args[pos + 1] = plain;
+                }
+            }
+        }
+    }
+    let args: &[String] = &args;
     let log = match port_from_args(args) {
         8080 => format!("{workdir}/llama-server.log"),
         p => format!("{workdir}/llama-server-{p}.log"),

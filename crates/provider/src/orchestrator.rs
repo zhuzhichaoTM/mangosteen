@@ -1461,6 +1461,23 @@ fn bootstrap_deploy_target(
         }
     }
 
+    // 4d-3. 模型静态加密密钥（P2，2026-11-18）：与证书同目录，600 权限，
+    // 32 字节随机（openssl rand -hex 32 → AES-256 密钥）。
+    // 幂等：已存在则跳过；失败不阻断（加密步骤会跳过）。
+    let model_key_cmd = "mkdir -p /home/deploy/mangosteen/tls; \
+        if [ ! -f /home/deploy/mangosteen/tls/.model_key ]; then \
+          (openssl rand -hex 32 > /home/deploy/mangosteen/tls/.model_key 2>/dev/null || \
+           head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > /home/deploy/mangosteen/tls/.model_key); \
+        fi; \
+        chmod 600 /home/deploy/mangosteen/tls/.model_key 2>/dev/null || true; \
+        echo model-key-ready";
+    match mangosteen_device::remote::ssh_exec(&root, &model_key_cmd, 20) {
+        Ok(out) if out.contains("model-key-ready") => {
+            eprintln!("[cloud] ✓ 实例 {} 模型加密密钥已就绪", instance.id);
+        }
+        _ => eprintln!("[cloud] ⚠ 实例 {} 模型加密密钥生成失败（模型加密将跳过）", instance.id),
+    }
+
     // 4e. 远端主机加固（2026-11-17 用户裁决，root 身份执行）。
     //
     // ⚠️ 平台现实：优云智算实例是 Docker 容器——/proc/sys 只读（swappiness/
@@ -2873,6 +2890,34 @@ pub fn download_model_node(
                 "远端文件不是有效的 GGUF（魔数不符）：{remote_model}，请检查下载地址是否指向正确的模型文件"
             ),
         });
+    }
+
+    // P2 静态加密（2026-11-18 用户裁决）：明文 GGUF → AES-256 加密 +
+    // 删明文 + 标记。密钥在引导链 4d-2 生成（600，deploy 可读）。
+    // 加密失败不阻断部署（安全降级：明文保留，llama-server 走明文路径）。
+    let enc_path = format!("{remote_model}.enc");
+    let key_path = "/home/deploy/mangosteen/tls/.model_key";
+    let enc_cmd = format!(
+        "if [ -f '{enc_path}' ] && [ -s '{enc_path}' ]; then \
+           echo already-encrypted; \
+         elif [ -f '{key_path}' ] && command -v openssl >/dev/null 2>&1; then \
+           openssl enc -aes-256-cbc -salt -pbkdf2 -iter 10000 -md sha256 \
+             -in '{remote_model}' -out '{enc_path}' -pass file:'{key_path}' && \
+           rm -f '{remote_model}' '{remote_model}.download.ok' && echo encrypted-ok; \
+         else \
+           echo encrypt-skipped; \
+         fi",
+    );
+    match mangosteen_device::remote::ssh_exec(target, &enc_cmd, 600) {
+        Ok(out) => {
+            let out = out.trim();
+            if out.contains("encrypted-ok") || out.contains("already-encrypted") {
+                eprintln!("[cloud] ✓ 实例 {} 模型静态加密完成（AES-256，明文已删除）", plan.model_path);
+            } else {
+                eprintln!("[cloud] ⚠ 实例 {} 模型加密跳过（密钥缺失或 openssl 不可用），明文保留", plan.model_path);
+            }
+        }
+        Err(e) => eprintln!("[cloud] ⚠ 实例 {} 模型加密失败（{e}），明文保留（安全降级）", plan.model_path),
     }
     Ok(remote_model.clone())
 }
