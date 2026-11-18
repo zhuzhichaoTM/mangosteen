@@ -446,7 +446,7 @@ impl Orchestrator {
     fn download_all_node_models(
         &self,
         ssh: &SshTarget,
-        cloud_plan: &mangosteen_core::plan::CloudPlan,
+        cloud_plan: &mut mangosteen_core::plan::CloudPlan,
         progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
         sink: crate::progress::ProgressSink<'_>,
     ) -> MnResult<()> {
@@ -476,6 +476,9 @@ impl Orchestrator {
             ));
         }
         let total = manifest.len();
+        // 主模型路径（P2 加密后回写用）：加密后主模型路径变为 .enc，
+        // 回写 cloud_plan.model_path，供启动前检查与 launch_config 使用。
+        let main_model_path = cloud_plan.model_path.clone();
         for (i, (path, url, bytes, kind)) in manifest.into_iter().enumerate() {
             let name = path.rsplit('/').next().unwrap_or(&path).to_string();
             sink(
@@ -571,13 +574,19 @@ impl Orchestrator {
                     }
                 }
             };
-            mangosteen_provider::orchestrator::download_model_node(
+            // 下载/加密的真实结果路径（P2：加密成功时为 .enc）。
+            let downloaded = mangosteen_provider::orchestrator::download_model_node(
                 &ssh,
                 &file_plan,
                 hf_token.as_deref(),
                 Some(&staged),
                 None,
             )?;
+            // 主模型路径回写：加密后（.enc）必须替换 cloud_plan.model_path，
+            // 否则启动前检查与 launch_config 仍指向已删除的明文文件。
+            if path == main_model_path {
+                cloud_plan.model_path = downloaded;
+            }
             let size = mangosteen_device::remote::remote_file_size(ssh, &path)?;
             sink(
                 DeployStage::Downloading,
@@ -631,7 +640,7 @@ impl Orchestrator {
         // 依赖安装、引擎准备、模型下载和隧道全部改用密钥认证。
         let ssh = mangosteen_provider::orchestrator::configure_existing_ssh_access(&device.ssh)?;
 
-        let cloud_plan = plan
+        let mut cloud_plan = plan
             .cloud
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
@@ -675,7 +684,7 @@ impl Orchestrator {
             crate::progress::StageOutcome::Running,
             "开始在目标节点下载模型".to_string(),
         );
-        self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
+        self.download_all_node_models(&ssh, &mut cloud_plan, progress, sink)?;
 
         // 本地端口必须从调度器的 11435-11999 区间分配（全局唯一），绝不能用远端
         // engine_port（固定 8080）：两个不同节点上的模型 engine_port 可能同为 8080，
@@ -736,7 +745,7 @@ impl Orchestrator {
             });
         }
 
-        let cloud_plan = plan
+        let mut cloud_plan = plan
             .cloud
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
@@ -896,7 +905,7 @@ impl Orchestrator {
             ),
         );
         perf.enter("模型下载");
-        self.download_all_node_models(&ssh, &cloud_plan, progress, sink)?;
+        self.download_all_node_models(&ssh, &mut cloud_plan, progress, sink)?;
         perf.leave("模型下载完成");
         perf.finish(true);
 
