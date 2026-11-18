@@ -712,13 +712,21 @@ fn ssh_home_dir() -> MnResult<PathBuf> {
     Ok(dir)
 }
 
-/// 本机默认私钥路径（`~/.ssh/id_ed25519`）。
+/// 本机默认私钥路径（独立密钥优先，2026-11-17 用户裁决）。
+///
+/// 优先级：`~/.ssh/mangosteen_ed25519`（独立部署密钥）→ 旧版
+/// `~/.ssh/id_ed25519`（存量实例兼容——其 authorized_keys 里是旧公钥）。
 ///
 /// **不**保证文件存在；只用于「尝试用已有密钥登录」的探测场景。
 pub fn default_identity_key() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let key = PathBuf::from(home).join(".ssh").join("id_ed25519");
-    key.is_file().then_some(key)
+    let ssh_dir = PathBuf::from(home).join(".ssh");
+    let dedicated = ssh_dir.join("mangosteen_ed25519");
+    if dedicated.is_file() {
+        return Some(dedicated);
+    }
+    let legacy = ssh_dir.join("id_ed25519");
+    legacy.is_file().then_some(legacy)
 }
 
 /// 返回本机默认可用的 ed25519 私钥路径，不存在时用 `ssh-keygen` 无交互生成。
