@@ -263,7 +263,11 @@ impl GatewayServer {
         stream
             .set_write_timeout(Some(Duration::from_secs(300)))
             .ok();
-
+        // 审计（P2）：客户端来源地址（回环/局域网/非回环），失败时 "-"
+        let peer = stream
+            .peer_addr()
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|_| "-".to_string());
         let mut reader = BufReader::new(
             stream
                 .try_clone()
@@ -293,6 +297,7 @@ impl GatewayServer {
         }
 
         let resp = self.route(&req);
+        audit_log(&peer, &req, resp.status);
         let mut s = stream;
         s.write_all(&resp.to_bytes())
             .map_err(|e| MnError::io("写响应", &e))?;
@@ -558,4 +563,76 @@ mod tests {
         assert_eq!(p.header("Content-Type"), Some("application/json"));
         assert_eq!(p.header("CONTENT-TYPE"), Some("application/json"));
     }
+}
+
+/// 访问审计日志（P2，2026-11-18）：一行一请求，追加写
+/// `{config_dir}/logs/audit-YYYYMMDD.log`（600 权限）。
+///
+/// 记录内容：时间戳 / 来源 IP / 方法 / 路径 / 状态码 / 鉴权 key 前缀。
+/// - 非回环来源标 `[non-loopback]`——网关只该被本机访问；
+/// - 401 标 `[auth-failed]`——401 洪水通常是暴力尝试。
+/// 审计失败绝不阻断请求（磁盘满/权限问题——记 stderr 即可）。
+fn audit_log(peer: &str, req: &ParsedRequest, status: u16) {
+    use std::io::Write as _;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let date = {
+        let days = (now / 86400) as i64;
+        let (y, m, d) = civil_from_days(days);
+        format!("{y:04}{m:02}{d:02}")
+    };
+    let auth_prefix = req
+        .header("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|k| {
+            let k = k.trim();
+            if k.len() > 8 { format!("{}...", &k[..8]) } else { k.to_string() }
+        })
+        .unwrap_or_else(|| "-".into());
+    let non_loopback = !peer.starts_with("127.") && peer != "::1" && peer != "-";
+    let flags = match (status, non_loopback) {
+        (401, _) => " [auth-failed]",
+        (_, true) => " [non-loopback]",
+        _ => "",
+    };
+    let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env)
+        .join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("audit-{date}.log"));
+    let line = format!(
+        "{} {} \"{} {}\" {}{} key={}\n",
+        now, peer, req.method, req.path, status, flags, auth_prefix
+    );
+    let ok = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            f.write_all(line.as_bytes())
+        })
+        .is_ok();
+    if !ok {
+        eprintln!("[audit] ⚠ 审计日志写入失败（不影响请求）：{path:?}");
+    }
+}
+
+/// days → (year, month, day) civil date（Howard Hinnant 算法，无外部依赖）。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
