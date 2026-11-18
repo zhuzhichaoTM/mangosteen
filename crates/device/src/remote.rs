@@ -1446,7 +1446,41 @@ pub fn ensure_llama_server(
          test -f {workdir}/bin/libllama-server-impl.so || {{ echo '缺少 libllama-server-impl.so' >&2; exit 1; }}; \
          echo {installed}"
     );
-    let out = ssh_exec(target, &script, 900)?;
+    let out = match ssh_exec(target, &script, 900) {
+        Ok(out) => out,
+        Err(first_err) => {
+            // 函数级重试（2026-11-18 网络抖动裁决）：gh-proxy/海外节点
+            // 对 GitHub releases 大文件传输存在时段性断流（errorCode=16
+            // Download aborted，aria2c 内部 15 次重试仍失败）。aria2c
+            // 带 --continue=true 断点续传，重新执行能从断点继续累积
+            // 进度——多次函数级重试可扛过抖动窗口（实测成功时段 20s 下完
+            // 607MB，失败时段所有源/并发数全断）。
+            let mut last_err = first_err;
+            for attempt in 2..=4 {
+                eprintln!(
+                    "[node-config] llama 包下载中断（第 {} 次），{}s 后断点续传重试",
+                    attempt - 1,
+                    2 * attempt
+                );
+                std::thread::sleep(std::time::Duration::from_secs(2 * attempt));
+                match ssh_exec(target, &script, 900) {
+                    Ok(out) => {
+                        eprintln!("[node-config] llama 包下载第 {} 次重试成功", attempt);
+                        return finish_llama_install(out, workdir);
+                    }
+                    Err(e) => last_err = e,
+                }
+            }
+            return Err(last_err);
+        }
+    };
+    finish_llama_install(out, workdir)
+}
+
+/// llama 包安装收尾：解析路径 + 校验可执行（从 [`ensure_llama_server`]
+/// 提取，供重试路径复用）。
+fn finish_llama_install(out: String, workdir: &str) -> MnResult<String> {
+    let _ = workdir;
     let path = out.trim().lines().last().unwrap_or("").trim().to_string();
     if path.is_empty() {
         return Err(MnError::Network {
