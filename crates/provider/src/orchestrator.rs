@@ -2914,14 +2914,30 @@ pub fn download_model_node(
         Ok(out) => {
             let out = out.trim();
             if out.contains("encrypted-ok") || out.contains("already-encrypted") {
-                eprintln!("[cloud] ✓ 实例 {} 模型静态加密完成（AES-256，明文已删除）", plan.model_path);
+                eprintln!(
+                    "[cloud] ✓ 实例 {} 模型静态加密完成（AES-256，明文已删除）",
+                    plan.model_path
+                );
+                // 加密成功：明文已删，返回 .enc 路径——llama-server 的
+                // --model 必须指向 .enc，否则启动时读已删除的明文文件
+                // 报「文件不存在或为空」（2026-11-18 部署失败根因）。
+                Ok(enc_path)
             } else {
-                eprintln!("[cloud] ⚠ 实例 {} 模型加密跳过（密钥缺失或 openssl 不可用），明文保留", plan.model_path);
+                eprintln!(
+                    "[cloud] ⚠ 实例 {} 模型加密跳过（密钥缺失或 openssl 不可用），明文保留",
+                    plan.model_path
+                );
+                Ok(remote_model.clone())
             }
         }
-        Err(e) => eprintln!("[cloud] ⚠ 实例 {} 模型加密失败（{e}），明文保留（安全降级）", plan.model_path),
+        Err(e) => {
+            eprintln!(
+                "[cloud] ⚠ 实例 {} 模型加密失败（{e}），明文保留（安全降级）",
+                plan.model_path
+            );
+            Ok(remote_model.clone())
+        }
     }
-    Ok(remote_model.clone())
 }
 
 /// 兼容旧调用：按“配置 → 下载”顺序执行，不负责启动引擎。
