@@ -2842,6 +2842,9 @@ pub fn download_model_node(
         },
     };
     let remote_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
+    // P2 加密就绪：.enc 存在且非空视为模型就绪（复用实例免重下载明文）。
+    let enc_path_early = format!("{remote_model}.enc");
+    let enc_ready = mangosteen_device::remote::remote_file_size(target, &enc_path_early)? > 0;
     // `.download.ok` 由下载器在所有分片成功退出后写入，是「传输真的跑完」的
     // 权威证据；大小相等只是无标记时的快速通道（如手工放置的文件）。
     let marked_complete =
@@ -2852,7 +2855,10 @@ pub fn download_model_node(
     // 或期望大小未知（want=None）导致的长时间等待。
     let size_ready = remote_size > 0
         && (marked_complete || Some(remote_size) == want || want.is_none());
-    let ready = size_ready && mangosteen_device::remote::remote_file_is_gguf(target, remote_model)?;
+    // 明文就绪（GGUF 魔数正确）或 .enc 就绪（加密后复用）均视为模型可用；
+    // 两者都不在时才会触发下载。
+    let ready = (size_ready && mangosteen_device::remote::remote_file_is_gguf(target, remote_model)?)
+        || enc_ready;
     if !ready {
         let url = plan
             .download_url
@@ -2900,12 +2906,12 @@ pub fn download_model_node(
     let enc_path = format!("{remote_model}.enc");
     let key_path = "/home/deploy/mangosteen/tls/.model_key";
     let enc_cmd = format!(
-        "if [ -f '{enc_path}' ] && [ -s '{enc_path}' ]; then \
-           echo already-encrypted; \
-         elif [ -f '{key_path}' ] && command -v openssl >/dev/null 2>&1; then \
+        "if [ -f '{remote_model}' ] && [ -f '{key_path}' ] && command -v openssl >/dev/null 2>&1; then \
            openssl enc -aes-256-cbc -salt -pbkdf2 -iter 10000 -md sha256 \
              -in '{remote_model}' -out '{enc_path}' -pass file:'{key_path}' && \
            rm -f '{remote_model}' '{remote_model}.download.ok' && echo encrypted-ok; \
+         elif [ -f '{enc_path}' ] && [ -s '{enc_path}' ]; then \
+           echo already-encrypted; \
          else \
            echo encrypt-skipped; \
          fi",
