@@ -1419,18 +1419,37 @@ pub fn ensure_llama_server(
     } else {
         ("llama.zip", "unzip -o -q llama.zip")
     };
-    let q_url = shell_quote(download_url);
+    // 双镜像容错（2026-11-19 用户裁决）：主源 shturl.cc + 备份源
+    // gh-proxy.com——单源被限流/掐断时自动切换。两个代理都指向同一个
+    // GitHub release 资产，任一成功即可。
     let q_file = shell_quote(file);
     let q_tmp = shell_quote(&format!("{workdir}/tmp"));
+    let q_url = shell_quote(download_url);
+    // 主镜像：shturl.cc（用户指定）；若 URL 本身是 shturl.cc 则以其为主
+    let (primary, backup) = if download_url.contains("shturl.cc") {
+        (q_url.clone(), shell_quote(&mirror_url(download_url, "gh-proxy")))
+    } else if download_url.contains("gh-proxy.com") {
+        (q_url.clone(), shell_quote(&mirror_url(download_url, "shturl")))
+    } else {
+        // 直链或未识别代理：主用原 URL，备份尝试 gh-proxy 包装
+        (q_url.clone(), shell_quote(&mirror_url(download_url, "gh-proxy")))
+    };
+    // aria2c 参数（用户裁决 2026-11-19）：并发 -x8 -s8（原 -x16 过大易
+    // 被代理限流）、max-tries 5（原 15，少重试快速失败）、retry-wait 3。
     let fetch = format!(
         "if ! command -v aria2c >/dev/null 2>&1; then \
            echo '错误：未找到 aria2c（多连接下载器）。请在节点安装后重试：apt-get install -y aria2' >&2; \
            exit 1; \
          fi; \
-         echo '使用 aria2c -x16 多连接下载 llama-server 预编译包'; \
-         aria2c -x16 -s16 -k1M --timeout=15 --max-tries=15 --retry-wait=2 \
+         echo '使用 aria2c -x8 双镜像下载 llama-server 预编译包（主 {primary_host}，备 {backup_host}）'; \
+         aria2c -x8 -s8 -k1M --timeout=15 --max-tries=5 --retry-wait=3 \
            --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-           -d {q_tmp} -o {q_file} {q_url}"
+           -d {q_tmp} -o {q_file} {primary} \
+         || aria2c -x8 -s8 -k1M --timeout=15 --max-tries=5 --retry-wait=3 \
+           --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
+           -d {q_tmp} -o {q_file} {backup}",
+        primary_host = host_of(&primary),
+        backup_host = host_of(&backup),
     );
     let script = format!(
         "set -e; \
@@ -1801,6 +1820,35 @@ fn shell_quote(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', r#"'\''"#))
     }
+}
+
+/// 生成镜像 URL（2026-11-19 用户裁决：双镜像容错）。
+///
+/// 把 GitHub release 直链包装为指定代理格式：
+/// - `gh-proxy` → `https://gh-proxy.com/<原始URL>`
+/// - `shturl` → `https://shturl.cc//<原始URL>`（用户指定双斜杠格式）
+///
+/// 若 URL 已含代理前缀（`gh-proxy.com/` 或 `shturl.cc`），先剥掉再重新
+/// 包装，避免嵌套。无法识别的 URL 原样返回。
+fn mirror_url(url: &str, proxy: &str) -> String {
+    // 剥掉已有代理前缀
+    let bare = url
+        .strip_prefix("https://gh-proxy.com/")
+        .or_else(|| url.strip_prefix("https://shturl.cc//"))
+        .or_else(|| url.strip_prefix("https://shturl.cc/"))
+        .unwrap_or(url);
+    match proxy {
+        "gh-proxy" => format!("https://gh-proxy.com/{bare}"),
+        "shturl" => format!("https://shturl.cc//{bare}"),
+        _ => bare.to_string(),
+    }
+}
+
+/// 取 URL 的主机名（用于日志展示主/备源）。
+fn host_of(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(url)
 }
 
 #[cfg(test)]
