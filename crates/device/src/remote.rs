@@ -1127,6 +1127,17 @@ fn ssh_exec_once_opts(
         SshFailure::Fatal(format!("无法启动 ssh：{e}"))
     })?;
 
+    // 诊断（2026-11-18 压测排查）：非 0 退出时把原始 stderr 全文打日志，
+    // 便于区分「认证失败/连接断/远端被杀」——线上错误的过滤视图经常
+    // 把关键信息藏掉（网关内 255 但手动全参数成功，stderr 只有 Warning）。
+    if !out.status.success() {
+        eprintln!(
+            "[ssh-debug] exit={:?} stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     // UserKnownHostsFile=/dev/null + accept-new：每次连接都会往 stderr
     // 打一条指纹 Warning。它是 SSH 的正常提示，不是命令的失败原因，
     // 不能原样当成错误展示——否则真实故障（如远端 shell 被杀导致
@@ -1936,12 +1947,21 @@ fn build_stop_script(workdir: &str, port: Option<u16>) -> String {
         Some(8080) => format!("{workdir}/llama-server.pid {workdir}/llama-server-8080.pid"),
         _ => pid_path.clone(),
     };
-    // 按端口匹配 llama-server 进程 PID（awk 里已按 llama-server 过滤，
-    // 不会把 grep/awk 自身算进去）
+    // 按端口匹配 llama-server 进程 PID。
+    //
+    // 2026-11-18 压测根因修复：旧实现 `ps -eo pid=,args=` 只靠 args
+    // 文本匹配——**stop 脚本自己的 bash（args 含脚本全文：'llama-server'
+    // 与 '--port 8080' 文本都在）和 awk 进程都会命中**，随后
+    // `kill -TERM -- -<bash PID>` 杀的是 bash 的进程组（= sshd 会话组），
+    // 把承载脚本的会话自己杀了——SSH 退出 255、命令未执行完、stop 永远
+    // 失败（实测：PIDS 里混入 bash/awk，kill 后 ssh 断开）。
+    // 修复：`ps -eo pid=,comm=,args=` 按 **comm（可执行文件名）** 过滤，
+    // bash/awk/sh 的 comm 不是 llama-server，天然排除；真正的
+    // llama-server（comm=llama-server，args 含 --port）才会命中。
     let pids_by_port = match port {
         Some(p) => format!(
-            "ps -eo pid=,args= 2>/dev/null | awk -v p='--port {p}' \
-             'index($0,\"llama-server\")>0 && index($0,p)>0 {{print $1}}'"
+            "ps -eo pid=,comm=,args= 2>/dev/null | awk -v p='--port {p}' \
+             'index($0,\"llama-server\")>0 && index($0,p)>0 && $2==\"llama-server\" {{print $1}}'"
         ),
         None => "true".to_string(),
     };

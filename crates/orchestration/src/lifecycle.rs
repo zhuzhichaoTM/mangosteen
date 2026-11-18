@@ -400,8 +400,11 @@ impl Orchestrator {
                                 // 「已发出 kill、确认命令未返回」的半程（与上方
                                 // 自建设备路径同一判据）。进程确实不在了就继续
                                 // 卸载，否则一次网络抖动会把成功的卸载误报成失败。
-                                let still_running = self
-                                    .vendor_wait_target(provider, instance_id)
+                                // 2026-11-18 死锁修复：用 o（外层已持锁），
+                                // 不能再调 self.vendor_wait_target（重入死锁）。
+                                let still_running = o
+                                    .service_target(provider, instance_id)
+                                    .ok()
                                     .map(|wt| {
                                         mangosteen_device::remote::llama_server_running_on_port(
                                             &wt,
@@ -422,7 +425,10 @@ impl Orchestrator {
                                 );
                             }
                             // 端口空闲确认轮询（方案3）
-                            let wait_target = self.vendor_wait_target(provider, instance_id);
+                            // 2026-11-18 死锁修复：直接用 o（外层已持有
+                            // cloud 写锁），不能再调 self.vendor_wait_target
+                            // ——它内部重新 self.cloud() 重入同一把锁 → 死锁。
+                            let wait_target = o.service_target(provider, instance_id).ok();
                             let deadline = Instant::now() + Duration::from_secs(10);
                             loop {
                                 let Some(wt) = wait_target.clone() else {
@@ -525,7 +531,9 @@ impl Orchestrator {
                             }
                         } else {
                             // 云厂商实例路径：通过 SSH 目标检查
-                            match self.vendor_wait_target(provider, instance_id) {
+                            // 2026-11-18 死锁修复：用 o（外层已持锁），
+                            // 不能再调 self.vendor_wait_target（重入死锁）。
+                            match o.service_target(provider, instance_id).ok() {
                                 Some(target) => {
                                     match mangosteen_device::remote::has_gpu_processes(&target) {
                                         Ok(true) => {
