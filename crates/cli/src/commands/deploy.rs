@@ -515,10 +515,27 @@ fn notify_gateway_restore_tunnel(port: u16, deploy_id: &str) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
     let body = format!("{{\"deployment_id\":\"{deploy_id}\"}}");
+    // P0 网关鉴权（2026-11-18）：开启 require_api_key 时网关校验
+    // Authorization: Bearer——CLI 通知必须带 token（从配置读）。
+    let auth_header = crate::commands::load_config(&crate::cli::Args::default())
+        .ok()
+        .and_then(|(cfg, _)| {
+            if cfg.gateway.require_api_key {
+                cfg.gateway
+                    .api_key
+                    .resolve(mangosteen_platform::paths::real_env)
+                    .ok()
+                    .map(|k| format!("Authorization: Bearer {k}\r\n"))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
     let req = format!(
         "POST /api/deployments/{deploy_id}/restore-tunnel HTTP/1.1\r\n\
          Host: 127.0.0.1:{port}\r\n\
          Content-Type: application/json\r\n\
+         {auth_header}\
          Content-Length: {}\r\n\
          Connection: close\r\n\r\n{}",
         body.len(),
