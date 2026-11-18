@@ -1310,6 +1310,25 @@ fn bootstrap_deploy_target(
                   yum install -y aria2 2>/dev/null || true)",
                 120,
             );
+            // TLS 证书幂等生成（P1）：存量实例（引导早于证书逻辑）补齐，
+            // 新实例引导链 4d-2 已做——幂等可重入
+            let workdir = config.remote_workdir.trim_end_matches('/').to_string();
+            let _ = mangosteen_device::remote::ssh_exec(
+                &root_target,
+                &format!(
+                    "mkdir -p {workdir}/tls && \
+                     if [ ! -f {workdir}/tls/server.crt ]; then \
+                       openssl req -x509 -newkey rsa:2048 -keyout {workdir}/tls/server.key \
+                         -out {workdir}/tls/server.crt -days 3650 -nodes \
+                         -subj '/CN=llama-server' >/dev/null 2>&1 || true; \
+                     fi; \
+                     if [ -f {workdir}/tls/server.crt ]; then \
+                       chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}/tls/server.key {workdir}/tls/server.crt 2>/dev/null || true; \
+                       chmod 600 {workdir}/tls/server.key 2>/dev/null || true; \
+                     fi"
+                ),
+                30,
+            );
         }
         eprintln!("[cloud] ✓ 实例 {} deploy 密钥认证已就绪（跳过引导）", instance.id);
         return Ok(target);
