@@ -10,8 +10,10 @@ use mangosteen_core::MnError;
 impl GatewayServer {
     /// 路由分发。
     pub fn route(&self, req: &ParsedRequest) -> Response {
-        // 鉴权（可选）
-        if self.require_key && !self.authorized(req) {
+        // 鉴权（可选）。豁免：`/`（页面本体，无数据）、`/index.html`、
+        // `/health`（探活）——数据与操作全部在 /v1/* 与 /api/* 后面，
+        // 页面 JS 调 API 时带 token（URL ?token= 或 localStorage）。
+        if self.require_key && !self.authorized(req) && !matches!(req.path.as_str(), "/" | "/index.html" | "/health") {
             let e = MnError::AccessDenied {
                 path: std::path::PathBuf::from(&req.path),
                 reason: "缺少或错误的 API Key（Authorization: Bearer <key>）".to_string(),

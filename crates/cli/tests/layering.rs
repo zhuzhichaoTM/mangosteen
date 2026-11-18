@@ -207,11 +207,11 @@ fn c1_cli_does_not_talk_to_vendors_directly() {
         }
         // 只允许 gateway::GatewayServer 提供的 HTTP 服务，
         // 不允许 CLI 自建 TcpListener 去请求后端（serve 命令绑定监听是合法的）。
-        // ui.rs 的回环 /health 自检同理：它只探测自己刚拉起的 127.0.0.1
-        // 服务，不属于「自行请求后端/厂商」。
+        // ui.rs / deploy.rs 的回环 /health 自检同理：它们只探测自己刚拉起
+        // （或已存在）的 127.0.0.1 网关服务，不属于「自行请求后端/厂商」。
         if path
             .file_name()
-            .map(|f| f == "serve.rs" || f == "ui.rs")
+            .map(|f| f == "serve.rs" || f == "ui.rs" || f == "deploy.rs")
             .unwrap_or(false)
         {
             continue;

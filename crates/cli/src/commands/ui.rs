@@ -31,7 +31,7 @@ use std::time::Duration;
 use mangosteen_core::MnResult;
 
 use crate::cli::Args;
-use crate::commands::reject_unknown_options;
+use crate::commands::{build_gateway, reject_unknown_options};
 use crate::output;
 
 /// 允许的选项。
@@ -227,7 +227,9 @@ pub fn run(args: Args) -> MnResult<i32> {
     // 「服务起来了但参数没生效」这种更难排查的现象。
     reject_unknown_options(&args, ALLOWED)?;
     let gw = crate::commands::build_gateway(&args)?;
-    let cfg = gw.config().clone();
+    // Arc<Config>：P0 自动开鉴权需要改 gateway 配置——克隆出独立的
+    // Config（深拷贝 Arc 内容），修改不影响网关共享的 Arc
+    let mut cfg = (*gw.config()).clone();
 
     let host = args.get("host").unwrap_or(&cfg.gateway.host).to_string();
     let port = args.get_num::<u16>("port")?.unwrap_or(cfg.gateway.port);
@@ -247,6 +249,62 @@ pub fn run(args: Args) -> MnResult<i32> {
              或执行 `mangosteen stop --all` 清理残留进程"
         ),
     })?;
+
+    // P0 网关鉴权自动开启（2026-11-18 安全加固）：台账存在 ready 的
+    // 云端部署时，若用户未显式配置鉴权，自动生成 token 并开启
+    // require_api_key——堵住「同机任意进程白嫖 11516」（云端部署会
+    // 自动注入引擎 key，无网关鉴权 = 无成本推理）。
+    // 持久化写回 config.toml（require_api_key=true + api_key），
+    // 重启网关/重启机器后仍然生效。
+    let mut cfg = cfg;
+    let mut auto_token_printed: Option<String> = None;
+    {
+        // 台账是否存在 ready 的云端部署（决定要不要自动开鉴权）
+        let has_cloud_deployment = build_gateway(&args)
+            .and_then(|gw| gw.list_deployments())
+            .map(|records| {
+                records.iter().any(|r| {
+                    r.status == mangosteen_base::state::DeploymentStatus::Ready
+                        && matches!(
+                            r.plan.origin,
+                            mangosteen_core::plan::ComputeOrigin::Cloud { .. }
+                        )
+                })
+            })
+            .unwrap_or(false);
+        if has_cloud_deployment && !cfg.gateway.require_api_key {
+            // 生成 32B token（256 位熵）：/dev/urandom 优先，
+            // 不可用时退化为「时间戳 ^ pid」弱熵（打日志提示）
+            let strong = {
+                use std::io::Read as _;
+                std::fs::File::open("/dev/urandom")
+                    .ok()
+                    .and_then(|mut f| {
+                        let mut buf = [0u8; 32];
+                        f.read_exact(&mut buf).ok()?;
+                        Some(buf.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    })
+            }
+            .unwrap_or_else(|| {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let x = nanos ^ ((std::process::id() as u64) << 32);
+                eprintln!("[gateway-auth] ⚠ /dev/urandom 不可用，token 熵降级");
+                format!("{:016x}{:016x}", x, nanos)
+            });
+            cfg.gateway.require_api_key = true;
+            cfg.gateway.api_key =
+                mangosteen_core::config::SecretRef::Inline(strong.clone());
+            // 持久化（写回 config.toml，600 权限）
+            let store = mangosteen_base::config::ConfigStore::platform_default(None);
+            if let Err(e) = store.save(&cfg) {
+                eprintln!("[gateway-auth] ⚠ 自动开启鉴权配置写入失败（{e}），本次会话临时开启");
+            }
+            auto_token_printed = Some(strong);
+        }
+    }
 
     let require_key = cfg.gateway.require_api_key;
     let api_key = if require_key {
@@ -287,6 +345,16 @@ pub fn run(args: Args) -> MnResult<i32> {
                  请求会返回 401。建议用 `mangosteen ui --no-open` 配合反向代理，\
                  或临时关闭 gateway.require_api_key",
             );
+        }
+        // P0 自动开启时打印 token（用户需要它把页面/脚本带上）
+        if let Some(token) = &auto_token_printed {
+            output::print_kv(&[(
+                "网关 Token".into(),
+                format!("{token}（已自动开启鉴权并持久化到 config.toml）"),
+            )]);
+            output::print_info(&format!(
+                "浏览器访问：{url}?token={token}（或 localStorage 设置 gw_token 后刷新）"
+            ));
         }
         output::print_info("按 Ctrl-C 停止（不会影响已部署的推理服务）");
         println!();

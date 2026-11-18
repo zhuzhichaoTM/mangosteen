@@ -901,8 +901,24 @@ function toast(msg, kind) {
 const API_TIMEOUT = 180000;   // 3 分钟：覆盖模型元数据查询与网页抓取
 const PULL_TIMEOUT = 3600000; // 1 小时：覆盖大模型下载
 
+/* ============ P0 网关鉴权：token 注入 ============ */
+/* token 来源优先级：URL ?token=xxx → localStorage.gw_token。
+   页面加载时若 URL 带 token，存入 localStorage（同源持久），
+   后续所有 api() 请求自动带 Authorization: Bearer。 */
+(function initGatewayToken() {
+  try {
+    const t = new URLSearchParams(location.search).get("token");
+    if (t) { localStorage.setItem("gw_token", t); }
+  } catch (e) {}
+})();
+function gwToken() {
+  try { return localStorage.getItem("gw_token") || ""; } catch (e) { return ""; }
+}
+
 async function api(path, opts) {
   const o = Object.assign({ headers: { "Content-Type": "application/json" } }, opts || {});
+  const tk = gwToken();
+  if (tk) o.headers["Authorization"] = "Bearer " + tk;
   const ctl = new AbortController();
   const limit = o.timeoutMs || API_TIMEOUT;
   delete o.timeoutMs;
@@ -928,6 +944,11 @@ async function api(path, opts) {
     const msg = (data && data.error && data.error.message) || text || ("HTTP " + r.status);
     const err = new Error(msg);
     err.status = r.status;
+    // 401：网关鉴权未过——提示用户带 token 访问
+    if (r.status === 401) {
+      err.message = "网关鉴权失败：请通过 `mangosteen ui` 启动时输出的 Token " +
+        "访问（形如 http://127.0.0.1:11516/?token=<token>）";
+    }
     throw err;
   }
   return data;
