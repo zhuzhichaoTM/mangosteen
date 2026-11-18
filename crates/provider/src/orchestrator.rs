@@ -1427,6 +1427,38 @@ fn bootstrap_deploy_target(
     }
     eprintln!("[cloud] ✓ 实例 {} 外部依赖就绪：{}", instance.id, deps_out.trim());
 
+    // 4d-4. llama-server 预编译包下载安装（root 身份，2026-11-18 用户裁决：
+    // aria2 下载必须在 root 账号下完成，deploy 账号下只使用）。
+    //
+    // 背景：deploy 身份下载 llama 包实测静默失败（exit 3、无 stderr，
+    // 2026-11-18 部署两次复现），原因难以及时定位；root 引导链一次装好
+    // 最稳。node-config 的 ensure_llama_server_from_archive 检测到
+    // `{workdir}/bin/llama-server` 已安装会自动短路，deploy 只做校验。
+    // 幂等：已安装则秒回；失败仅告警降级（node-config 会再试 deploy 下载）。
+    {
+        let workdir = config.remote_workdir.trim_end_matches('/').to_string();
+        match mangosteen_device::remote::ensure_llama_server_from_archive(
+            &root,
+            &workdir,
+            &config.llama_server_url,
+        ) {
+            Ok(path) => {
+                // 安装产物归 deploy（node-config/引擎以 deploy 身份执行）
+                let chown_cmd =
+                    format!("chown -R {DEPLOY_USER}:{DEPLOY_USER} {workdir} 2>/dev/null || true");
+                let _ = mangosteen_device::remote::ssh_exec(&root, &chown_cmd, 15);
+                eprintln!(
+                    "[cloud] ✓ 实例 {} llama-server 已就绪（root 下载安装）：{}",
+                    instance.id, path
+                );
+            }
+            Err(e) => eprintln!(
+                "[cloud] ⚠ 实例 {} llama-server root 下载失败（{}），node-config 将以 deploy 身份重试",
+                instance.id, e
+            ),
+        }
+    }
+
     // 4d-2. TLS 证书生成（P1 传输加密，root 身份）：为 llama-server 生成
     // 自签证书 `{workdir}/tls/server.{key,crt}`（10 年有效期）——推理流量
     // 在 SSH 隧道内再套一层 TLS，防隧道端点（本地网关/中间进程）明文读取
