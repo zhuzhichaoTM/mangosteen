@@ -78,9 +78,21 @@ impl GatewayServer {
     ) -> Self {
         // API 网关重启后自动恢复台账中已就绪模型的本地隧道映射。
         // 只恢复进程内连接状态，不创建实例、不下载模型、不重启节点。
+        //
+        // 异步执行（2026-11-18 压测修复）：restore 内部是 SSH 隧道建立
+        // （厂商 describe + 密钥验证 + heal/establish，链路可达 30s+），
+        // 同步跑会把 HTTP accept 循环的启动推迟到 restore 完成——期间
+        // 所有 API（health/unload/推理）全部超时（实测压测 0/10：每轮
+        // unload 192s 无响应，实例不关机、持续计费）。restore 是纯恢复
+        // 动作，失败不影响新部署；放后台线程，HTTP 立即可用。
         {
-            let gw = gateway.as_ref();
-            let _ = gw.restore_deployment_tunnels();
+            let gw = Arc::clone(&gateway);
+            std::thread::Builder::new()
+                .name("mn-restore".to_string())
+                .spawn(move || {
+                    let _ = gw.restore_deployment_tunnels();
+                })
+                .expect("spawn restore thread");
         }
         let backend_snapshot = Arc::new(RwLock::new(std::collections::BTreeMap::new()));
         // 只读台账，把**全部**已就绪模型一次性做成业务转发快照。

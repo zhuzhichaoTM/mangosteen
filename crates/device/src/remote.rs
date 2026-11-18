@@ -631,6 +631,14 @@ impl SshTarget {
             a.push(identity.display().to_string());
             a.push("-o".to_string());
             a.push("IdentitiesOnly=yes".to_string());
+            // BatchMode（2026-11-18 压测修复）：密钥 target 必须非交互。
+            // 网关后台进程无 tty，密钥认证失败时 ssh 会试图从 stdin 读
+            // 密码——stdin 是命令本体/管道，读不到就永远挂住（实测：
+            // 压测每轮 unload 卡 192s，8 个 HTTP worker 全被占死）。
+            a.push("-o".to_string());
+            a.push("BatchMode=yes".to_string());
+            a.push("-o".to_string());
+            a.push("PreferredAuthentications=publickey".to_string());
         }
         if self.password.is_some() {
             a.push("-o".to_string());
