@@ -1767,8 +1767,8 @@ pub fn llama_server_running_on_port(
                   && ps -p $(cat \"$f\") -o args= 2>/dev/null | grep -q llama-server; then \
                  echo yes; exit 0; fi; \
              done; \
-             if ps -eo args= 2>/dev/null | awk -v p='--port {port}' \
-                  'index($0,\"llama-server\")>0 && index($0,p)>0' | grep -q .; then \
+             if ps -eo comm=,args= 2>/dev/null | awk -v p='--port {port}' \
+                  '$1==\"llama-server\" && index($0,p)>0' | grep -q .; then \
                echo yes; exit 0; fi; \
              if {listen}; then echo yes; else echo no; fi",
             listen = listening_probe(port)
