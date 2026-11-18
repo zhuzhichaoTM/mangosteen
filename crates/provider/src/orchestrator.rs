@@ -1409,6 +1409,34 @@ fn bootstrap_deploy_target(
     }
     eprintln!("[cloud] ✓ 实例 {} 外部依赖就绪：{}", instance.id, deps_out.trim());
 
+    // 4e. 远端主机加固（2026-11-17 用户裁决，root 身份执行）。
+    //
+    // ⚠️ 平台现实：优云智算实例是 Docker 容器——/proc/sys 只读（swappiness/
+    // core_pattern 不可改）、mount 需 CAP_SYS_ADMIN（tmpfs 不可挂）。这些
+    // 内核层加固由厂商宿主机保证，容器内尝试会静默失败。容器内可做的：
+    // 1. /dev/shm tmpfs 验证（容器宿主预挂的内存盘，可写）——llama-server
+    //    启动时 TMPDIR 指向它（start_llama_server_with_key），推理临时
+    //    文件只进内存；
+    // 2. 尝试性加固（失败仅降级）：swapoff/swappiness/core_pattern——
+    //    裸机或特权容器上会生效，容器上静默跳过。
+    let host_harden_cmd = "swapoff -a 2>/dev/null || true; \
+        sysctl -w vm.swappiness=0 >/dev/null 2>&1 || true; \
+        (echo '|/bin/false' > /proc/sys/kernel/core_pattern 2>/dev/null) || \
+        (sysctl -w 'kernel.core_pattern=|/bin/false' >/dev/null 2>&1) || true; \
+        mkdir -p {shm_tmp} 2>/dev/null && chown {DEPLOY_USER}:{DEPLOY_USER} {shm_tmp} 2>/dev/null || true; \
+        printf 'harden: virt=%s shm=%s\\n' \
+          \"$(systemd-detect-virt 2>/dev/null || echo unknown)\" \
+          \"$(touch {shm_tmp}/.w 2>/dev/null && echo writable && rm -f {shm_tmp}/.w || echo unavailable)\""
+        .replace("{shm_tmp}", "/dev/shm/mangosteen")
+        .replace("{DEPLOY_USER}", DEPLOY_USER);
+    match mangosteen_device::remote::ssh_exec(&root, &host_harden_cmd, 20) {
+        Ok(out) => eprintln!("[cloud] ✓ 实例 {} 加固检查：{}", instance.id, out.trim()),
+        Err(e) => eprintln!(
+            "[cloud] ⚠ 实例 {} 加固检查失败（安全降级，不影响部署）：{}",
+            instance.id, e
+        ),
+    }
+
     // 5. 验证 deploy 密钥（公钥认证必须成功）。
     //    注意：sshd 加固（禁 root/禁密码）不在这里做——按用户裁决
     //    延后到设备配置（node-config）全部完成后由
@@ -2681,21 +2709,8 @@ pub fn configure_node(
     // 而不是等到十分钟后误报成下载或解压失败。
     confirm_remote_reachable(target)?;
 
-    // ---- safety 加固（2026-11-17 用户裁决）：swap/core/tmpfs 禁用 ----
-    // swapoff：防 KV Cache 明文换出落盘；core_pattern：防崩溃转储含 prompt；
-    // swappiness=0：最小化换出倾向；tmpfs 工作区：推理临时文件只进内存。
-    // 失败不致命（仅安全降级）：记录警告但不中断部署。
-    let workdir = workdir.trim_end_matches('/').to_string();
-    let harden_cmd = format!(
-        "swapoff -a 2>/dev/null || true; \
-         sysctl -w vm.swappiness=0 2>/dev/null || true; \
-         echo 'kernel.core_pattern=|/bin/false' > /proc/sys/kernel/core_pattern 2>/dev/null || \
-         sysctl -w kernel.core_pattern='|/bin/false' 2>/dev/null || true; \
-         mkdir -p {workdir}/tmp && mount -t tmpfs -o size=512m tmpfs {workdir}/tmp 2>/dev/null || true"
-    );
-    if let Err(e) = mangosteen_device::remote::ssh_exec(target, &harden_cmd, 15) {
-        eprintln!("[node-config] ⚠ 远端加固部分失败（安全降级，不影响部署）：{e}");
-    }
+    // 远端加固（swapoff/core_pattern/tmpfs）已在引导链（root 身份）执行，
+    // 这里不重复——deploy 用户无 sysctl/mount 权限。
 
     // SSH 免密登录确认成功后，先完成依赖安装并逐项验证；依赖不完整时
     // 立即失败，不允许继续下载 llama.cpp。

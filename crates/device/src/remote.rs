@@ -1516,6 +1516,11 @@ pub fn start_llama_server_with_key(
     // 改为：pid 文件杀进程组 + 括号守卫兜底 + 排除当前 shell PID。
     let bin_dir = bin.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(".");
     let library_path = format!("{bin_dir}:$LD_LIBRARY_PATH");
+    // TMPDIR 指向 /dev/shm（tmpfs 内存盘，容器实例上现成的可写内存文件
+    // 系统）：推理临时文件（KV offload/临时权重转换）只进内存、重启即失，
+    // 不落磁盘卷。/dev/shm 不可用时回退默认 /tmp（容器内 /proc/sys 只读、
+    // mount 需 root，宿主内核参数加固不可行——由厂商宿主机保证）。
+    let shm_tmp = "/dev/shm/mangosteen";
     let port = port_from_args(args);
     let listen_probe = listening_probe(port);
     // 启动判定不能只看「1 秒后进程还在」：
@@ -1527,6 +1532,7 @@ pub fn start_llama_server_with_key(
     // 再循环观察「端口开始监听」或「进程提前退出」，两者都等不到才算失败。
     let script = format!(
         "set -e; mkdir -p {workdir}; \
+         mkdir -p {shm_tmp} 2>/dev/null && export TMPDIR={shm_tmp} || true; \
          if [ -f {pid_file} ]; then \
            P=$(cat {pid_file} 2>/dev/null); \
            if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \

@@ -440,17 +440,40 @@ fn ssh_info_from_instance(
     let net = &inst.network;
     let host = net.ssh_host.clone();
     let port = net.ssh_port.unwrap_or(22);
+    // 登录用户：台账 node_ssh_user（部署时刻 deploy 引导后的快照）优先，
+    // 未配置回落 root（厂商默认）。
     let user = user_override
         .filter(|u| !u.trim().is_empty())
         .unwrap_or("root")
         .to_string();
+    // 登录指令：厂商原生指令优先——但厂商原文里的 root@ 在 deploy 引导
+    // 体系下已过时（实例 sshd 已禁 root，root@ 指令必然 Permission denied，
+    // 用户实测「登陆方式显示 root」根因）。node_ssh_user=deploy 时把
+    // 厂商指令的 user 部分替换为 deploy（保持 host/port 厂商实时口径）。
     let (command, source) = match net
         .ssh_login_command
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(c) => (c.to_string(), "provider"),
+        Some(c) if user == "root" => (c.to_string(), "provider"),
+        Some(c) => {
+            // "ssh root@1.2.3.4 -p 60022" → "ssh deploy@1.2.3.4 -p 60022"
+            let rewritten = c.replacen(
+                &format!("root@{host_placeholder}", host_placeholder = host.clone().unwrap_or_default()),
+                &format!("{user}@{}", host.clone().unwrap_or_default()),
+                1,
+            );
+            if rewritten != *c {
+                (rewritten, "provider")
+            } else {
+                // 指令里没有 root@host 模式（自定义格式）：拼装覆盖
+                (
+                    format!("ssh -p {port} {user}@{}", host.clone().unwrap_or_default()),
+                    "assembled",
+                )
+            }
+        }
         None => (
             format!("ssh -p {port} {user}@{}", host.clone().unwrap_or_default()),
             "assembled",
