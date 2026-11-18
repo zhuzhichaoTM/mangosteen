@@ -107,7 +107,8 @@ impl DeviceRuntime for RemoteRuntime {
         } else {
             workdir
         };
-        ensure_llama_server(self.ssh()?, workdir, download_url)
+        // github_proxy 空串：trait 直连场景无代理配置，由具体调用方传入
+        ensure_llama_server(self.ssh()?, workdir, download_url, "")
     }
 
     fn ensure_model(&self, url: &str, dest: &str, expected_bytes: Option<u64>) -> MnResult<u64> {
@@ -1338,6 +1339,7 @@ pub fn ensure_llama_server_from_archive(
     target: &SshTarget,
     workdir: &str,
     download_url: &str,
+    github_proxy: &str,
 ) -> MnResult<String> {
     let installed = format!("{workdir}/bin/llama-server");
     let probe = ssh_exec(
@@ -1348,7 +1350,7 @@ pub fn ensure_llama_server_from_archive(
     if !probe.trim().is_empty() {
         return Ok(probe.trim().to_string());
     }
-    ensure_llama_server(target, workdir, download_url)
+    ensure_llama_server(target, workdir, download_url, github_proxy)
 }
 
 /// 节点配置阶段安装模型下载与解压依赖。
@@ -1366,6 +1368,7 @@ pub fn ensure_llama_server(
     target: &SshTarget,
     workdir: &str,
     download_url: &str,
+    github_proxy: &str,
 ) -> MnResult<String> {
     let installed = format!("{workdir}/bin/llama-server");
 
@@ -1419,20 +1422,28 @@ pub fn ensure_llama_server(
     } else {
         ("llama.zip", "unzip -o -q llama.zip")
     };
-    // 代理池轮询下载（2026-11-19 用户裁决）：三个 GitHub release 代理
-    // 依次尝试（ghfast.top → shturl.cc → gh.llkk.cc），任一成功即停。
-    // 单一代理被限流/掐断时自动切换，比双源固定主备更鲁棒。
+    // 代理池轮询下载（2026-11-19 用户裁决，配置化）：
+    // github_proxy（config.toml，分号分隔）与 llama_server_url（裸 GitHub
+    // URL）拼接后依次尝试，任一成功即停。单一代理被限流/掐断时自动切换。
+    // github_proxy 为空 → 直连。旧版硬编码三代理池做兜底。
     let q_file = shell_quote(file);
     let q_tmp = shell_quote(&format!("{workdir}/tmp"));
-    // 提取裸 GitHub URL（剥掉已有代理前缀，避免嵌套）
     let raw_url = strip_proxy_prefix(download_url);
     let q_raw = shell_quote(&raw_url);
-    let proxies = ["https://ghfast.top/", "https://shturl.cc//", "https://gh.llkk.cc/"];
-    let proxy_list = proxies
-        .iter()
-        .map(|p| shell_quote(p))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let proxies: Vec<&str> = github_proxy
+        .split(';')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let proxy_list = if proxies.is_empty() {
+        String::new()
+    } else {
+        proxies
+            .iter()
+            .map(|p| shell_quote(p))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     // aria2c 参数（用户裁决 2026-11-19）：-x8 -s8、timeout 12、max-tries 3、
     // retry-wait 2——并发不过大避免代理限流，少重试快速失败切换下一代理。
     let fetch = format!(
@@ -1440,14 +1451,21 @@ pub fn ensure_llama_server(
            echo '错误：未找到 aria2c（多连接下载器）。请在节点安装后重试：apt-get install -y aria2' >&2; \
            exit 1; \
          fi; \
-         for p in {proxy_list}; do \
-           u=\"${{p}}{q_raw}\"; \
-           echo \"尝试下载：$u\"; \
+         if [ -n \"{proxy_list}\" ]; then \
+           for p in {proxy_list}; do \
+             u=\"${{p}}{q_raw}\"; \
+             echo \"尝试下载：$u\"; \
+             aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
+               --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
+               -d {q_tmp} -o {q_file} \"$u\" && break; \
+             echo \"代理 $p 失败，切换下一个\"; \
+           done; \
+         else \
+           echo \"未配置代理，直连下载：$u\"; \
            aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
              --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-             -d {q_tmp} -o {q_file} \"$u\" && break; \
-           echo \"代理 $p 失败，切换下一个\"; \
-         done; \
+             -d {q_tmp} -o {q_file} {q_raw}; \
+         fi; \
          test -s {q_tmp}/{q_file} || {{ echo '所有代理均下载失败' >&2; exit 1; }}"
     );
     let script = format!(
@@ -1517,9 +1535,10 @@ pub fn ensure_llama_server_with_progress(
     target: &SshTarget,
     workdir: &str,
     download_url: &str,
+    github_proxy: &str,
     _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> MnResult<String> {
-    ensure_llama_server(target, workdir, download_url)
+    ensure_llama_server(target, workdir, download_url, github_proxy)
 }
 
 /// 在远端后台启动 `llama-server`。

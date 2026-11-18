@@ -180,11 +180,24 @@ pub struct CloudConfig {
     /// 使用环境变量或文件引用，不在配置中保存明文令牌。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_token: Option<SecretRef>,
-    /// llama.cpp 预编译包下载地址。
+    /// llama.cpp 预编译包下载地址（裸 GitHub URL，不带代理前缀）。
     ///
-    /// 远端没有 `llama-server` 时会下载这个包并解压。统一发布包源。
+    /// 远端没有 `llama-server` 时会下载这个包并解压。实际下载 URL 由
+    /// `github_proxy` 的代理与它拼接轮询（见 `github_proxy` 字段）。
     #[serde(default = "default_llama_server_url")]
     pub llama_server_url: String,
+    /// GitHub 代理池（2026-11-19 用户裁决）：分号分隔的代理前缀列表。
+    ///
+    /// 下载 `llama_server_url`（裸 GitHub URL）时依次拼接每个代理轮询
+    /// 尝试，任一成功即停。示例（config.toml）：
+    ///
+    /// ```toml
+    /// github_proxy = "https://ghfast.top/;https://shturl.cc//;https://gh.llkk.cc/"
+    /// ```
+    ///
+    /// 留空则直连（不经代理）。
+    #[serde(default = "default_github_proxy")]
+    pub github_proxy: String,
     /// 云端 llama-server 的监听地址（safety 分支，改动点 1）。
     ///
     /// **安全默认 `127.0.0.1`**：服务只绑回环，公网不可达，访问经 SSH
@@ -221,7 +234,11 @@ fn default_remote_workdir() -> String {
 }
 
 fn default_llama_server_url() -> String {
-    "https://gh-proxy.com/https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.0/llama-cpp-bin-linux-x86_64.tar.gz".to_string()
+    "https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.0/llama-cpp-bin-linux-x86_64.tar.gz".to_string()
+}
+
+fn default_github_proxy() -> String {
+    "https://ghfast.top/;https://shturl.cc//;https://gh.llkk.cc/".to_string()
 }
 
 impl Default for CloudConfig {
@@ -231,6 +248,7 @@ impl Default for CloudConfig {
             remote_workdir: default_remote_workdir(),
             hf_token: None,
             llama_server_url: default_llama_server_url(),
+            github_proxy: default_github_proxy(),
             bind_host: default_bind_host(),
             api_key: None,
         }

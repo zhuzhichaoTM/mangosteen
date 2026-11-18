@@ -124,8 +124,11 @@ pub struct OrchestratorConfig {
     pub ssh_password: Option<String>,
     /// 云端工作目录（模型、二进制、日志都放这儿）
     pub remote_workdir: String,
-    /// llama.cpp 预编译包下载地址（远端没有 llama-server 时用）
+    /// llama.cpp 预编译包下载地址（裸 GitHub URL，不带代理前缀）
     pub llama_server_url: String,
+    /// GitHub 代理池（分号分隔，2026-11-19 用户裁决）：下载时依次拼接
+    /// `llama_server_url` 轮询，任一成功即停。空串 = 直连。
+    pub github_proxy: String,
 }
 
 impl Default for OrchestratorConfig {
@@ -138,6 +141,7 @@ impl Default for OrchestratorConfig {
             ssh_password: None,
             remote_workdir: "/home/deploy/mangosteen".to_string(),
             llama_server_url: String::new(),
+            github_proxy: String::new(),
         }
     }
 }
@@ -1441,6 +1445,7 @@ fn bootstrap_deploy_target(
             &root,
             &workdir,
             &config.llama_server_url,
+            &config.github_proxy,
         ) {
             Ok(path) => {
                 // 安装产物归 deploy（node-config/引擎以 deploy 身份执行）
@@ -2636,6 +2641,7 @@ fn finish_provision(
             &workdir,
             plan,
             &config.llama_server_url,
+            &config.github_proxy,
             on_progress,
         )
         .and_then(|_| start_node_engine(&target, &workdir, launch))
@@ -2801,6 +2807,7 @@ pub fn configure_node(
     target: &mangosteen_device::remote::SshTarget,
     workdir: &str,
     llama_server_url: &str,
+    github_proxy: &str,
 ) -> MnResult<()> {
     // 动真格之前先确认这条 SSH 通道真的还能执行命令。
     //
@@ -2826,6 +2833,7 @@ pub fn configure_node(
         target,
         &workdir,
         llama_server_url,
+        github_proxy,
     );
     if result.is_err() {
         // 失败路径清理 {workdir}/tmp（半成品下载/解压残留）
@@ -2984,9 +2992,10 @@ pub fn prepare_node(
     workdir: &str,
     plan: &CloudPlan,
     llama_server_url: &str,
+    github_proxy: &str,
     on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> MnResult<()> {
-    configure_node(target, workdir, llama_server_url)?;
+    configure_node(target, workdir, llama_server_url, github_proxy)?;
     let _ = download_model_node(target, plan, None, on_progress, None)?;
     Ok(())
 }
@@ -3386,6 +3395,7 @@ mod tests {
         OrchestratorConfig {
             remote_workdir: "/home/deploy/mangosteen".to_string(),
             llama_server_url: String::new(),
+            github_proxy: String::new(),
             provision_timeout: Duration::from_millis(200),
             start_timeout: Duration::from_millis(300),
             tunnel_timeout: Duration::from_millis(200),

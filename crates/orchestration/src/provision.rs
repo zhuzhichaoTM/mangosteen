@@ -659,6 +659,7 @@ impl Orchestrator {
             &ssh,
             &device.workdir,
             &self.config().cloud.llama_server_url,
+            &self.config().cloud.github_proxy,
         )?;
         // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署
         // 成功后」统一加固——下载/启动/健康检查期间 root 通道保持可用
@@ -863,6 +864,7 @@ impl Orchestrator {
             &ssh,
             &p.workdir,
             &self.config().cloud.llama_server_url,
+            &self.config().cloud.github_proxy,
         )?;
         // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署
         // 成功后」统一加固——与 deploy_instance 路径一致，下载/启动/健康

@@ -174,6 +174,7 @@ impl GatewayBuilder {
                     .unwrap_or(None),
                 remote_workdir: self.config.cloud.remote_workdir.clone(),
                 llama_server_url: self.config.cloud.llama_server_url.clone(),
+                github_proxy: self.config.cloud.github_proxy.clone(),
                 ..Default::default()
             },
         ));
