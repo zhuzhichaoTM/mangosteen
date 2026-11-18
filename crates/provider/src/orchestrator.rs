@@ -1470,7 +1470,9 @@ fn bootstrap_deploy_target(
            head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > /home/deploy/mangosteen/tls/.model_key); \
         fi; \
         chmod 600 /home/deploy/mangosteen/tls/.model_key 2>/dev/null || true; \
+        chown {DEPLOY_USER}:{DEPLOY_USER} /home/deploy/mangosteen/tls/.model_key 2>/dev/null || true; \
         echo model-key-ready";
+    let model_key_cmd = model_key_cmd.replace("{DEPLOY_USER}", DEPLOY_USER);
     match mangosteen_device::remote::ssh_exec(&root, &model_key_cmd, 20) {
         Ok(out) if out.contains("model-key-ready") => {
             eprintln!("[cloud] ✓ 实例 {} 模型加密密钥已就绪", instance.id);

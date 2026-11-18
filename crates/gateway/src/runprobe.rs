@@ -128,6 +128,10 @@ struct ProbeTarget {
     /// 云端实例标识非空（云厂商实例），或自定义节点有设备绑定。
     owns_instance: bool,
     status: DeploymentStatus,
+    /// TLS 是否启用（P1 传输加密）：true 时 /health 探活走 https（自签
+    /// 证书 curl -k）。云端引擎由引导链证书以 --ssl-* 启动后，明文探测
+    /// 永远失败，会把 https 引擎误判为未运行。
+    tls: bool,
 }
 
 fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
@@ -159,11 +163,38 @@ fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
         updated_at: rec.updated_at,
         port: rec.plan.local_access_port(),
         owns_instance,
+        tls: rec.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false),
         status: rec.status,
     }
 }
 
 /// 启动后台探测线程。
+    /// https 探活（P1 TLS）：curl -k 请求 /health，判 200。
+    /// 用于云端引擎以 --ssl-* 启动后的 runprobe 探测——手写 TCP 的
+    /// probe_http_ok 无法完成 TLS 握手，会对 https 引擎永远返回 false。
+    fn probe_https_ok(host: &str, port: u16, path: &str, timeout: std::time::Duration) -> bool {
+        let url = format!("https://{host}:{port}{path}");
+        std::process::Command::new("curl")
+            .arg("--silent")
+            .arg("--show-error")
+            .arg("--noproxy")
+            .arg("*")
+            .arg("--insecure")
+            .arg("--max-time")
+            .arg(timeout.as_secs().to_string())
+            .arg("--output")
+            .arg("/dev/null")
+            .arg("--write-out")
+            .arg("%{http_code}")
+            .arg(&url)
+            .output()
+            .map(|o| {
+                o.status.success()
+                    && String::from_utf8_lossy(&o.stdout).trim().starts_with("200")
+            })
+            .unwrap_or(false)
+    }
+
 pub fn spawn_runtime_probe(
     gateway: Arc<Gateway>,
     backend_snapshot: Arc<RwLock<BTreeMap<String, BackendTarget>>>,
@@ -211,12 +242,19 @@ pub fn spawn_runtime_probe(
                 if !eligible {
                     continue;
                 }
-                let mapped = mangosteen_platform::process::probe_http_ok(
-                    "127.0.0.1",
-                    t.port.unwrap(),
-                    "/health",
-                    PROBE_TIMEOUT,
-                );
+                let mapped = if t.tls {
+                    // TLS（P1）：引擎以 https 启动（自签证书）——手写 TCP
+                    // HTTP 探测无法完成 TLS 握手，走系统 curl（-k 跳过
+                    // 自签证书链校验，证书信任根是本机台账）。
+                    probe_https_ok("127.0.0.1", t.port.unwrap(), "/health", PROBE_TIMEOUT)
+                } else {
+                    mangosteen_platform::process::probe_http_ok(
+                        "127.0.0.1",
+                        t.port.unwrap(),
+                        "/health",
+                        PROBE_TIMEOUT,
+                    )
+                };
 
                 // 隧道自愈（二道防线）：探测连续失败达到阈值时，
                 // 主动重建 SSH 隧道。覆盖「CLI 部署后未通知网关」或

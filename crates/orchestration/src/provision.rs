@@ -1030,6 +1030,14 @@ impl Orchestrator {
             if let Ok(out) = mangosteen_device::remote::ssh_exec(&ssh, &tls_check, 15) {
                 if out.trim() == "yes" {
                     cloud_plan.tls = true;
+                    // 立即写回台账：runprobe 探活、网关 relay、恢复路径都从
+                    // 台账读 tls 标记决定 http/https——不写回则下游全按明文
+                    // 探活，https 引擎被判定未运行（run_status=Unactive）。
+                    let mut updated = plan.clone();
+                    updated.cloud = Some(cloud_plan.clone());
+                    if let Err(e) = self.state.update_plan(&id, updated) {
+                        eprintln!("[cloud] ⚠ 实例 {id} tls 标记写回台账失败（{e}），下游按明文探活");
+                    }
                 }
             }
         }
