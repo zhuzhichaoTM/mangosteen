@@ -1293,42 +1293,41 @@ fn bootstrap_deploy_target(
     //    而补装内容在引导链 4b/4d 已做过，跳过无影响。补装兜底只对
     //    「未加固存量实例」（root 密码/密钥可用）有意义。
     if let Some(target) = deploy_key_target(instance) {
-        if let Some(root_target) = root_key_target(instance) {
-            let workdir = config.remote_workdir.trim_end_matches('/').to_string();
-            let _ = mangosteen_device::remote::ssh_exec(
-                &root_target,
-                &format!("mkdir -p {workdir} && chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}"),
-                15,
-            );
-            // aria2c 幂等安装（root 权限）：模型/引擎下载的唯一下载器，
-            // 缺失会让 node-config 直接失败（无 curl 兜底，2026-11-17）
-            let _ = mangosteen_device::remote::ssh_exec(
-                &root_target,
-                "command -v aria2c >/dev/null 2>&1 || \
-                 (apt-get install -y aria2 2>/dev/null || \
-                  dnf install -y aria2 2>/dev/null || \
-                  yum install -y aria2 2>/dev/null || true)",
-                120,
-            );
-            // TLS 证书幂等生成（P1）：存量实例（引导早于证书逻辑）补齐，
-            // 新实例引导链 4d-2 已做——幂等可重入
-            let workdir = config.remote_workdir.trim_end_matches('/').to_string();
-            let _ = mangosteen_device::remote::ssh_exec(
-                &root_target,
-                &format!(
-                    "mkdir -p {workdir}/tls && \
-                     if [ ! -f {workdir}/tls/server.crt ]; then \
-                       openssl req -x509 -newkey rsa:2048 -keyout {workdir}/tls/server.key \
-                         -out {workdir}/tls/server.crt -days 3650 -nodes \
-                         -subj '/CN=llama-server' >/dev/null 2>&1 || true; \
-                     fi; \
-                     if [ -f {workdir}/tls/server.crt ]; then \
-                       chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}/tls/server.key {workdir}/tls/server.crt 2>/dev/null || true; \
-                       chmod 600 {workdir}/tls/server.key 2>/dev/null || true; \
-                     fi"
-                ),
-                30,
-            );
+        // deploy 密钥通道可用（加固后仍有效）——用 deploy 身份（家目录可写）
+        // 幂等补齐 workdir / aria2 / TLS 证书；均不需要 root。
+        let workdir = config.remote_workdir.trim_end_matches('/').to_string();
+        let workdir_cmd = format!("mkdir -p {workdir} && chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}");
+        let _ = mangosteen_device::remote::ssh_exec(&target, &workdir_cmd, 15);
+        let aria_cmd = "command -v aria2c >/dev/null 2>&1 || echo aria2-missing";
+        if let Ok(out) = mangosteen_device::remote::ssh_exec(&target, &aria_cmd, 15) {
+            if out.trim() != "aria2c" {
+                eprintln!("[cloud] ⚠ 实例 {} aria2c 缺失（模型/引擎下载将失败）", instance.id);
+            }
+        }
+        // TLS 证书幂等生成（P1）：存量实例（引导早于证书逻辑）补齐；
+        // 新实例由 4d-2 生成，此处幂等可重入
+        let tls_cmd = format!(
+            "mkdir -p {workdir}/tls && \
+             if [ ! -f {workdir}/tls/server.crt ]; then \
+               openssl req -x509 -newkey rsa:2048 -keyout {workdir}/tls/server.key \
+                 -out {workdir}/tls/server.crt -days 3650 -nodes \
+                 -subj '/CN=llama-server' >/dev/null 2>&1 || true; \
+             fi; \
+             if [ -f {workdir}/tls/server.crt ]; then \
+               chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}/tls/server.key {workdir}/tls/server.crt 2>/dev/null || true; \
+               chmod 600 {workdir}/tls/server.key 2>/dev/null || true; \
+               echo tls-ready; \
+             fi"
+        );
+        match mangosteen_device::remote::ssh_exec(&target, &tls_cmd, 30) {
+            Ok(out) if out.contains("tls-ready") => {
+                eprintln!("[cloud] ✓ 实例 {} TLS 证书已就绪（llama-server 将启用 https）", instance.id);
+            }
+            Ok(_) => eprintln!(
+                "[cloud] ⚠ 实例 {} TLS 证书生成失败（openssl 缺失？），推理走明文 HTTP",
+                instance.id
+            ),
+            Err(e) => eprintln!("[cloud] ⚠ 实例 {} TLS 证书生成失败（{e}）", instance.id),
         }
         eprintln!("[cloud] ✓ 实例 {} deploy 密钥认证已就绪（跳过引导）", instance.id);
         return Ok(target);
