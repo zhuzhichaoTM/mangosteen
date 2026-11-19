@@ -246,7 +246,7 @@ fn default_llama_server_url() -> String {
 }
 
 fn default_llama_server_sha256() -> String {
-    "95b64ecfd1eff2c8fc20a3e515dd37b4d6628b5f518741b0a93231811589a50e".to_string()
+    "d1a8e2ca57f818f5e9523badb73242e8c4444e27860931d0a391fcbb83e9f195".to_string()
 }
 
 fn default_github_proxy() -> String {
