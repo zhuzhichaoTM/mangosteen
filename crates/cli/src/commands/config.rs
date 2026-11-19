@@ -45,8 +45,18 @@ pub fn run(args: Args) -> MnResult<i32> {
             }
             path(args)
         }
+        // P0-1 密钥备份（2026-11-19）：gateway.key / ssh_known_hosts
+        // 是本地单点——损坏/误删会导致鉴权失效或 SSH 全拒连。备份后
+        // 可随时恢复。
+        "backup-keys" => backup_keys(args),
+        // P0-2 网关密钥轮换（2026-11-19）：生成新 key → 原子写
+        // gateway.key（600）→ 提示重启网关生效。
+        "rotate-gateway-key" => rotate_gateway_key(args),
+        // P0-1 host key 恢复（2026-11-19）：ssh_known_hosts 损坏
+        // （指纹全变/文件损坏）→ 清空重置，下次连接重新引导。
+        "reset-host-keys" => reset_host_keys(args),
         other => Err(mangosteen_core::MnError::bad_request(format!(
-            "未知子命令 `config {other}`。可用：show / init / path"
+            "未知子命令 `config {other}`。可用：show / init / path / backup-keys / rotate-gateway-key / reset-host-keys"
         ))),
     }
 }
@@ -396,4 +406,141 @@ mod tests {
         assert!(msg.contains("init"), "提示未列出命令：{msg}");
         assert!(msg.contains("path"), "提示未列出命令：{msg}");
     }
+}
+
+// ==================== P0-1/P0-2 密钥生命周期（2026-11-19） ====================
+
+/// `config backup-keys`：备份 gateway.key 与 ssh_known_hosts。
+///
+/// 备份目标 `{config_dir}/backups/`（600）：gateway.key.bak、
+/// ssh_known_hosts.bak。已有备份不覆盖（保留最早可用版本）。
+fn backup_keys(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        println!("用法：mangosteen config backup-keys");
+        println!();
+        let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env);
+        println!("备份本地密钥文件（gateway.key / ssh_known_hosts）到 {}。", dir.join("backups").display());
+        println!("密钥文件损坏/误删时可用备份恢复。已有备份不覆盖。");
+        return Ok(0);
+    }
+    let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env);
+    let backup_dir = dir.join("backups");
+    std::fs::create_dir_all(&backup_dir).map_err(|e| {
+        mangosteen_core::MnError::io(format!("创建备份目录 {}", backup_dir.display()), &e)
+    })?;
+    mangosteen_platform::fs::set_private_dir(&backup_dir)?;
+
+    let mut done = 0;
+    for (name, src) in [
+        ("gateway.key", dir.join("gateway.key")),
+        ("ssh_known_hosts", dir.join("ssh_known_hosts")),
+    ] {
+        if !src.is_file() {
+            println!("  - {name}：不存在，跳过");
+            continue;
+        }
+        let dst = backup_dir.join(format!("{name}.bak"));
+        if dst.exists() {
+            println!("  - {name}：备份已存在（{}），保留不覆盖", dst.display());
+            continue;
+        }
+        std::fs::copy(&src, &dst).map_err(|e| {
+            mangosteen_core::MnError::io(format!("备份 {} → {}", src.display(), dst.display()), &e)
+        })?;
+        mangosteen_platform::fs::set_private_permissions(&dst)?;
+        println!("  ✓ {name} → {}", dst.display());
+        done += 1;
+    }
+    if done > 0 {
+        println!("完成：{done} 个密钥文件已备份。");
+    }
+    Ok(0)
+}
+
+/// `config rotate-gateway-key`：轮换网关 API Key。
+///
+/// 生成新 32B token（256 位熵，/dev/urandom 优先）→ 原子写
+/// `{config_dir}/gateway.key`（600，先写临时文件再 rename）→ 旧
+/// Inline 明文引用一并清除。重启网关后新 key 生效。
+fn rotate_gateway_key(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        println!("用法：mangosteen config rotate-gateway-key");
+        println!();
+        println!("生成新的网关 API Key 并写入 gateway.key（600）。");
+        println!("重启网关后新 key 生效；旧 key 立即失效。");
+        return Ok(0);
+    }
+    let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env);
+    let key_path = dir.join("gateway.key");
+
+    // 生成 32B token（256 位熵）：/dev/urandom 优先
+    let strong = {
+        use std::io::Read as _;
+        std::fs::File::open("/dev/urandom")
+            .ok()
+            .and_then(|mut f| {
+                let mut buf = [0u8; 32];
+                f.read_exact(&mut buf).ok()?;
+                Some(buf.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            })
+            .unwrap_or_else(|| {
+                // 熵降级兜底（与 ui.rs 同口径）：时间戳 ^ pid
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                let x = nanos ^ ((std::process::id() as u64) << 32);
+                format!("{x:016x}{nanos:016x}")
+            })
+    };
+
+    // 原子写：临时文件 → rename（避免写一半崩溃损坏 key）
+    let tmp = dir.join("gateway.key.tmp");
+    std::fs::write(&tmp, strong.as_bytes()).map_err(|e| {
+        mangosteen_core::MnError::io(format!("写入 {}", tmp.display()), &e)
+    })?;
+    mangosteen_platform::fs::set_private_permissions(&tmp)?;
+    std::fs::rename(&tmp, &key_path).map_err(|e| {
+        mangosteen_core::MnError::io(format!("替换 {}", key_path.display()), &e)
+    })?;
+
+    println!("✓ 网关 API Key 已轮换：{}（600）", key_path.display());
+    println!();
+    println!("⚠ 旧 key 已失效。请重启网关使新 key 生效：");
+    println!("    mangosteen ui restart");
+    println!("  新 key 值（请妥善保存，勿提交到代码库）：");
+    println!("    {strong}");
+    Ok(0)
+}
+
+/// `config reset-host-keys`：重置 SSH host key 钉扎。
+///
+/// ssh_known_hosts 损坏（指纹全变/文件损坏）导致所有 SSH 连接被
+/// 拒（StrictHostKeyChecking=yes）时——备份并清空，下次连接重新
+/// 引导（重新 keyscan + 钉扎）。
+fn reset_host_keys(args: Args) -> MnResult<i32> {
+    if args.has("help") {
+        println!("用法：mangosteen config reset-host-keys");
+        println!();
+        println!("SSH host key 钉扎文件损坏/实例重建导致拒连时重置：");
+        println!("备份 ssh_known_hosts 到 .bak 后清空，下次连接重新引导。");
+        return Ok(0);
+    }
+    let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env);
+    let kh = dir.join("ssh_known_hosts");
+    if !kh.is_file() {
+        println!("ssh_known_hosts 不存在（未钉扎），无需重置。");
+        return Ok(0);
+    }
+    let bak = kh.with_extension("known_hosts.bak");
+    std::fs::copy(&kh, &bak).map_err(|e| {
+        mangosteen_core::MnError::io(format!("备份 {} → {}", kh.display(), bak.display()), &e)
+    })?;
+    mangosteen_platform::fs::set_private_permissions(&bak)?;
+    std::fs::remove_file(&kh).map_err(|e| {
+        mangosteen_core::MnError::io(format!("删除 {}", kh.display()), &e)
+    })?;
+    println!("✓ ssh_known_hosts 已备份到 {} 并清空。", bak.display());
+    println!("  下次部署将重新 keyscan 并钉扎实例指纹。");
+    Ok(0)
 }

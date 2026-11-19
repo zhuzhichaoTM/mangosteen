@@ -80,6 +80,22 @@ impl GatewayServer {
         let target = self.backend_for_model(model.as_deref())?;
         let url = target.url_for(&req.path);
 
+        // P1-3 熔断覆盖（2026-11-19）：流式路径也接入 UpstreamGuard——
+        // 熔断打开时直接拒绝（503 + Retry-After），curl 非零退出时
+        // 累计失败。此前熔断只覆盖 forward_json（chat/completion），
+        // 流式请求可绕过。
+        if let Some(retry_after) = self.upstream_guard.lock().unwrap().retry_after() {
+            let payload = mangosteen_core::openai::ErrorResponse::bad_request(
+                format!("上游推理服务暂时不可用（熔断中），请 {retry_after}s 后重试"),
+                None,
+            );
+            let mut resp = crate::http::Response::json(503, &payload);
+            resp.headers
+                .push(("Retry-After".to_string(), retry_after.to_string()));
+            let _ = client.write_all(&resp.to_bytes());
+            return Ok(());
+        }
+
         // ---- 拉起 curl ----
         let timeout = self.upstream_timeout.max(Duration::from_secs(600));
         let mut cmd = std::process::Command::new("curl");
@@ -155,6 +171,7 @@ impl GatewayServer {
 
         let Some(stdout) = child.stdout.take() else {
             let _ = child.kill();
+            self.upstream_guard.lock().unwrap().on_failure();
             return Err(MnError::Network {
                 stage: "上游转发".to_string(),
                 reason: "无法读取 curl 输出".to_string(),
@@ -265,7 +282,15 @@ impl GatewayServer {
         // ---- 结束 chunked 流 ----
         let _ = client.write_all(b"0\r\n\r\n");
         let _ = client.flush();
-        let _ = child.wait();
+        // P1-3：curl 正常退出 → 清零失败计数；非零（上游断流）→ 累计。
+        match child.wait() {
+            Ok(st) if st.success() => {
+                self.upstream_guard.lock().unwrap().on_success();
+            }
+            _ => {
+                self.upstream_guard.lock().unwrap().on_failure();
+            }
+        }
         Ok(())
     }
 }

@@ -3101,13 +3101,23 @@ pub fn download_model_node(
     // 加密失败不阻断部署（安全降级：明文保留，llama-server 走明文路径）。
     let enc_path = format!("{remote_model}.enc");
     let key_path = "/home/deploy/mangosteen/tls/.model_key";
+    // P1-4 运行时完整性（2026-11-19）：加密成功后写基线
+    // `{enc}.sha256`（密文 SHA256）——每次启动解密前比对，防磁盘位
+    // 翻转/实例存活期间的恶意篡改（openssl dgst 全量哈希 ~2s/500MB，
+    // 只在启动时执行一次，可接受）。
     let enc_cmd = format!(
         "if [ -f '{remote_model}' ] && [ -f '{key_path}' ] && command -v openssl >/dev/null 2>&1; then \
            openssl enc -aes-256-cbc -salt -pbkdf2 -iter 10000 -md sha256 \
              -in '{remote_model}' -out '{enc_path}' -pass file:'{key_path}' && \
+           openssl dgst -sha256 '{enc_path}' | awk '{{print $2}}' > '{enc_path}.sha256' && \
            rm -f '{remote_model}' '{remote_model}.download.ok' && echo encrypted-ok; \
          elif [ -f '{enc_path}' ] && [ -s '{enc_path}' ]; then \
-           echo already-encrypted; \
+           if [ -f '{enc_path}.sha256' ]; then \
+             echo already-encrypted; \
+           else \
+             openssl dgst -sha256 '{enc_path}' | awk '{{print $2}}' > '{enc_path}.sha256' && \
+             echo already-encrypted-baseline; \
+           fi; \
          else \
            echo encrypt-skipped; \
          fi",

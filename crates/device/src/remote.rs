@@ -1709,15 +1709,25 @@ pub fn start_llama_server_with_key(
                         "/dev/shm/mangosteen-models/{}",
                         model_path.rsplit('/').next().unwrap_or("model.gguf")
                     );
+                    // P1-4 运行时完整性（2026-11-19）：解密前比对密文
+                    // SHA256 基线（{enc}.sha256，加密时写入）——防磁盘
+                    // 位翻转/实例存活期间的恶意篡改。基线缺失（旧实例）
+                    // 跳过校验（兼容），校验失败拒启动（exit 3）。
                     let dec_cmd = format!(
                         "mkdir -p /dev/shm/mangosteen-models; \
                          if [ ! -s {q_plain} ]; then \
+                           if [ -f {q_enc}.sha256 ]; then \
+                             echo \"$(openssl dgst -sha256 {q_enc} | awk '{{print $2}}')\" | \
+                               grep -qx \"$(cat {q_enc}.sha256)\" || \
+                               {{ echo \"模型密文完整性校验失败（{dest} 疑似损坏或被篡改），拒绝解密\" >&2; exit 3; }}; \
+                           fi; \
                            openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 \
                              -in {q_enc} -out {q_plain} -pass file:{q_key} || exit 1; \
                          fi; echo decrypted-ok",
                         q_plain = shell_quote(&plain),
                         q_enc = shell_quote(&model_path),
                         q_key = shell_quote(key_path),
+                        dest = model_path,
                     );
                     let dec = ssh_exec(target, &dec_cmd, 600).map_err(|e| {
                         MnError::Network {

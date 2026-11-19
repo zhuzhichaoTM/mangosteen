@@ -98,6 +98,12 @@ pub fn run(args: Args) -> MnResult<i32> {
     match gw.stop(&id) {
         Ok(()) => {
             output::print_success(&format!("部署 {id} 已停止，资源已释放"));
+            // P2 stop 提示（2026-11-19）：密文与密钥已 shred 销毁，其余
+            // 数据（OS 卷/日志）随实例保留——销毁实例可彻底清除。
+            println!();
+            println!("  说明：模型密文与解密密钥已安全销毁（shred）。");
+            println!("  实例磁盘保留其余数据（日志等）；如需彻底清除，");
+            println!("  请销毁该实例（mangosteen cloud instances destroy）。");
             Ok(0)
         }
         Err(e) => Err(e),
