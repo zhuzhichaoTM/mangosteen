@@ -1303,7 +1303,10 @@ fn bootstrap_deploy_target(
         // deploy 密钥通道可用（加固后仍有效）——用 deploy 身份（家目录可写）
         // 幂等补齐 workdir / aria2 / TLS 证书；均不需要 root。
         let workdir = config.remote_workdir.trim_end_matches('/').to_string();
-        let workdir_cmd = format!("mkdir -p {workdir} && chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}");
+        // -R 递归：root 引导残留的文件（tmp 下载损坏包等）也要归 deploy，
+        // 否则 node-config 的 rm/覆盖均 Permission denied（实测根因）。
+        let workdir_cmd =
+            format!("mkdir -p {workdir} && chown -R {DEPLOY_USER}:{DEPLOY_USER} {workdir}");
         let _ = mangosteen_device::remote::ssh_exec(&target, &workdir_cmd, 15);
         let aria_cmd = "command -v aria2c >/dev/null 2>&1 || echo aria2-missing";
         if let Ok(out) = mangosteen_device::remote::ssh_exec(&target, &aria_cmd, 15) {
@@ -1466,10 +1469,20 @@ fn bootstrap_deploy_target(
                     instance.id, path
                 );
             }
-            Err(e) => eprintln!(
-                "[cloud] ⚠ 实例 {} llama-server root 下载失败（{}），node-config 将以 deploy 身份重试",
-                instance.id, e
-            ),
+            Err(e) => {
+                // 失败路径也必须 chown：root 下载残留的文件（如损坏的
+                // llama.tar.gz）属主 root，deploy 的 node-config 重试时
+                // rm 不掉 → 「Permission denied」死循环 → 3 轮全败
+                // （2026-11-19 实测根因）。归 deploy 后 node-config
+                // 才能删除坏文件重下。
+                let chown_cmd =
+                    format!("chown -R {DEPLOY_USER}:{DEPLOY_USER} {workdir} 2>/dev/null || true");
+                let _ = mangosteen_device::remote::ssh_exec(&root, &chown_cmd, 15);
+                eprintln!(
+                    "[cloud] ⚠ 实例 {} llama-server root 下载失败（{}），node-config 将以 deploy 身份重试",
+                    instance.id, e
+                );
+            }
         }
     }
 
