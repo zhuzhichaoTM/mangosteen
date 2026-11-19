@@ -68,7 +68,17 @@ impl Response {
         // P1-3 安全响应头（2026-11-19）：webui 与控制台同源——统一加
         // CSP（default-src 'self'，禁内联/外链脚本）/ 禁 iframe 嵌套 /
         // 禁 MIME 嗅探。防本机恶意页面点击劫持与内容注入。
-        head.push_str("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n");
+        // 修复（2026-11-19 实测）：若响应已自定义 CSP（登录页放宽
+        // script-src 'unsafe-inline'），不追加全局严格版——两个 CSP
+        // 并存时浏览器取交集，全局 'self' 会禁掉登录页内联 JS，
+        // 导致「登录页显示但点登录无反应」。
+        let has_csp = self
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("Content-Security-Policy"));
+        if !has_csp {
+            head.push_str("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n");
+        }
         head.push_str("X-Frame-Options: DENY\r\n");
         head.push_str("X-Content-Type-Options: nosniff\r\n");
         head.push_str("\r\n");
