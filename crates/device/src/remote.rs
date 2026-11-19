@@ -1456,6 +1456,7 @@ pub fn ensure_llama_server(
              u=\"${{p}}{q_raw}\"; \
              echo \"尝试下载：$u\"; \
              aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
+               --check-certificate=false \
                --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
                -d {q_tmp} -o {q_file} \"$u\" && break; \
              echo \"代理 $p 失败，切换下一个\"; \
@@ -1463,6 +1464,7 @@ pub fn ensure_llama_server(
          else \
            echo \"未配置代理，直连下载：$u\"; \
            aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
+             --check-certificate=false \
              --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
              -d {q_tmp} -o {q_file} {q_raw}; \
          fi; \
