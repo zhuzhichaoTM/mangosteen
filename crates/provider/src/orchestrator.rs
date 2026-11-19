@@ -2918,7 +2918,12 @@ pub fn download_model_node(
         )?;
     }
     // 下载函数返回后做最终核验，确认文件真的落到远端再进入下一阶段。
-    let final_size = mangosteen_device::remote::remote_file_size(target, remote_model)?;
+    // enc_ready 时明文已删（复用 .enc），核验 .enc 而非明文。
+    let final_size = if enc_ready {
+        mangosteen_device::remote::remote_file_size(target, &enc_path_early)?
+    } else {
+        mangosteen_device::remote::remote_file_size(target, remote_model)?
+    };
     if final_size == 0 {
         return Err(MnError::Network {
             stage: "云端下载模型".to_string(),
@@ -2931,7 +2936,9 @@ pub fn download_model_node(
     // GGUF 魔数检查共同保证。
     // 大小对了也不代表内容对：错误页/错误仓库的文件同样可能有大小。
     // GGUF 魔数是最后一道廉价检查，只在前 4 字节上花一次 SSH。
-    if !mangosteen_device::remote::remote_file_is_gguf(target, remote_model)? {
+    // enc_ready 时明文已删，跳过魔数检查（.enc 复用以上次加密时的
+    // 魔数校验为前提）。
+    if !enc_ready && !mangosteen_device::remote::remote_file_is_gguf(target, remote_model)? {
         return Err(MnError::Network {
             stage: "云端下载模型".to_string(),
             reason: format!(
