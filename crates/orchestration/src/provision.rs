@@ -707,6 +707,9 @@ impl Orchestrator {
 
         if let Some(c) = plan.cloud.as_mut() {
             c.local_port = local_port;
+            // .enc 路径回写（2026-11-19）：加密后主模型路径 = .enc，
+            // 与 deploy_vendor 路径一致（否则启动检查指向已删明文）。
+            c.model_path = cloud_plan.model_path.clone();
         }
         self.state.update_plan(&id, plan.clone())?;
 
@@ -890,6 +893,11 @@ impl Orchestrator {
         self.download_all_node_models(&ssh, &mut cloud_plan, progress, sink)?;
         perf.leave("模型下载完成");
         perf.finish(true);
+
+        // .enc 路径回写（2026-11-19 V100S 部署失败根因）：加密后主模型
+        // 路径变为 .enc，必须写回 plan.cloud 供 commit_cloud_inner 的
+        // 启动前检查与 launch_config 使用——否则仍指向已删除的明文文件。
+        plan.cloud = Some(cloud_plan);
 
         // 模型量化当前暂不激活：不执行任何量化处理，也不把阶段标记为
         // Skipped/Done；启动链路直接使用模板声明的 GGUF 文件。
