@@ -54,7 +54,10 @@ document.getElementById('f').addEventListener('submit', async function (ev) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: document.getElementById('k').value })
     });
-    if (r.ok) { location.reload(); }
+    if (r.ok) {
+      try { localStorage.setItem("gw_token", document.getElementById("k").value); } catch (e) {}
+      location.reload();
+    }
     else { err.textContent = 'API Key 错误，请重试（' + r.status + '）'; }
   } catch (e) { err.textContent = '网络错误：' + e; }
 });
