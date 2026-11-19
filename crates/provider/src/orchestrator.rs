@@ -1315,6 +1315,24 @@ fn bootstrap_deploy_target(
         }
         let workdir_cmd = format!("mkdir -p {workdir}");
         let _ = mangosteen_device::remote::ssh_exec(&target, &workdir_cmd, 15);
+        // 模型加密密钥幂等补齐（2026-11-19 实测）：复用实例走幂等短路
+        // 时 4d-3（root 引导链）不会执行——.model_key 缺失导致模型
+        // AES-256 加密被跳过（明文保留）。deploy 身份即可生成（tls
+        // 目录 deploy 属主），权限 600。
+        let model_key_cmd = format!(
+            "mkdir -p {workdir}/tls; \
+             if [ ! -s {workdir}/tls/.model_key ]; then \
+               (openssl rand -hex 32 > {workdir}/tls/.model_key 2>/dev/null || \
+                head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \\n' > {workdir}/tls/.model_key); \
+             fi; \
+             chmod 600 {workdir}/tls/.model_key 2>/dev/null || true; \
+             echo model-key-ready"
+        );
+        if let Ok(out) = mangosteen_device::remote::ssh_exec(&target, &model_key_cmd, 20) {
+            if out.contains("model-key-ready") {
+                eprintln!("[cloud] ✓ 实例 {} 模型加密密钥已就绪（幂等补齐）", instance.id);
+            }
+        }
         let aria_cmd = "command -v aria2c >/dev/null 2>&1 || echo aria2-missing";
         if let Ok(out) = mangosteen_device::remote::ssh_exec(&target, &aria_cmd, 15) {
             if out.trim() != "aria2c" {
