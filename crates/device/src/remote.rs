@@ -1462,8 +1462,10 @@ pub fn ensure_llama_server(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    // aria2c 参数（用户裁决 2026-11-19）：-x8 -s8、timeout 12、max-tries 3、
-    // retry-wait 2——并发不过大避免代理限流，少重试快速失败切换下一代理。
+    // 下载器（2026-11-19 用户实测裁决）：wget 替代 aria2c——GitHub CDN
+    // 对 aria2c 的多连接分片请求特征全部掐断（errorCode 15/16/22，所有
+    // 代理/参数组合），而 wget 单连接流式下载同一时刻同一代理不受影响
+    // （17MB/9s）。wget 参数：-c 断点续传、-T 12 超时、-t 2 少重试。
     //
     // aria2c 完成后偶发不退出（长尾连接卡 S 状态，2026-11-19 实例实测：
     // 文件看似满 608M 但进程不退 / 文件实际 damaged → set -e 串行脚本
@@ -1474,8 +1476,8 @@ pub fn ensure_llama_server(
     //    （外层 for attempt 1..=3 控制总轮数）——修复「坏文件存在时
     //    校验失败直接退出、不重试」的死路（2026-11-19 实测）。
     let fetch = format!(
-        "if ! command -v aria2c >/dev/null 2>&1; then \
-           echo '错误：未找到 aria2c（多连接下载器）。请在节点安装后重试：apt-get install -y aria2' >&2; \
+        "if ! command -v wget >/dev/null 2>&1; then \
+           echo '错误：未找到 wget。请在节点安装后重试：apt-get install -y wget' >&2; \
            exit 1; \
          fi; \
          for attempt in 1 2 3; do \
@@ -1483,19 +1485,13 @@ pub fn ensure_llama_server(
              for p in {proxy_list}; do \
                u=\"${{p}}{q_raw}\"; \
                echo \"尝试下载（第 $attempt 轮）：$u\"; \
-               timeout 120 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
-                 --check-certificate=false \
-                 --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-                 -d {q_tmp} -o {q_file} \"$u\"; rc=$?; \
-                 if [ $rc -eq 0 ] || [ $rc -eq 124 ]; then break; fi; \
+               timeout 120 wget -q --no-check-certificate -T 12 -t 2 -c -O {q_tmp}/{q_file} \"$u\"; rc=$?; \
+                 if [ $rc -eq 0 ]; then break; fi; \
                  echo \"代理 $p 失败（rc=$rc），切换下一个\"; \
              done; \
            else \
              echo \"未配置代理，直连下载：{q_raw}\"; \
-             timeout 120 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
-               --check-certificate=false \
-               --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-               -d {q_tmp} -o {q_file} {q_raw}; \
+             timeout 120 wget -q --no-check-certificate -T 12 -t 2 -c -O {q_tmp}/{q_file} {q_raw}; \
            fi; \
            test -s {q_tmp}/{q_file} || {{ echo '所有代理均下载失败' >&2; continue; }}; \
            if [ -n \"{sha256}\" ]; then \
