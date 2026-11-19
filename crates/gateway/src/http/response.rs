@@ -65,6 +65,12 @@ impl Response {
         for (k, v) in &self.headers {
             head.push_str(&format!("{k}: {v}\r\n"));
         }
+        // P1-3 安全响应头（2026-11-19）：webui 与控制台同源——统一加
+        // CSP（default-src 'self'，禁内联/外链脚本）/ 禁 iframe 嵌套 /
+        // 禁 MIME 嗅探。防本机恶意页面点击劫持与内容注入。
+        head.push_str("Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'\r\n");
+        head.push_str("X-Frame-Options: DENY\r\n");
+        head.push_str("X-Content-Type-Options: nosniff\r\n");
         head.push_str("\r\n");
         let mut out = head.into_bytes();
         out.extend_from_slice(&self.body);

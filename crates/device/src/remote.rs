@@ -633,6 +633,18 @@ impl SshTarget {
             hostkey_opt,
             "-o".to_string(),
             known_opt,
+            // P0-1 exec 通道密码套件 pin（2026-11-19）：与 net.rs 隧道
+            // 同款锁定——此前隧道已 pin 但 exec 通道（部署/停止/探活
+            // 全部走这里）未 pin，降级面不对称。RekeyLimit 长会话定期
+            // 重换密钥（隧道同款口径 1G/1h）。
+            "-o".to_string(),
+            "Ciphers=chacha20-poly1305@openssh.com,aes256-gcm@openssh.com".to_string(),
+            "-o".to_string(),
+            "MACs=hmac-sha2-256-etm@openssh.com".to_string(),
+            "-o".to_string(),
+            "KexAlgorithms=curve25519-sha256".to_string(),
+            "-o".to_string(),
+            "RekeyLimit=1G 1h".to_string(),
             // 丢弃主机指纹时，OpenSSH 会把首次连接提示写到
             // stderr；这是正常现象，但会污染远端命令错误信息。
             "-o".to_string(),
@@ -2673,6 +2685,17 @@ fn download_single_url(
         // 完成判定优先看远端写的成功标记（仅下载器自身以 0 退出时才写）。
         // 这样就不需要「大小 == 计划里的期望字节数」这个容易误判的前提。
         if completed && size > 0 {
+            // P0-2 下载残留清理（2026-11-19）：下载成功即删
+            // .download.sh（含 CDN 签名 URL token）/ .download.pid /
+            // .download.log（含完整 URL 历史）——脚本可执行、URL 可复用，
+            // 留在盘上无用途。.download.ok 保留（轮询判据）。
+            let _ = ssh_exec(
+                target,
+                &format!(
+                    "rm -f '{dest}.download.sh' '{dest}.download.pid' '{dest}.download.log' 2>/dev/null || true"
+                ),
+                15,
+            );
             return Ok(size);
         }
         // **优化**：增加快速通道——如果文件大小达到期望值，立即判定完成。
@@ -2680,6 +2703,13 @@ fn download_single_url(
         // 导致的长时间等待。
         if let Some(exp) = expected_bytes {
             if exp > 0 && size == exp {
+                let _ = ssh_exec(
+                    target,
+                    &format!(
+                        "rm -f '{dest}.download.sh' '{dest}.download.pid' '{dest}.download.log' 2>/dev/null || true"
+                    ),
+                    15,
+                );
                 return Ok(size);
             }
         }

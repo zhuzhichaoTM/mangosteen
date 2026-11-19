@@ -241,7 +241,10 @@ impl SessionStore {
     fn save(&self, file: &SessionFile) -> MnResult<()> {
         let text = serde_json::to_string_pretty(file)
             .map_err(|e| MnError::config("session", format!("序列化失败：{e}")))?;
-        mangosteen_platform::fs::atomic_write_str(&self.path, &text)
+        // P2（2026-11-19）：sessions 含会话内容（prompt/回复元数据）——
+        // atomic_write_str 默认 umask 权限（644），同机其他用户可读。
+        // 改 atomic_write_private（600）。
+        mangosteen_platform::fs::atomic_write_private(self.path.as_path(), text.as_bytes())
     }
 
     /// 新建会话。

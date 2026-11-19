@@ -8,7 +8,10 @@ use std::io::{BufRead, BufReader, Read};
 
 use mangosteen_core::{MnError, MnResult};
 
-pub(crate) const MAX_BODY: usize = 32 * 1024 * 1024;
+/// 请求体上限（P1-5 2026-11-19 上调 32MB→100MB）：长上下文 chat 请求
+/// （如 128K token 模型的全量 prompt）可能超过 32MB——上限过低会误杀
+/// 合法请求；100MB 仍能防失控进程的无限 body 打爆内存。
+pub(crate) const MAX_BODY: usize = 100 * 1024 * 1024;
 
 /// 请求行与头部解析结果。
 #[derive(Debug, Clone)]

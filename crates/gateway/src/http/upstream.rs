@@ -88,8 +88,21 @@ pub fn http_post_json_with_key_tls(
             .arg("--write-out")
             .arg("\n%{http_code}")
             .arg(url);
+        // P1-4（2026-11-19）：与 relay.rs 流式路径同款——密钥走 curl
+        // @file 语法（临时 600 文件），argv/ps 不含明文 token，用完即删。
+        // 写临时文件失败才退回 argv（可用性优先）。
         if let Some(key) = api_key {
-            cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
+            let key_path = std::env::temp_dir().join(format!("mn-key-up-{}.tmp", std::process::id()));
+            match std::fs::write(&key_path, key.as_bytes()) {
+                Ok(()) => {
+                    let _ = mangosteen_platform::fs::set_private_permissions(&key_path);
+                    cmd.arg("-H")
+                        .arg(format!("Authorization: Bearer @{}", key_path.display()));
+                }
+                Err(_) => {
+                    cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
+                }
+            }
         }
         use std::io::Write as _;
         let mut child = cmd
@@ -101,6 +114,12 @@ pub fn http_post_json_with_key_tls(
                 stage: "启动 curl".to_string(),
                 reason: format!("{e}"),
             })?;
+        // curl 已启动（header 已读取）→ 立即删除临时 key 文件
+        if let Some(key) = api_key {
+            let _ = std::fs::remove_file(
+                std::env::temp_dir().join(format!("mn-key-up-{}.tmp", std::process::id())),
+            );
+        }
         child
             .stdin
             .as_mut()
