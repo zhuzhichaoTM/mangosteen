@@ -119,6 +119,29 @@ pub fn atomic_write_private(path: &Path, contents: &[u8]) -> MnResult<()> {
 ///
 /// Windows 无 POSIX 权限位，改为依赖 `%APPDATA%` 目录本身的 ACL 继承，
 /// 此处为无操作（但保留接口，便于未来加 ACL 调用）。
+/// P1-3 关键安全事件双写（2026-11-19）：deploy/stop/加密/密钥轮换等
+/// 高危事件除正常日志外，追加一行到 `{config_dir}/audit-critical.log`
+///（600）——本地主审计日志被 truncate 时，这份独立第二记录可用于事后
+/// 取证。追加写（append），不轮转（关键事件频率极低）。
+pub fn audit_critical(event: &str) {
+    use std::io::Write as _;
+    let dir = crate::paths::config_dir(&crate::paths::real_env);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("audit-critical.log");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "{ts} {event}");
+        let _ = set_private_permissions(&path);
+    }
+}
+
 /// 收紧目录权限为 0700（Unix；非 Unix 平台忽略）。
 ///
 /// P1 日志目录（audit）等含敏感内容的目录用——gateway 层禁止直接

@@ -948,6 +948,31 @@ impl Orchestrator {
                     }
 
                     // 独占实例：原逻辑（关隧道 + 关机保留）
+                    // P0 修复（2026-11-19 实测）：shred 必须在 teardown
+                    //（关机）之前执行——关机后 SSH 不通无法删除密文/密钥。
+                    // 目标获取：厂商实例走 vendor_wait_target（device_target_for
+                    // 只认自建设备的 device_id，厂商实例返回 None——上轮实测
+                    // shred 未执行就是这个原因）。
+                    let shred_target = self.vendor_wait_target(&provider, instance_id);
+                    if let Some(target) = shred_target {
+                        let wd = self.config().cloud.remote_workdir.clone();
+                        if let Err(e) =
+                            mangosteen_device::remote::shred_encrypted_models(&target, &wd)
+                        {
+                            eprintln!("[cloud] ⚠ 部署 {} 静态数据销毁失败（{e}）", id);
+                        } else {
+                            eprintln!(
+                                "[cloud] ✓ 部署 {} 密文模型与密钥已销毁（stop 不复用密文）",
+                                id
+                            );
+                            mangosteen_platform::fs::audit_critical(&format!(
+                                "model-shredded {}",
+                                id
+                            ));
+                        }
+                    } else {
+                        eprintln!("[cloud] ⚠ 部署 {} 无法获取 SSH 目标，跳过静态数据销毁", id);
+                    }
                     if let Some(o) = self.cloud().as_mut() {
                         let errors = o.teardown(&provider, instance_id);
                         if !errors.is_empty() {
@@ -1169,6 +1194,10 @@ impl Orchestrator {
                                 "[cloud] ✓ 部署 {} 密文模型与密钥已销毁（stop 不复用密文）",
                                 id
                             );
+                            mangosteen_platform::fs::audit_critical(&format!(
+                                "model-shredded {}",
+                                id
+                            ));
                         }
                     }
                 }
@@ -1293,6 +1322,10 @@ impl Orchestrator {
                     warnings.push(format!("静态数据销毁（密文/密钥）：{e}"));
                 } else {
                     eprintln!("[cloud] ✓ 部署 {} 密文模型与密钥已销毁（stop 不复用密文）", id);
+                    mangosteen_platform::fs::audit_critical(&format!(
+                        "model-shredded {}",
+                        id
+                    ));
                 }
             }
         }

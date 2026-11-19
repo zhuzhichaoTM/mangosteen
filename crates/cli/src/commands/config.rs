@@ -504,6 +504,10 @@ fn rotate_gateway_key(args: Args) -> MnResult<i32> {
         mangosteen_core::MnError::io(format!("替换 {}", key_path.display()), &e)
     })?;
 
+    mangosteen_platform::fs::audit_critical(&format!(
+        "gateway-key-rotated {}",
+        mangosteen_core::time::now_unix()
+    ));
     println!("✓ 网关 API Key 已轮换：{}（600）", key_path.display());
     println!();
     println!("⚠ 旧 key 已失效。请重启网关使新 key 生效：");

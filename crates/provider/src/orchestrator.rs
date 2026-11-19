@@ -1302,6 +1302,11 @@ fn bootstrap_deploy_target(
     if let Some(target) = deploy_key_target(instance) {
         // deploy 密钥通道可用（加固后仍有效）——用 deploy 身份（家目录可写）
         // 幂等补齐 workdir / aria2 / TLS 证书；均不需要 root。
+        // P0 修复：root 密钥引导用公钥（与 4c 同源 default_identity_key）。
+        let root_pub = mangosteen_device::remote::default_identity_key()
+            .and_then(|k| std::fs::read_to_string(format!("{}.pub", k.display())).ok())
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
         let workdir = config.remote_workdir.trim_end_matches('/').to_string();
         // workdir 残留清理（2026-11-19 实测根因）：root 引导链（4d-4）
         // 下载的损坏 llama.tar.gz 属主 root，deploy 的 node-config
@@ -1312,6 +1317,24 @@ fn bootstrap_deploy_target(
             let chown_cmd =
                 format!("chown -R {DEPLOY_USER}:{DEPLOY_USER} {workdir} 2>/dev/null || true");
             let _ = mangosteen_device::remote::ssh_exec(&root, &chown_cmd, 15);
+            // P0 修复（2026-11-19 实测根因）：旧实例（加固功能上线前引导）
+            // 无 root 密钥通道 → 幂等短路永远跳过 4c → sshd 加固永远
+            // 跳过 → root 密码登录一直开着。用 root 密码通道补装 4c
+            // 公钥 + 立即 sshd 加固（密钥已就绪的 deploy 不受影响——
+            // PasswordAuthentication no 只禁密码）。
+            let root_key_cmd = format!(
+                "install -d -m 700 /root/.ssh && \
+                 touch /root/.ssh/authorized_keys && \
+                 chmod 600 /root/.ssh/authorized_keys && \
+                 grep -qxF '{root_pub}' /root/.ssh/authorized_keys || \
+                 printf '%s\\n' '{root_pub}' >> /root/.ssh/authorized_keys"
+            );
+            let _ = mangosteen_device::remote::ssh_exec(&root, &root_key_cmd, 15);
+            let host = target.host.clone();
+            let port = target.port;
+            harden_sshd_after_node_config(&host, port).unwrap_or_else(|e| {
+                eprintln!("[cloud] ⚠ 实例 {} sshd 加固失败：{}", instance.id, e);
+            });
         }
         let workdir_cmd = format!("mkdir -p {workdir}");
         let _ = mangosteen_device::remote::ssh_exec(&target, &workdir_cmd, 15);
@@ -3194,6 +3217,11 @@ pub fn download_model_node(
                     "[cloud] ✓ 实例 {} 模型静态加密完成（AES-256，明文已删除）",
                     plan.model_path
                 );
+                // P1-3 关键事件双写（audit-critical.log，防主日志被清）
+                mangosteen_platform::fs::audit_critical(&format!(
+                    "model-encrypted {}",
+                    plan.model_path
+                ));
                 // 加密成功：明文已删，返回 .enc 路径——llama-server 的
                 // --model 必须指向 .enc，否则启动时读已删除的明文文件
                 // 报「文件不存在或为空」（2026-11-18 部署失败根因）。
