@@ -582,10 +582,13 @@ impl Orchestrator {
                 Some(&staged),
                 None,
             )?;
-            // 主模型路径回写：加密后（.enc）必须替换 cloud_plan.model_path，
-            // 否则启动前检查与 launch_config 仍指向已删除的明文文件。
+            // 主模型路径回写：加密后（.enc）必须替换 cloud_plan.model_path
+            // 与 engine.model_path——启动前检查（commit_cloud_inner）与
+            // launch_config 读的是 engine.model_path，只回写顶层字段会
+            // 报「远端模型文件不存在：...gguf」（明文已删）。
             if path == main_model_path {
-                cloud_plan.model_path = downloaded;
+                cloud_plan.model_path = downloaded.clone();
+                cloud_plan.engine.model_path = downloaded;
             }
             let size = mangosteen_device::remote::remote_file_size(ssh, &path)?;
             sink(
