@@ -1464,6 +1464,12 @@ pub fn ensure_llama_server(
     };
     // aria2c 参数（用户裁决 2026-11-19）：-x8 -s8、timeout 12、max-tries 3、
     // retry-wait 2——并发不过大避免代理限流，少重试快速失败切换下一代理。
+    //
+    // aria2c 完成后偶发不退出（长尾连接卡 S 状态，2026-11-19 实例实测：
+    // 文件已满 608M 但进程不退 → set -e 串行脚本永久卡死）——用
+    // `timeout 900` 硬上限兜底 + 下载器退码不敏感设计：退码非 0 时
+    // 不立即放弃，先做 SHA256 校验（校验通过=文件完整=下载成功）。
+    // 这样 aria2c 卡死/超时退出都不会阻断后续校验与解压。
     let fetch = format!(
         "if ! command -v aria2c >/dev/null 2>&1; then \
            echo '错误：未找到 aria2c（多连接下载器）。请在节点安装后重试：apt-get install -y aria2' >&2; \
@@ -1473,15 +1479,16 @@ pub fn ensure_llama_server(
            for p in {proxy_list}; do \
              u=\"${{p}}{q_raw}\"; \
              echo \"尝试下载：$u\"; \
-             aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
+             timeout 900 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
                --check-certificate=false \
                --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-               -d {q_tmp} -o {q_file} \"$u\" && break; \
-             echo \"代理 $p 失败，切换下一个\"; \
+               -d {q_tmp} -o {q_file} \"$u\"; rc=$?; \
+               if [ $rc -eq 0 ] || [ $rc -eq 124 ]; then break; fi; \
+               echo \"代理 $p 失败（rc=$rc），切换下一个\"; \
            done; \
          else \
-           echo \"未配置代理，直连下载：$u\"; \
-           aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
+           echo \"未配置代理，直连下载：{q_raw}\"; \
+           timeout 900 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
              --check-certificate=false \
              --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
              -d {q_tmp} -o {q_file} {q_raw}; \
