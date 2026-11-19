@@ -252,6 +252,10 @@ pub struct CloudPlan {
     /// 标记 + 文件非空 + GGUF 魔数」保证。无法获知时为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_bytes: Option<u64>,
+    /// 模型文件期望 SHA256（P0-1 供应链防线，2026-11-19）：下载后远端
+    /// `sha256sum -c` 强校验。`None` = 未登记（仅非空 + GGUF 魔数校验）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_sha256: Option<String>,
     /// 远端引擎里的模型名（如 Ollama 的 `qwen2.5:0.5b-instruct`）。
     ///
     /// `None` 表示**不负责加载模型**——此时部署只到「实例+隧道就绪」，

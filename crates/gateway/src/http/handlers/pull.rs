@@ -327,6 +327,7 @@ impl GatewayServer {
                     Ok(url) => Some(mangosteen_orchestration::assess::ModelDownloadSpec {
                         url,
                         expected_bytes: probe_opts.expected_bytes,
+                        expected_sha256: None,
                     }),
                     Err(e) => {
                         // 拼不出地址不是致命错误：本地已有文件时仍可上传兜底。

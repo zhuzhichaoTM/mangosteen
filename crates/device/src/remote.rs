@@ -108,7 +108,7 @@ impl DeviceRuntime for RemoteRuntime {
             workdir
         };
         // github_proxy 空串：trait 直连场景无代理配置，由具体调用方传入
-        ensure_llama_server(self.ssh()?, workdir, download_url, "")
+        ensure_llama_server(self.ssh()?, workdir, download_url, "", "")
     }
 
     fn ensure_model(&self, url: &str, dest: &str, expected_bytes: Option<u64>) -> MnResult<u64> {
@@ -1340,6 +1340,7 @@ pub fn ensure_llama_server_from_archive(
     workdir: &str,
     download_url: &str,
     github_proxy: &str,
+    sha256: &str,
 ) -> MnResult<String> {
     let installed = format!("{workdir}/bin/llama-server");
     let probe = ssh_exec(
@@ -1350,7 +1351,7 @@ pub fn ensure_llama_server_from_archive(
     if !probe.trim().is_empty() {
         return Ok(probe.trim().to_string());
     }
-    ensure_llama_server(target, workdir, download_url, github_proxy)
+    ensure_llama_server(target, workdir, download_url, github_proxy, sha256)
 }
 
 /// 节点配置阶段安装模型下载与解压依赖。
@@ -1369,6 +1370,7 @@ pub fn ensure_llama_server(
     workdir: &str,
     download_url: &str,
     github_proxy: &str,
+    sha256: &str,
 ) -> MnResult<String> {
     let installed = format!("{workdir}/bin/llama-server");
 
@@ -1468,7 +1470,13 @@ pub fn ensure_llama_server(
              --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
              -d {q_tmp} -o {q_file} {q_raw}; \
          fi; \
-         test -s {q_tmp}/{q_file} || {{ echo '所有代理均下载失败' >&2; exit 1; }}"
+         test -s {q_tmp}/{q_file} || {{ echo '所有代理均下载失败' >&2; exit 1; }}; \
+         if [ -n \"{sha256}\" ]; then \
+           echo \"{sha256}  {q_tmp}/{q_file}\" | sha256sum -c - >/dev/null 2>&1 || \
+             {{ echo 'llama 包 SHA256 校验失败（供应链防投毒，拒绝解压）：{q_tmp}/{q_file}' >&2; rm -f {q_tmp}/{q_file}; exit 2; }}; \
+           echo 'llama 包 SHA256 校验通过'; \
+         fi"
+
     );
     let script = format!(
         "set -e; \
@@ -1538,9 +1546,10 @@ pub fn ensure_llama_server_with_progress(
     workdir: &str,
     download_url: &str,
     github_proxy: &str,
+    sha256: &str,
     _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
 ) -> MnResult<String> {
-    ensure_llama_server(target, workdir, download_url, github_proxy)
+    ensure_llama_server(target, workdir, download_url, github_proxy, sha256)
 }
 
 /// 在远端后台启动 `llama-server`。
@@ -1722,7 +1731,8 @@ pub fn start_llama_server_with_key(
          fi; \
          test -x {bin}; \
          LD_LIBRARY_PATH={library_path} {bin} --version >/dev/null 2>&1 || true; \
-         setsid env LD_LIBRARY_PATH={library_path} sh -c 'echo $$ > {pid_file}; exec {bin} {args}' > {log} 2>&1 < /dev/null & \
+         ulimit -c 0 2>/dev/null || true; \
+         setsid env LD_LIBRARY_PATH={library_path} sh -c 'ulimit -c 0 2>/dev/null || true; echo $$ > {pid_file}; LD_LIBRARY_PATH={library_path} {bin} {args} & CPID=$!; wait $CPID; RC=$?; rm -rf /dev/shm/mangosteen-models /dev/shm/mangosteen 2>/dev/null || true; exit $RC' > {log} 2>&1 < /dev/null & \
          started=0; \
          i=0; \
          while [ $i -lt 60 ]; do \
@@ -2238,7 +2248,7 @@ pub fn download_model_remote(
     dest: &str,
     expected_bytes: Option<u64>,
 ) -> MnResult<u64> {
-    download_model_remote_with_progress(target, url, dest, expected_bytes, None, None, None)
+    download_model_remote_with_progress(target, url, dest, expected_bytes, None, None, None, None)
 }
 
 /// 带进度回调的远端下载。
@@ -2253,6 +2263,7 @@ pub fn download_model_remote_with_progress(
     url: &str,
     dest: &str,
     expected_bytes: Option<u64>,
+    expected_sha256: Option<&str>,
     hf_token: Option<&str>,
     on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
@@ -2300,6 +2311,7 @@ pub fn download_model_remote_with_progress(
                 candidate_url,
                 dest,
                 expected_bytes,
+            expected_sha256,
                 hf_token,
                 on_progress,
                 should_cancel,
@@ -2342,6 +2354,7 @@ fn download_single_url(
     url: &str,
     dest: &str,
     expected_bytes: Option<u64>,
+    expected_sha256: Option<&str>,
     hf_token: Option<&str>,
     on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
     should_cancel: Option<&(dyn Fn() -> bool + Send + Sync)>,
@@ -2387,8 +2400,17 @@ fn download_single_url(
     let q_ok = shell_quote(&ok_file);
 
     // 构建下载器脚本：保持简单，避免复杂 shell 语法导致语法错误
+    // P0-1 供应链防线（2026-11-19）：下载器 0 退出后、写 .download.ok 前
+    // 先做 SHA256 强校验——代理/镜像下载场景，哈希是唯一防投毒防线。
+    // 校验失败删文件并以非零退出（调用方按失败处理，不会写 .ok 标记）。
+    let sha_check = match expected_sha256 {
+        Some(sha) if !sha.is_empty() => format!(
+            "; if [ \"$status\" -eq 0 ]; then if echo \"{sha}  {q_dest}\" | sha256sum -c - >/dev/null 2>&1; then echo \"sha256-ok\"; else echo \"SHA256 校验失败（供应链防投毒）：{dest}\" >&2; rm -f {q_dest}; status=3; fi; fi"
+        ),
+        _ => String::new(),
+    };
     let downloader = format!(
-        "{proxy_env}aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url} 2>/dev/null; status=$?; if [ \"$status\" -ne 0 ]; then curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 -o {q_dest} {q_url}; status=$?; fi; if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\"",
+        "{proxy_env}aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url} 2>/dev/null; status=$?; if [ \"$status\" -ne 0 ]; then curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 -o {q_dest} {q_url}; status=$?; fi{sha_check}; if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\"",
     );
     // ## 为什么先把下载器写成脚本文件，再用一条短命令启动
     //

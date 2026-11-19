@@ -158,6 +158,10 @@ pub struct ModelDownloadSpec {
     pub url: String,
     /// 期望字节数。`None` 表示未知，此时不做大小校验（不假装校验过）
     pub expected_bytes: Option<u64>,
+    /// 期望 SHA256（P0-1 供应链防线，2026-11-19）：下载后远端强校验。
+    /// `None` = 未知（仅非空 + GGUF 魔数校验）；已内置白名单：
+    /// qwen2.5-0.5b Q4_K_M / qwen3.8-27b（default + Uncensored）。
+    pub expected_sha256: Option<String>,
 }
 
 impl Default for DeploymentRequest {

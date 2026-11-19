@@ -186,6 +186,14 @@ pub struct CloudConfig {
     /// `github_proxy` 的代理与它拼接轮询（见 `github_proxy` 字段）。
     #[serde(default = "default_llama_server_url")]
     pub llama_server_url: String,
+    /// llama 包 SHA256 校验值（P0-1 供应链防线，2026-11-19）。
+    ///
+    /// 下载完成后远端 `sha256sum -c` 强校验——代理池 + aria2c
+    /// `--check-certificate=false` 下，哈希是唯一防投毒防线。留空跳过
+    /// （不推荐）。当前默认值 = v0.1.0 llama-cpp-bin-linux-x86_64.tar.gz
+    /// 官方哈希（637481848 bytes）。
+    #[serde(default = "default_llama_server_sha256")]
+    pub llama_server_sha256: String,
     /// GitHub 代理池（2026-11-19 用户裁决）：分号分隔的代理前缀列表。
     ///
     /// 下载 `llama_server_url`（裸 GitHub URL）时依次拼接每个代理轮询
@@ -237,6 +245,10 @@ fn default_llama_server_url() -> String {
     "https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.0/llama-cpp-bin-linux-x86_64.tar.gz".to_string()
 }
 
+fn default_llama_server_sha256() -> String {
+    "95b64ecfd1eff2c8fc20a3e515dd37b4d6628b5f518741b0a93231811589a50e".to_string()
+}
+
 fn default_github_proxy() -> String {
     "https://ghfast.top/;https://shturl.cc//;https://gh.llkk.cc/".to_string()
 }
@@ -248,6 +260,7 @@ impl Default for CloudConfig {
             remote_workdir: default_remote_workdir(),
             hf_token: None,
             llama_server_url: default_llama_server_url(),
+            llama_server_sha256: default_llama_server_sha256(),
             github_proxy: default_github_proxy(),
             bind_host: default_bind_host(),
             api_key: None,

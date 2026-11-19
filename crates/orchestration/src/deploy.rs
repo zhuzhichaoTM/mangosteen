@@ -145,6 +145,7 @@ impl Orchestrator {
                 req_owned.model_download = Some(crate::assess::ModelDownloadSpec {
                     url,
                     expected_bytes: Some(size).filter(|s| *s > 0),
+                    expected_sha256: None,
                 });
                 &req_owned
             } else {

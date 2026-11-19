@@ -444,6 +444,20 @@ impl Scheduler {
             download_url: template_download_url
                 .or_else(|| req.model_download.as_ref().map(|d| d.url.clone())),
             download_bytes: req.model_download.as_ref().and_then(|d| d.expected_bytes),
+            // P0-1（2026-11-19）：模型 SHA256 白名单兜底——ModelDownloadSpec
+            // 未带哈希时按文件名内置校验（代理下载场景防投毒的唯一防线）。
+            download_sha256: req
+                .model_download
+                .as_ref()
+                .and_then(|d| d.expected_sha256.clone())
+                .or_else(|| {
+                    let fname = req
+                        .model_download
+                        .as_ref()
+                        .map(|d| d.url.rsplit('/').next().unwrap_or("").to_lowercase())
+                        .unwrap_or_default();
+                    builtin_sha256(&fname)
+                }),
             remote_model: None,
             node_ip: None,
             // 用户在确认弹窗里选定的 GPU 型号；用于下次部署时匹配
@@ -1167,4 +1181,55 @@ mod tests {
         assert_eq!(ComputeTarget::parse("gpu"), None);
         assert_eq!(ComputeTarget::parse(""), None);
     }
+}
+
+
+/// 内置模型 SHA256 白名单（P0-1，2026-11-19，来源 ModelScope 官方 API）。
+///
+/// 按下载 URL 的文件名小写匹配。新增模型时在此登记（或部署请求携带
+/// `expected_sha256` 显式指定）。
+///
+/// P0-1 白名单（2026-11-19，用户裁决）：仅登记用户实际使用的模板文件。
+/// 哈希来源：hf-mirror / ModelScope 官方 API 的 `lfs.oid`（即文件
+/// SHA256），当日实时校验。
+/// - qwen2.5-0.5b · default：Qwen/Qwen2.5-0.5B-Instruct-GGUF
+/// - qwen3.8-27b · default：unsloth/Qwen3.8-27B-GGUF（主模型 + mmproj + MTP）
+/// - qwen3.8-27b · Uncensored：JonathanColetti/Qwen3.8-27B-Uncensored-GGUF
+fn builtin_sha256(url_filename_lower: &str) -> Option<String> {
+    let table: &[(&str, &str)] = &[
+        // qwen2.5-0.5b · default（491MB）
+        (
+            "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+            "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+        ),
+        // qwen3.8-27b · default（unsloth UD Q4_K_M，16.6GB）
+        (
+            "qwen3.8-27b-ud-q4_k_m.gguf",
+            "1bce504dfecd84153666928a41d8a66706f0158d3a317bc5196b72819d7dc529",
+        ),
+        // qwen3.8-27b · default 辅助：多模态投影（931MB）
+        (
+            "mmproj-bf16.gguf",
+            "83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53",
+        ),
+        // qwen3.8-27b · default 辅助：MTP draft（1.37GB）
+        (
+            "mtp-qwen3.8-27b-q4_0.gguf",
+            "50d9ce5a6da381bbcfb31061cf73df94a90e6faf8efeddee379a9cb8f1501c6e",
+        ),
+        // qwen3.8-27b · Uncensored（16.8GB）
+        (
+            "qwen3.8-27b-uncensored-q4_k_m.gguf",
+            "4c5e2db039e9325ac7724c8846c71356a24ad1cdfa28002d73ecb6be645f9675",
+        ),
+        // qwen3.8-27b · Uncensored 辅助：多模态投影（928MB）
+        (
+            "mmproj-qwen3.8-27b-uncensored-f16.gguf",
+            "5ac423f8a29059dc24e51bc6a43e9380dcd57a9347f28b62591e0b3f60b7081c",
+        ),
+    ];
+    table
+        .iter()
+        .find(|(name, _)| url_filename_lower.contains(name))
+        .map(|(_, sha)| sha.to_string())
 }

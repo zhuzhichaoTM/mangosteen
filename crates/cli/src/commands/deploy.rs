@@ -712,6 +712,7 @@ fn parse_template_download(
 
     Some(mangosteen_gateway::ModelDownloadSpec {
         url,
+        expected_sha256: None,
         expected_bytes: None,
     })
 }
