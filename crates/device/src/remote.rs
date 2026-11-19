@@ -1470,43 +1470,44 @@ pub fn ensure_llama_server(
     // aria2c 完成后偶发不退出（长尾连接卡 S 状态，2026-11-19 实例实测：
     // 文件看似满 608M 但进程不退 / 文件实际 damaged → set -e 串行脚本
     // 永久卡死）。三层兜底：
-    // 1. `timeout 120` 硬上限（用户裁决）：2 分钟强杀进下一步；
-    // 2. 退码不敏感：rc=124（超时杀）也 break——完成判据是 SHA256；
-    // 3. SHA 校验失败不 exit，而是 rm 坏文件后**回到代理循环重下**
-    //    （外层 for attempt 1..=3 控制总轮数）——修复「坏文件存在时
-    //    校验失败直接退出、不重试」的死路（2026-11-19 实测）。
+    // 下载器 aria2c（用户裁决 2026-11-19 最终版）：-x8 -s8 多连接
+    // 速度快（wget 单连接 2-4MB/s 太慢，608MB 需要 150-300s）；
+    // --continue=true 断点续传（跨轮/跨代理累积进度，不删文件）；
+    // timeout 150 单源上限（用户裁决）；下载不成功（所有代理失败/
+    // 校验失败）即失败退出，不做「删文件重下」（保留断点续传成果，
+    // 由外层函数级重试再触发新一轮）。
+    // aria2c 完成后偶发不退（长尾连接卡死）→ timeout 150 强杀兜底，
+    // 强杀后 rc=124 视同该源失败，切换下一代理续传。
     let fetch = format!(
-        "if ! command -v wget >/dev/null 2>&1; then \
-           echo '错误：未找到 wget。请在节点安装后重试：apt-get install -y wget' >&2; \
+        "if ! command -v aria2c >/dev/null 2>&1; then \
+           echo '错误：未找到 aria2c（多连接下载器）。请在节点安装后重试：apt-get install -y aria2' >&2; \
            exit 1; \
          fi; \
-         for attempt in 1 2 3; do \
-           if [ -n \"{proxy_list}\" ]; then \
-             for p in {proxy_list}; do \
-               u=\"${{p}}{q_raw}\"; \
-               echo \"尝试下载（第 $attempt 轮）：$u\"; \
-               timeout 120 wget -q --no-check-certificate -T 12 -t 2 -c -O {q_tmp}/{q_file} \"$u\"; rc=$?; \
-                 if [ $rc -eq 0 ]; then break; fi; \
-                 echo \"代理 $p 失败（rc=$rc），切换下一个\"; \
-             done; \
+         if [ -n \"{proxy_list}\" ]; then \
+           for p in {proxy_list}; do \
+             u=\"${{p}}{q_raw}\"; \
+             echo \"尝试下载：$u\"; \
+             timeout 150 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=2 --retry-wait=2 \
+               --check-certificate=false \
+               --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
+               -d {q_tmp} -o {q_file} \"$u\"; rc=$?; \
+               if [ $rc -eq 0 ]; then break; fi; \
+               echo \"代理 $p 失败（rc=$rc，断点续传切下一源）\"; \
+           done; \
+         else \
+           echo \"未配置代理，直连下载：{q_raw}\"; \
+           timeout 150 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=2 --retry-wait=2 \
+             --check-certificate=false \
+             --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
+             -d {q_tmp} -o {q_file} {q_raw}; \
+         fi; \
+         test -s {q_tmp}/{q_file} || {{ echo '所有代理均下载失败' >&2; exit 1; }}; \
+         if [ -n \"{sha256}\" ]; then \
+           if echo \"{sha256}  {q_tmp}/{q_file}\" | sha256sum -c - >/dev/null 2>&1; then \
+             echo 'llama 包 SHA256 校验通过'; \
            else \
-             echo \"未配置代理，直连下载：{q_raw}\"; \
-             timeout 120 wget -q --no-check-certificate -T 12 -t 2 -c -O {q_tmp}/{q_file} {q_raw}; \
+             echo 'llama 包 SHA256 校验失败（文件损坏或投毒，拒绝解压）' >&2; exit 2; \
            fi; \
-           test -s {q_tmp}/{q_file} || {{ echo '所有代理均下载失败' >&2; continue; }}; \
-           if [ -n \"{sha256}\" ]; then \
-             if echo \"{sha256}  {q_tmp}/{q_file}\" | sha256sum -c - >/dev/null 2>&1; then \
-               echo 'llama 包 SHA256 校验通过'; \
-               break; \
-             fi; \
-             echo 'llama 包 SHA256 校验失败（文件损坏或投毒），删除后重下' >&2; \
-             rm -f {q_tmp}/{q_file}; \
-           else \
-             break; \
-           fi; \
-         done; \
-         if [ -n \"{sha256}\" ] && ! echo \"{sha256}  {q_tmp}/{q_file}\" | sha256sum -c - >/dev/null 2>&1; then \
-           echo 'llama 包 3 轮下载校验均失败' >&2; exit 2; \
          fi"
 
     );
