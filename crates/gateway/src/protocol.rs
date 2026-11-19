@@ -602,6 +602,7 @@ mod tests {
             origin_label: "本地算力".into(),
             api_key: None,
             tls: false,
+            tls_cert_path: None,
         }
     }
 

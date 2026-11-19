@@ -24,6 +24,10 @@ pub struct BackendTarget {
     /// llama-server 由引导链证书以 `--ssl-key-file/--ssl-cert-file`
     /// 启动，网关转发走 https（自签证书，curl `-k`）。
     pub tls: bool,
+    /// P0 证书钉扎路径（2026-11-19）：{config_dir}/tls/<instance>.crt。
+    /// Some 时转发 curl 用 --cacert 强校验（防隧道端点 MITM）；
+    /// None（旧台账/未拉回）降级 --insecure 兼容。
+    pub tls_cert_path: Option<String>,
 }
 
 impl BackendTarget {

@@ -94,6 +94,16 @@ pub const fn null_device_path() -> &'static str {
     }
 }
 
+/// P0/P1 SSH host key 钉扎（2026-11-19）：mangosteen 专用 known_hosts。
+///
+/// 引导链（bootstrap）成功后由 ssh-keyscan 写入实例指纹；此后 SSH 连接
+/// 用 `UserKnownHostsFile=<此文件>` + `StrictHostKeyChecking=yes` 强校验，
+/// 指纹不符直接拒绝（防中间人）。文件不存在时降级旧行为（/dev/null +
+/// accept-new，兼容未引导场景）。路径固定在 {config_dir}/ssh_known_hosts。
+pub fn pinned_known_hosts_path() -> std::path::PathBuf {
+    crate::paths::config_dir(&crate::paths::real_env).join("ssh_known_hosts")
+}
+
 /// 生成本平台的 askpass 脚本 + 密码文件。
 ///
 /// `tag` 用于区分不同会话的文件名（调用方传 `pid-port-millis` 之类）。

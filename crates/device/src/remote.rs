@@ -596,17 +596,33 @@ impl SshTarget {
 
     /// 公共 ssh 选项。
     fn base_opts(&self) -> Vec<String> {
+        // P0/P1 SSH host key 钉扎（2026-11-19）：mangosteen 引导过的实例
+        // 指纹在 {config_dir}/ssh_known_hosts——用钉扎文件 + 严格校验
+        // （指纹不符即拒连，防中间人）。文件不存在（未引导/旧实例）降级
+        // 旧行为：/dev/null + accept-new（兼容，首次连接窗口仍存在）。
+        let pinned = mangosteen_platform::ssh::pinned_known_hosts_path();
+        let (hostkey_opt, known_opt) = if pinned.is_file() {
+            (
+                "StrictHostKeyChecking=yes".to_string(),
+                format!("UserKnownHostsFile={}", pinned.display()),
+            )
+        } else {
+            (
+                "StrictHostKeyChecking=accept-new".to_string(),
+                // 丢弃式的 known_hosts 路径是平台差异：Unix 是 /dev/null，
+                // Windows 是 NUL。写死 /dev/null 会让 OpenSSH for Windows
+                // 把它当成相对路径去创建文件而报错。
+                format!(
+                    "UserKnownHostsFile={}",
+                    mangosteen_platform::ssh::null_device_path()
+                ),
+            )
+        };
         let mut a = vec![
             "-o".to_string(),
-            "StrictHostKeyChecking=accept-new".to_string(),
+            hostkey_opt,
             "-o".to_string(),
-            // 丢弃式的 known_hosts 路径是平台差异：Unix 是 /dev/null，
-            // Windows 是 NUL。写死 /dev/null 会让 OpenSSH for Windows 把它
-            // 当成相对路径去创建文件而报错。
-            format!(
-                "UserKnownHostsFile={}",
-                mangosteen_platform::ssh::null_device_path()
-            ),
+            known_opt,
             // 丢弃主机指纹时，OpenSSH 会把首次连接提示写到
             // stderr；这是正常现象，但会污染远端命令错误信息。
             "-o".to_string(),

@@ -253,6 +253,12 @@ impl Orchestrator {
         }
     }
 
+    /// P1 实例回收漂移（2026-11-19）：runprobe 探测到实例被回收时，
+    /// 经此委托到 [`Self::mark_instance_lost`]（状态机口径统一）。
+    pub fn mark_deployment_lost(&self, id: &str, reason: &str) -> Result<(), String> {
+        self.mark_instance_lost(id, reason).map_err(|e| e.to_string())
+    }
+
     /// 查询云端实例的实际状态。
     fn query_instance_state(
         &self,
@@ -964,6 +970,34 @@ impl Orchestrator {
     /// 仅由后台探测线程调用，不修改 DeploymentStatus，只更新 run_status。
     /// 避免后台线程在 CLI 退出、SSH 隧道关闭后误把部署记录降级为 failed。
     pub fn update_run_status(&self, id: &str, active: bool) -> MnResult<()> {
+        self.update_run_status_inner(id, active)
+    }
+
+    /// P1 实例回收台账漂移（2026-11-19）：厂商返回 instance_not_found
+    /// （实例被回收/删除）时调用——自动将部署标记 Failed，防止台账
+    /// 长期停留在 ready（「幽灵部署」）。只处理 Ready/Provisioning 态。
+    pub fn mark_instance_lost(&self, id: &str, reason: &str) -> MnResult<()> {
+        let mut state = self.state.load()?;
+        let rec = state
+            .deployments
+            .iter_mut()
+            .find(|r| r.plan.id == id)
+            .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
+        if !matches!(
+            rec.status,
+            DeploymentStatus::Ready | DeploymentStatus::Provisioning
+        ) {
+            return Ok(());
+        }
+        rec.status = DeploymentStatus::Failed;
+        rec.updated_at = mangosteen_core::time::now_unix();
+        let msg = format!("实例已被厂商回收/删除（{reason}）——部署自动标记失败，请重新部署");
+        self.state.save(&state)?;
+        eprintln!("[cloud] ⚠ 部署 {id}：{msg}");
+        Ok(())
+    }
+
+    fn update_run_status_inner(&self, id: &str, active: bool) -> MnResult<()> {
         let mut state = self.state.load()?;
         let rec = state
             .deployments

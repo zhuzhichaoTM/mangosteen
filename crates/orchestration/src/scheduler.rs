@@ -426,6 +426,7 @@ impl Scheduler {
             // TLS（P1 传输加密）：引导链生成自签证书后启动时探测写入；
             // 计划构造时为 false，部署流程随后按实际状态回填。
             tls: false,
+            tls_cert_path: None,
             auxiliary_downloads: deploy_spec
                 .aux_files
                 .iter()
@@ -883,6 +884,7 @@ mod tests {
         req.model_download = Some(crate::assess::ModelDownloadSpec {
             url: "https://hf-mirror.com/Qwen/repo/qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string(),
             expected_bytes: Some(491_400_032),
+            expected_sha256: None,
         });
         let d = s.decide(&e, &req).unwrap();
         let Decision::Cloud { plan, .. } = d else {
@@ -1016,6 +1018,8 @@ mod tests {
                 extra_args: Vec::new(),
             },
             max_price_per_hour: None,
+            download_sha256: None,
+            tls_cert_path: None,
         };
         Scheduler::apply_selection(&mut plan, "autodl", "s1", "RTX 4090", 24 << 30);
         assert_eq!(plan.provider, "autodl");

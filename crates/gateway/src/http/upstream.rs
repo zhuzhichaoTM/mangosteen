@@ -49,7 +49,7 @@ pub fn http_post_json_with_key(
     timeout: Duration,
     api_key: Option<&str>,
 ) -> MnResult<(u16, String)> {
-    http_post_json_with_key_tls(url, body, timeout, api_key, false)
+    http_post_json_with_key_tls(url, body, timeout, api_key, false, None)
 }
 
 /// 带 TLS 标志的版本（P1 传输加密）：tls=true 时 URL 是 https（自签
@@ -61,15 +61,22 @@ pub fn http_post_json_with_key_tls(
     timeout: Duration,
     api_key: Option<&str>,
     tls: bool,
+    cacert: Option<&std::path::Path>,
 ) -> MnResult<(u16, String)> {
     if tls {
-        // curl 快路径：--silent 拿状态码+体（-w 分隔），-k 自签证书
+        // curl 快路径：--silent 拿状态码+体（-w 分隔）。
+        // P0 证书钉扎：有本地钉扎证书时 --cacert 强校验，无则 --insecure 降级。
         let mut cmd = std::process::Command::new("curl");
         cmd.arg("--silent")
             .arg("--show-error")
             .arg("--noproxy")
-            .arg("*")
-            .arg("--insecure")
+            .arg("*");
+        if let Some(cert) = cacert {
+            cmd.arg("--cacert").arg(cert);
+        } else {
+            cmd.arg("--insecure");
+        }
+        cmd
             .arg("--max-time")
             .arg(timeout.as_secs().to_string())
             .arg("-X")

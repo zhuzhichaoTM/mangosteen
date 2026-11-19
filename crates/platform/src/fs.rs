@@ -119,6 +119,24 @@ pub fn atomic_write_private(path: &Path, contents: &[u8]) -> MnResult<()> {
 ///
 /// Windows 无 POSIX 权限位，改为依赖 `%APPDATA%` 目录本身的 ACL 继承，
 /// 此处为无操作（但保留接口，便于未来加 ACL 调用）。
+/// 收紧目录权限为 0700（Unix；非 Unix 平台忽略）。
+///
+/// P1 日志目录（audit）等含敏感内容的目录用——gateway 层禁止直接
+/// `cfg(unix)`（平台差异必须走本 crate）。
+pub fn set_private_dir(path: &Path) -> MnResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|e| MnError::io(format!("设置目录权限 {}", path.display()), &e))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 pub fn set_private_permissions(path: &Path) -> MnResult<()> {
     #[cfg(unix)]
     {

@@ -132,6 +132,9 @@ struct ProbeTarget {
     /// 证书 curl -k）。云端引擎由引导链证书以 --ssl-* 启动后，明文探测
     /// 永远失败，会把 https 引擎误判为未运行。
     tls: bool,
+    /// P0 证书钉扎路径（{config_dir}/tls/<instance>.crt）——Some 时
+    /// --cacert 强校验，None（旧台账/证书未拉回）降级 --insecure。
+    tls_cert_path: Option<std::path::PathBuf>,
 }
 
 fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
@@ -164,6 +167,16 @@ fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
         port: rec.plan.local_access_port(),
         owns_instance,
         tls: rec.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false),
+        tls_cert_path: rec
+            .plan
+            .origin
+            .instance_id()
+            .map(|id| {
+                mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env)
+                    .join("tls")
+                    .join(format!("{id}.crt"))
+            })
+            .filter(|p| p.is_file()),
         status: rec.status,
     }
 }
@@ -172,15 +185,28 @@ fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
     /// https 探活（P1 TLS）：curl -k 请求 /health，判 200。
     /// 用于云端引擎以 --ssl-* 启动后的 runprobe 探测——手写 TCP 的
     /// probe_http_ok 无法完成 TLS 握手，会对 https 引擎永远返回 false。
-    fn probe_https_ok(host: &str, port: u16, path: &str, timeout: std::time::Duration) -> bool {
+    fn probe_https_ok(
+        host: &str,
+        port: u16,
+        path: &str,
+        timeout: std::time::Duration,
+        cacert: Option<&std::path::Path>,
+    ) -> bool {
+        // P0 TLS 证书钉扎（2026-11-19）：有本地钉扎证书（{config_dir}/tls/
+        // <instance>.crt）时 --cacert 强校验，指纹不符/缺失才降级 --insecure
+        // （兼容旧台账——引导链未拉回证书的实例）。
         let url = format!("https://{host}:{port}{path}");
-        std::process::Command::new("curl")
-            .arg("--silent")
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("--silent")
             .arg("--show-error")
             .arg("--noproxy")
-            .arg("*")
-            .arg("--insecure")
-            .arg("--max-time")
+            .arg("*");
+        if let Some(cert) = cacert {
+            cmd.arg("--cacert").arg(cert);
+        } else {
+            cmd.arg("--insecure");
+        }
+        cmd.arg("--max-time")
             .arg(timeout.as_secs().to_string())
             .arg("--output")
             .arg("/dev/null")
@@ -244,9 +270,15 @@ pub fn spawn_runtime_probe(
                 }
                 let mapped = if t.tls {
                     // TLS（P1）：引擎以 https 启动（自签证书）——手写 TCP
-                    // HTTP 探测无法完成 TLS 握手，走系统 curl（-k 跳过
-                    // 自签证书链校验，证书信任根是本机台账）。
-                    probe_https_ok("127.0.0.1", t.port.unwrap(), "/health", PROBE_TIMEOUT)
+                    // HTTP 探测无法完成 TLS 握手，走系统 curl。P0 证书钉扎：
+                    // 有本地钉扎证书时 --cacert 强校验（防隧道端点 MITM）。
+                    probe_https_ok(
+                        "127.0.0.1",
+                        t.port.unwrap(),
+                        "/health",
+                        PROBE_TIMEOUT,
+                        t.tls_cert_path.as_deref(),
+                    )
                 } else {
                     mangosteen_platform::process::probe_http_ok(
                         "127.0.0.1",
@@ -275,6 +307,25 @@ pub fn spawn_runtime_probe(
                                 // 重建后留待下一轮探测验证
                             }
                             Err(e) => {
+                                // P1 实例漂移（2026-11-19）：厂商明确返回
+                                // 实例不存在（回收/删除）→ 部署自动标记
+                                // Failed（防「幽灵 ready」）。其余错误
+                                // （SSH 超时/关机）只进冷却，等实例恢复。
+                                let err_msg = e.to_string();
+                                if err_msg.contains("instance_not_found")
+                                    || err_msg.contains("实例")
+                                        && err_msg.contains("不存在")
+                                {
+                                    let gw2 = gateway.as_ref();
+                                    let _ = gw2.mark_deployment_lost(
+                                        &t.id,
+                                        "实例不存在（instance_not_found）",
+                                    );
+                                    eprintln!(
+                                        "[probe] {}：实例已被回收，部署自动标记失败",
+                                        t.id
+                                    );
+                                }
                                 // 实例可能已关机/删除：记录时间进入冷却，
                                 // 避免每轮都发起 SSH 尝试
                                 last_restore.insert(t.id.clone(), std::time::Instant::now());

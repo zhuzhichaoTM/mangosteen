@@ -534,6 +534,20 @@ impl GatewayServer {
                             origin_label: record.plan.origin.label(),
                             api_key: record.plan.cloud.as_ref().and_then(|c| c.api_key.clone()),
                             tls: record.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false),
+                            tls_cert_path: record
+                                .plan
+                                .origin
+                                .instance_id()
+                                .map(|id| {
+                                    let p = mangosteen_platform::paths::config_dir(
+                                        &mangosteen_platform::paths::real_env,
+                                    )
+                                    .join("tls")
+                                    .join(format!("{id}.crt"));
+                                    p.is_file()
+                                        .then(|| p.to_string_lossy().to_string())
+                                })
+                                .flatten(),
                         },
                     );
                 }

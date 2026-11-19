@@ -228,6 +228,7 @@ impl Orchestrator {
                 // 这里保持 None（不假设鉴权形态）。
                 api_key: None,
                 tls: false,
+                tls_cert_path: None,
             });
         }
         let active = self.refresh()?;
@@ -241,6 +242,7 @@ impl Orchestrator {
                 origin_label: a.origin.label(),
                 api_key: a.api_key.clone(),
                 tls: a.tls,
+                tls_cert_path: None,
             });
         }
         Err(MnError::bad_request(
@@ -265,6 +267,7 @@ impl Orchestrator {
                     origin_label: "remote-inference".to_string(),
                     api_key: None,
                     tls: false,
+                    tls_cert_path: None,
                 });
             }
         } else if let Some((model_id, port)) = self.routes().iter().next() {
@@ -275,6 +278,7 @@ impl Orchestrator {
                 origin_label: "remote-inference".to_string(),
                 api_key: None,
                 tls: false,
+                tls_cert_path: None,
             });
         }
         let Some(id) = want
@@ -304,6 +308,7 @@ impl Orchestrator {
                 origin_label: a.origin.label(),
                 api_key: a.api_key.clone(),
                 tls: a.tls,
+                tls_cert_path: None,
             }),
             None => {
                 let running: Vec<&str> = active
@@ -455,6 +460,9 @@ mod tests {
                 max_price_per_hour: None,
                 download_url: Some("https://example.com/qwen.gguf".to_string()),
                 download_bytes: Some(491_400_032),
+                download_sha256: None,
+                tls: false,
+                tls_cert_path: None,
                 remote_model: None,
                 node_ip: None,
                 requested_spec_id: None,

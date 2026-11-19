@@ -126,6 +126,20 @@ impl GatewayServer {
                                 origin_label: record.plan.origin.label(),
                                 api_key: record.plan.cloud.as_ref().and_then(|c| c.api_key.clone()),
                                 tls: record.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false),
+                                tls_cert_path: record
+                                    .plan
+                                    .origin
+                                    .instance_id()
+                                    .map(|id| {
+                                        let p = mangosteen_platform::paths::config_dir(
+                                            &mangosteen_platform::paths::real_env,
+                                        )
+                                        .join("tls")
+                                        .join(format!("{id}.crt"));
+                                        p.is_file()
+                                            .then(|| p.to_string_lossy().to_string())
+                                    })
+                                    .flatten(),
                             },
                         );
                     }
@@ -600,6 +614,9 @@ fn audit_log(peer: &str, req: &ParsedRequest, status: u16) {
     let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env)
         .join("logs");
     let _ = std::fs::create_dir_all(&dir);
+    // P1 日志目录权限收紧（2026-11-19）：700（同 audit 文件 600）。
+    // 平台差异走 platform crate（gateway 层禁止 cfg(unix) 分支）。
+    let _ = mangosteen_platform::fs::set_private_dir(&dir);
     // P1 审计轮转（2026-11-19）：清理 30 天前的 audit-*.log（防长跑
     // 占满磁盘）。每个新文件创建时顺带扫一次（O(目录条目)，低频）。
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -627,20 +644,24 @@ fn audit_log(peer: &str, req: &ParsedRequest, status: u16) {
         }
     }
     let path = dir.join(format!("audit-{date}.log"));
+    // P1 URL 脱敏（2026-11-19）：审计行 path 可能含 ?token=/签名参数，
+    // 截断查询串（保留路径本身，便于排查访问了哪个端点）。
+    let audit_path = req
+        .path
+        .split_once('?')
+        .map(|(base, _)| base.to_string())
+        .unwrap_or_else(|| req.path.clone());
     let line = format!(
         "{} {} \"{} {}\" {}{} key={}\n",
-        now, peer, req.method, req.path, status, flags, auth_prefix
+        now, peer, req.method, audit_path, status, flags, auth_prefix
     );
     let ok = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .and_then(|mut f| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
-            }
+            // P1 文件 600：平台差异走 platform crate（gateway 禁止 cfg(unix)）。
+            let _ = mangosteen_platform::fs::set_private_permissions(&path);
             f.write_all(line.as_bytes())
         })
         .is_ok();

@@ -295,9 +295,44 @@ pub fn run(args: Args) -> MnResult<i32> {
                 format!("{:016x}{:016x}", x, nanos)
             });
             cfg.gateway.require_api_key = true;
-            cfg.gateway.api_key =
-                mangosteen_core::config::SecretRef::Inline(strong.clone());
-            // 持久化（写回 config.toml，600 权限）
+            // P0-1 密钥文件化（2026-11-19 用户裁决）：token 明文不落
+            // config.toml——写 {config_dir}/gateway.key（600 权限），
+            // config 里只留 { file = "..." } 引用（SecretRef::resolve
+            // 会读文件，网关鉴权不受影响）。迁移兼容：旧 config 的
+            // Inline 明文 token 仍可读（resolve 支持），只是不推荐。
+            let key_path = mangosteen_platform::paths::config_dir(
+                &mangosteen_platform::paths::real_env,
+            )
+            .join("gateway.key");
+            if let Some(dir) = key_path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match std::fs::write(&key_path, strong.as_bytes()) {
+                Ok(_) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &key_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        );
+                    }
+                    cfg.gateway.api_key =
+                        mangosteen_core::config::SecretRef::File(key_path.clone());
+                    eprintln!(
+                        "[gateway-auth] ✓ 鉴权已开启，密钥文件 {}（600）",
+                        key_path.display()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[gateway-auth] ⚠ 密钥文件写入失败（{e}），本次会话临时使用内存 token"
+                    );
+                    cfg.gateway.api_key =
+                        mangosteen_core::config::SecretRef::Inline(strong.clone());
+                }
+            }
+            // 持久化（写回 config.toml，600 权限；api_key 已是 File 引用）
             let store = mangosteen_base::config::ConfigStore::platform_default(None);
             if let Err(e) = store.save(&cfg) {
                 eprintln!("[gateway-auth] ⚠ 自动开启鉴权配置写入失败（{e}），本次会话临时开启");

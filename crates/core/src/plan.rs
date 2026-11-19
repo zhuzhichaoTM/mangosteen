@@ -55,6 +55,12 @@ impl ComputeOrigin {
             ComputeOrigin::Cloud { provider, .. } => format!("云端算力 · {provider}"),
         }
     }
+    /// 实例 ID（云端链路）——TLS 证书钉扎路径拼接用（{config_dir}/tls/<id>.crt）。
+    pub fn instance_id(&self) -> Option<&str> {
+        match self {
+            ComputeOrigin::Cloud { instance_id, .. } => Some(instance_id),
+        }
+    }
 }
 
 /// 本地部署参数集合，直接映射为 llama-server 命令行。
@@ -199,6 +205,12 @@ pub struct CloudPlan {
     /// （自签证书，curl `-k`）。旧台账无此字段 → `false`（明文 HTTP）。
     #[serde(default)]
     pub tls: bool,
+    /// P0 TLS 证书钉扎（2026-11-19）：引导时把服务器证书拷回本地
+    /// `{config_dir}/tls/<instance_id>.crt`，relay/runprobe 用
+    /// `--cacert` 校验指纹一致（替代 --insecure）——防隧道端点 MITM。
+    /// 旧台账无此字段 → `None`（降级 --insecure，兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_path: Option<String>,
     /// 目标加速卡型号（归一化名，如 `RTX 4090`）
     pub gpu_model: String,
     /// 卡数。个人级场景固定 1，保留字段以便扩展多卡非核心场景。
@@ -459,6 +471,9 @@ mod tests {
             local_port: 11435,
             engine,
             max_price_per_hour: Some(2.5),
+            download_sha256: None,
+            tls: false,
+            tls_cert_path: None,
         };
         assert_eq!(cp.engine_port, 8080);
         assert_eq!(cp.engine.engine, crate::config::InferenceEngine::default());
@@ -511,6 +526,9 @@ mod tests {
             local_port: 12000,
             engine: local,
             max_price_per_hour: None,
+            download_sha256: None,
+            tls: false,
+            tls_cert_path: None,
         };
         let cloud_plan = DeploymentPlan {
             id: "d2".into(),
@@ -575,6 +593,9 @@ mod tests {
                 local_port: 12000,
                 engine: LocalPlan::from_assessment(&s, "/m.gguf", &a, 11435),
                 max_price_per_hour: None,
+                download_sha256: None,
+                tls: false,
+                tls_cert_path: None,
             }),
             assessment: a,
             created_at: 1_700_000_000,

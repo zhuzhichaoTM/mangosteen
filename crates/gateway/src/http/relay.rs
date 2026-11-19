@@ -100,10 +100,15 @@ impl GatewayServer {
         if let Some(key) = &target.api_key {
             cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
         }
-        // https 上游（P1 TLS，自签证书）：跳过证书链校验——证书是
-        // 引导链自签的，加密本身仍有效（SSH 隧道内再套一层 TLS）。
+        // https 上游（P1 TLS，自签证书）。P0 证书钉扎：有本地钉扎
+        // 证书（{config_dir}/tls/<instance>.crt）时 --cacert 强校验，
+        // 防隧道端点 MITM；无则 --insecure 降级（兼容旧台账）。
         if target.tls {
-            cmd.arg("--insecure");
+            if let Some(cert) = &target.tls_cert_path {
+                cmd.arg("--cacert").arg(cert);
+            } else {
+                cmd.arg("--insecure");
+            }
         }
         let mut child = cmd
             .arg("--data-binary")

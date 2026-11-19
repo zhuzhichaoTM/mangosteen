@@ -1536,6 +1536,49 @@ fn bootstrap_deploy_target(
         match mangosteen_device::remote::ssh_exec(&root, &tls_cmd, 30) {
             Ok(out) if out.contains("tls-ready") => {
                 eprintln!("[cloud] ✓ 实例 {} TLS 证书已就绪（llama-server 将启用 https）", instance.id);
+                // P0 TLS 证书钉扎（2026-11-19）：服务器证书拉回本地
+                // {config_dir}/tls/<instance_id>.crt，relay/runprobe 用
+                // --cacert 校验（替代 --insecure）——防隧道端点 MITM。
+                // 拉回失败仅告警（降级 --insecure，兼容旧行为）。
+                let local_tls_dir = mangosteen_platform::paths::config_dir(
+                    &mangosteen_platform::paths::real_env,
+                )
+                .join("tls");
+                if let Err(e) = std::fs::create_dir_all(&local_tls_dir) {
+                    eprintln!("[cloud] ⚠ 实例 {} 本地 TLS 目录创建失败（{e}）", instance.id);
+                } else {
+                    let local_cert = local_tls_dir.join(format!("{}.crt", instance.id));
+                    match mangosteen_device::remote::ssh_exec(
+                        &root,
+                        &format!("cat {workdir}/tls/server.crt"),
+                        30,
+                    ) {
+                        Ok(pem) if !pem.trim().is_empty() => {
+                            match std::fs::write(&local_cert, pem.trim().as_bytes()) {
+                                Ok(_) => {
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        let _ = std::fs::set_permissions(
+                                            &local_cert,
+                                            std::fs::Permissions::from_mode(0o644),
+                                        );
+                                    }
+                                    eprintln!(
+                                        "[cloud] ✓ 实例 {} TLS 证书已钉扎到 {}",
+                                        instance.id,
+                                        local_cert.display()
+                                    );
+                                }
+                                Err(e) => eprintln!(
+                                    "[cloud] ⚠ 实例 {} 本地证书写入失败（{e}），降级 --insecure",
+                                    instance.id
+                                ),
+                            }
+                        }
+                        _ => eprintln!("[cloud] ⚠ 实例 {} 远端证书读取失败，降级 --insecure", instance.id),
+                    }
+                }
             }
             Ok(_) => eprintln!(
                 "[cloud] ⚠ 实例 {} TLS 证书生成失败（openssl 缺失？），推理走明文 HTTP（SSH 隧道仍加密）",
@@ -1608,6 +1651,50 @@ fn bootstrap_deploy_target(
         "[cloud] ✓ 实例 {} deploy 引导完成：密钥认证就绪（sshd 加固延后至设备配置完成后）",
         instance.id
     );
+    // P0/P1 SSH host key 钉扎（2026-11-19）：引导成功时 ssh-keyscan
+    // 记录实例指纹到 {config_dir}/ssh_known_hosts——此后 base_opts 用
+    // StrictHostKeyChecking=yes + 钉扎文件强校验（防中间人，指纹不符
+    // 即拒连）。失败仅告警（降级 accept-new 旧行为）。
+    let host = target.host.clone();
+    let port = target.port;
+    let kh_file = mangosteen_platform::ssh::pinned_known_hosts_path();
+    let keyscan_out = std::process::Command::new("ssh-keyscan")
+        .args(["-T", "5", "-p", &port.to_string(), &host])
+        .output();
+    match keyscan_out {
+        Ok(out) if !out.stdout.is_empty() => {
+            use std::io::Write as _;
+            // 覆盖式：先删同 host:port 旧行（实例被厂商重建后 host key
+            // 会变——append 会让 known_hosts 按序匹配旧指纹先失败拒连）。
+            let hostpat = format!("[{host}]:{port}");
+            let old_lines: Vec<String> = std::fs::read_to_string(&kh_file)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| {
+                    let hp = l.split(' ').next().unwrap_or("");
+                    hp != host && hp != hostpat.as_str()
+                })
+                .map(|l| format!("{l}\n"))
+                .collect();
+            let mut content = old_lines.concat();
+            content.push_str(&String::from_utf8_lossy(&out.stdout));
+            if std::fs::write(&kh_file, content).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &kh_file,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                eprintln!("[cloud] ✓ 实例 {} SSH host key 已钉扎（指纹不符将拒连）", instance.id);
+            }
+        }
+        _ => eprintln!(
+            "[cloud] ⚠ 实例 {} ssh-keyscan 指纹记录失败（降级 accept-new）",
+            instance.id
+        ),
+    }
     Ok(target)
 }
 
@@ -1625,6 +1712,17 @@ pub fn harden_sshd_after_node_config(ssh_host: &str, ssh_port: u16) -> MnResult<
         );
         return Ok(());
     };
+
+    // P1 swap 关闭（2026-11-19）：解密后的模型明文驻留 /dev/shm（tmpfs），
+    // 若系统内存紧张会被内核换出到 swap 磁盘分区——实例销毁后可能残留
+    // 模型明文片段。root 身份 swapoff -a（容器/宿主可能无权限，失败仅告警）。
+    let swapoff_cmd = "swapoff -a 2>/dev/null && echo swap-off || echo swap-skip";
+    match mangosteen_device::remote::ssh_exec(&root_target, swapoff_cmd, 15) {
+        Ok(out) if out.contains("swap-off") => {
+            eprintln!("[cloud] ✓ 实例 {ssh_host} swap 已关闭（防解密模型换出）");
+        }
+        _ => eprintln!("[cloud] ⚠ 实例 {ssh_host} swap 关闭跳过（无权限或无 swap）"),
+    }
     let harden_cmd = "mkdir -p /etc/ssh/sshd_config.d && \
         printf '%s\\n' \
           'PermitRootLogin no' \
@@ -3541,6 +3639,9 @@ mod tests {
             local_port: 11435,
             engine,
             max_price_per_hour: None,
+            download_sha256: None,
+            tls: false,
+            tls_cert_path: None,
         }
     }
 
