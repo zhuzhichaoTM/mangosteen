@@ -245,6 +245,19 @@ impl TunnelSpec {
             "ConnectTimeout=5".to_string(),
             "-o".to_string(),
             "StrictHostKeyChecking=accept-new".to_string(),
+            // SSH 管道加固 A（2026-11-19 用户裁决）：显式锁定密码学套件
+            // + 会话密钥定期再协商（RekeyLimit）。OpenSSH 默认已强，这里
+            // 是纵深防御——远端 sshd 配置被改弱/降级时本地拒绝协商。
+            // RekeyLimit：隧道长寿命（网关持有数天），1GiB 或 1h 强制
+            // 重换会话密钥，限制单密钥数据量（防流量分析/密钥泄露窗口）。
+            "-o".to_string(),
+            "Ciphers=chacha20-poly1305@openssh.com,aes256-gcm@openssh.com".to_string(),
+            "-o".to_string(),
+            "MACs=hmac-sha2-256-etm@openssh.com".to_string(),
+            "-o".to_string(),
+            "KexAlgorithms=curve25519-sha256".to_string(),
+            "-o".to_string(),
+            "RekeyLimit=1G 1h".to_string(),
             "-p".to_string(),
             self.ssh_port.to_string(),
         ]);

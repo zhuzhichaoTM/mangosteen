@@ -524,6 +524,8 @@ mod tests {
 // （OpenSSH 8.4+ 的 `SSH_ASKPASS_REQUIRE=force` 才允许无 tty 时使用）。
 
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 /// SSH 目标。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -770,7 +772,21 @@ fn ensure_identity_key() -> MnResult<PathBuf> {
             reason: "本机没有默认公钥且 ssh-keygen 无法无交互生成密钥".to_string(),
         });
     }
+    // SSH 管道加固 D（2026-11-19）：密钥文件权限收紧——目录 700、
+    // 私钥 600（ssh-keygen 默认 644 私钥过宽；同机其他用户/进程可读）。
+    // 失败仅告警（权限收紧失败不应阻断密钥可用）。
+    let ssh_dir = ssh_dir_of(&key);
+    for (path, mode) in [(ssh_dir.clone(), 0o700u32), (key.clone(), 0o600u32)] {
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
+            eprintln!("[ssh] ⚠ 密钥权限收紧失败（{}）：{e}", path.display());
+        }
+    }
     Ok(key)
+}
+
+/// 取密钥所在目录（父目录）。
+fn ssh_dir_of(key: &std::path::Path) -> std::path::PathBuf {
+    key.parent().map(|p| p.to_path_buf()).unwrap_or_default()
 }
 
 pub fn install_ssh_copy_id(target: &SshTarget) -> MnResult<PathBuf> {

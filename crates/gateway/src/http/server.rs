@@ -600,6 +600,32 @@ fn audit_log(peer: &str, req: &ParsedRequest, status: u16) {
     let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env)
         .join("logs");
     let _ = std::fs::create_dir_all(&dir);
+    // P1 审计轮转（2026-11-19）：清理 30 天前的 audit-*.log（防长跑
+    // 占满磁盘）。每个新文件创建时顺带扫一次（O(目录条目)，低频）。
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let cutoff = now.saturating_sub(30 * 86400);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(stamp) = name
+                .strip_prefix("audit-")
+                .and_then(|n| n.strip_suffix(".log"))
+                .and_then(|d| d.parse::<u64>().ok())
+            {
+                // 文件名日期是 YYYYMMDD，近似按天比较：转成近似 epoch 后
+                // 与 cutoff 比（早 30 天以上删）。
+                let (y, m, d) = (
+                    (stamp / 10000) as i64,
+                    ((stamp / 100) % 100) as i64,
+                    (stamp % 100) as i64,
+                );
+                let days = days_from_civil(y, m, d);
+                if (days as u64) < cutoff / 86400 {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
     let path = dir.join(format!("audit-{date}.log"));
     let line = format!(
         "{} {} \"{} {}\" {}{} key={}\n",
@@ -621,6 +647,17 @@ fn audit_log(peer: &str, req: &ParsedRequest, status: u16) {
     if !ok {
         eprintln!("[audit] ⚠ 审计日志写入失败（不影响请求）：{path:?}");
     }
+}
+
+/// (year, month, day) → days since epoch（Howard Hinnant 逆算法，无外部依赖）。
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
 }
 
 /// days → (year, month, day) civil date（Howard Hinnant 算法，无外部依赖）。

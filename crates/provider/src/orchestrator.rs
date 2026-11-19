@@ -1368,13 +1368,18 @@ fn bootstrap_deploy_target(
             reason: format!("公钥文件为空：{}.pub", key.display()),
         });
     }
+    // SSH 管道加固 B（2026-11-19 用户裁决）：deploy 公钥加
+    // permitopen="127.0.0.1:*" 限制——密钥泄露时只能转发回环（引擎端口），
+    // 不能作为跳板转发到任意外部主机。引擎端口未知（bootstrap 早于计划），
+    // 回环通配是安全与兼容的折中；exec（部署/探测命令）不受影响。
+    let restricted_pub = format!("permitopen=\"127.0.0.1:*\" {pub_text}");
     let append_cmd = format!(
         "install -d -m 700 -o {DEPLOY_USER} -g {DEPLOY_USER} /home/{DEPLOY_USER}/.ssh && \
          touch /home/{DEPLOY_USER}/.ssh/authorized_keys && \
          chown {DEPLOY_USER}:{DEPLOY_USER} /home/{DEPLOY_USER}/.ssh/authorized_keys && \
          chmod 600 /home/{DEPLOY_USER}/.ssh/authorized_keys && \
-         grep -qxF '{pub_text}' /home/{DEPLOY_USER}/.ssh/authorized_keys || \
-         printf '%s\\n' '{pub_text}' >> /home/{DEPLOY_USER}/.ssh/authorized_keys"
+         grep -qxF '{restricted_pub}' /home/{DEPLOY_USER}/.ssh/authorized_keys || \
+         printf '%s\\n' '{restricted_pub}' >> /home/{DEPLOY_USER}/.ssh/authorized_keys"
     );
     mangosteen_device::remote::ssh_exec(&root, &append_cmd, 20)
         .map_err(|e| describe_bootstrap_error(instance, "安装 deploy 公钥", &e))?;
