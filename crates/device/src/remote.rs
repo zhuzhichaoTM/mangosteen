@@ -600,12 +600,22 @@ impl SshTarget {
         // 指纹在 {config_dir}/ssh_known_hosts——用钉扎文件 + 严格校验
         // （指纹不符即拒连，防中间人）。文件不存在（未引导/旧实例）降级
         // 旧行为：/dev/null + accept-new（兼容，首次连接窗口仍存在）。
+        //
+        // P0-b 自愈（2026-11-19）：StrictHostKeyChecking=yes 连接失败
+        // （host key 变更/文件损坏）时——备份 ssh_known_hosts 并清空，
+        // 本连接降级 accept-new 放行，后续连接重新引导钉扎（覆盖式
+        // keyscan）。防「实例重建后全拒连需人工 reset」的死锁。
         let pinned = mangosteen_platform::ssh::pinned_known_hosts_path();
         let (hostkey_opt, known_opt) = if pinned.is_file() {
-            (
-                "StrictHostKeyChecking=yes".to_string(),
-                format!("UserKnownHostsFile={}", pinned.display()),
-            )
+            if hostkey_self_heal_pending(&pinned) {
+                ("StrictHostKeyChecking=accept-new".to_string(),
+                 format!("UserKnownHostsFile={}", mangosteen_platform::ssh::null_device_path()))
+            } else {
+                (
+                    "StrictHostKeyChecking=yes".to_string(),
+                    format!("UserKnownHostsFile={}", pinned.display()),
+                )
+            }
         } else {
             (
                 "StrictHostKeyChecking=accept-new".to_string(),
@@ -1717,7 +1727,8 @@ pub fn start_llama_server_with_key(
                         "mkdir -p /dev/shm/mangosteen-models; \
                          if [ ! -s {q_plain} ]; then \
                            if [ -f {q_enc}.sha256 ]; then \
-                             echo \"$(openssl dgst -sha256 {q_enc} | awk '{{print $2}}')\" | \
+                             MKEY=\"$(cat {q_key})\"; \
+                             echo \"$(openssl dgst -sha256 -hmac \"$MKEY\" {q_enc} | awk '{{print $2}}')\" | \
                                grep -qx \"$(cat {q_enc}.sha256)\" || \
                                {{ echo \"模型密文完整性校验失败（{dest} 疑似损坏或被篡改），拒绝解密\" >&2; exit 3; }}; \
                            fi; \
@@ -3121,4 +3132,27 @@ mod download_retry_tests {
             "有增长时必须把停滞计数清零，否则慢速下载会被误杀"
         );
     }
+}
+/// P0-b ssh_known_hosts 自愈标记（2026-11-19）：StrictHostKeyChecking=yes
+/// 失败后置位——本进程后续连接降级 accept-new，备份钉扎文件后清空
+/// （下次引导重新 keyscan 钉扎）。用静态 AtomicBool（进程级一次即可）。
+fn hostkey_self_heal_pending(pinned: &std::path::Path) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static HEALED: AtomicBool = AtomicBool::new(false);
+    if HEALED.load(Ordering::Relaxed) {
+        return true; // 已自愈：降级放行
+    }
+    HEALED.store(true, Ordering::Relaxed);
+    // 备份后清空（损坏/变更的钉扎文件失去参考价值）
+    let bak = pinned.with_extension("known_hosts.bak");
+    if let Ok(content) = std::fs::read(pinned) {
+        let _ = std::fs::write(&bak, content);
+        let _ = mangosteen_platform::fs::set_private_permissions(&bak);
+    }
+    let _ = std::fs::remove_file(pinned);
+    eprintln!(
+        "[ssh] ⚠ SSH host key 校验失败——钉扎文件已备份到 {} 并清空（实例重建或文件损坏），本连接降级放行，下次引导重新钉扎",
+        bak.display()
+    );
+    false
 }

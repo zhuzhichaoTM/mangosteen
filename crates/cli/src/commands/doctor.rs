@@ -283,6 +283,72 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
         }
     }
 
+    // ---- P0 密钥文件自检（2026-11-19）----
+    // gateway.key（鉴权）与 ssh_known_hosts（host key 钉扎）是本地
+    // 单点——损坏/误删会导致鉴权失效或 SSH 全拒连。自检给出可操作
+    // 结论（备份/轮换/重置），早发现早恢复。
+    {
+        let dir = mangosteen_platform::paths::config_dir(&mangosteen_platform::paths::real_env);
+        let key = dir.join("gateway.key");
+        let kh = dir.join("ssh_known_hosts");
+        let bak = dir.join("backups");
+        // gateway.key
+        match std::fs::read_to_string(&key) {
+            Ok(v) if v.trim().len() >= 32 => out.push(Check {
+                name: "网关密钥".into(),
+                status: Status::Ok,
+                detail: format!("{}（{} 字符）", key.display(), v.trim().len()),
+                hint: None,
+            }),
+            Ok(_) => out.push(Check {
+                name: "网关密钥".into(),
+                status: Status::Warn,
+                detail: format!("{} 存在但过短/为空（<32 字符）", key.display()),
+                hint: Some("执行 `mangosteen config rotate-gateway-key` 重新生成".into()),
+            }),
+            Err(_) => out.push(Check {
+                name: "网关密钥".into(),
+                status: Status::Warn,
+                detail: "gateway.key 不存在（鉴权可能未启用或使用旧 Inline）".into(),
+                hint: Some("执行 `mangosteen config rotate-gateway-key` 生成".into()),
+            }),
+        }
+        // 备份新鲜度
+        let key_bak = bak.join("gateway.key.bak");
+        if key_bak.is_file() {
+            out.push(Check {
+                name: "密钥备份".into(),
+                status: Status::Ok,
+                detail: key_bak.display().to_string(),
+                hint: None,
+            });
+        } else if key.is_file() {
+            out.push(Check {
+                name: "密钥备份".into(),
+                status: Status::Warn,
+                detail: "gateway.key 存在但无备份（单点）".into(),
+                hint: Some("执行 `mangosteen config backup-keys` 备份".into()),
+            });
+        }
+        // ssh_known_hosts
+        if kh.is_file() {
+            out.push(Check {
+                name: "SSH 钉扎".into(),
+                status: Status::Ok,
+                detail: format!("{}（{} 字节）", kh.display(),
+                    std::fs::metadata(&kh).map(|m| m.len()).unwrap_or(0)),
+                hint: None,
+            });
+        } else {
+            out.push(Check {
+                name: "SSH 钉扎".into(),
+                status: Status::Ok,
+                detail: "ssh_known_hosts 不存在（未钉扎，首次连接 accept-new）".into(),
+                hint: None,
+            });
+        }
+    }
+
     out
 }
 

@@ -675,9 +675,34 @@ fn audit_log(peer: &str, req: &ParsedRequest, status: u16) {
             if k.len() > 8 { format!("{}...", &k[..8]) } else { k.to_string() }
         })
         .unwrap_or_else(|| "-".into());
+    // P2 401 暴力尝试升级标记（2026-11-19）：同来源短时间连续 auth-failed
+    // 达阈值（进程内计数，滑动窗口 60s）——审计行升级标记，提示可能正在
+    // 被爆破（网关绑回环，实际风险低；标记供事后分析）。
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    static AUTH_FAILS: AtomicU32 = AtomicU32::new(0);
+    static LAST_FAIL_TS: AtomicU64 = AtomicU64::new(0);
     let non_loopback = !peer.starts_with("127.") && peer != "::1" && peer != "-";
     let flags = match (status, non_loopback) {
-        (401, _) => " [auth-failed]",
+        (401, _) => {
+            // 60s 滑动窗口
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let last = LAST_FAIL_TS.load(Ordering::Relaxed);
+            let count = if now_ms.saturating_sub(last) > 60_000 {
+                AUTH_FAILS.store(1, Ordering::Relaxed);
+                1
+            } else {
+                AUTH_FAILS.fetch_add(1, Ordering::Relaxed) + 1
+            };
+            LAST_FAIL_TS.store(now_ms, Ordering::Relaxed);
+            if count >= 10 {
+                " [auth-failed][brute-force?]"
+            } else {
+                " [auth-failed]"
+            }
+        }
         (_, true) => " [non-loopback]",
         _ => "",
     };

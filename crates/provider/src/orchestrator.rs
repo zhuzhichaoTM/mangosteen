@@ -3105,17 +3105,20 @@ pub fn download_model_node(
     // `{enc}.sha256`（密文 SHA256）——每次启动解密前比对，防磁盘位
     // 翻转/实例存活期间的恶意篡改（openssl dgst 全量哈希 ~2s/500MB，
     // 只在启动时执行一次，可接受）。
+    // P1-a 基线防篡改（2026-11-19）：基线升级为 HMAC-SHA256（绑定
+    // .model_key）——攻击者即使改 .enc 也无法伪造基线（无密钥算不出
+    // HMAC）。解密前校验：HMAC 不匹配 = 密文被篡改（或基线被换）→ 拒绝。
     let enc_cmd = format!(
         "if [ -f '{remote_model}' ] && [ -f '{key_path}' ] && command -v openssl >/dev/null 2>&1; then \
            openssl enc -aes-256-cbc -salt -pbkdf2 -iter 10000 -md sha256 \
              -in '{remote_model}' -out '{enc_path}' -pass file:'{key_path}' && \
-           openssl dgst -sha256 '{enc_path}' | awk '{{print $2}}' > '{enc_path}.sha256' && \
+           openssl dgst -sha256 -hmac \"$(cat {key_path})\" '{enc_path}' | awk '{{print $2}}' > '{enc_path}.sha256' && \
            rm -f '{remote_model}' '{remote_model}.download.ok' && echo encrypted-ok; \
          elif [ -f '{enc_path}' ] && [ -s '{enc_path}' ]; then \
            if [ -f '{enc_path}.sha256' ]; then \
              echo already-encrypted; \
            else \
-             openssl dgst -sha256 '{enc_path}' | awk '{{print $2}}' > '{enc_path}.sha256' && \
+             openssl dgst -sha256 -hmac \"$(cat {key_path})\" '{enc_path}' | awk '{{print $2}}' > '{enc_path}.sha256' && \
              echo already-encrypted-baseline; \
            fi; \
          else \

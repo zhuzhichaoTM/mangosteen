@@ -253,6 +253,17 @@ impl StateStore {
 
     /// 写入（原子替换）。
     pub fn save(&self, state: &StateFile) -> MnResult<()> {
+        // P1-b 台账备份（2026-11-19）：部署/停止等状态变更前先快照上一版
+        // 到 {state_path}.bak（原子写损坏时可用它恢复）。保留单份最新备份
+        // （台账元数据不含密钥；含 api_key 字段但备份同样 600）。
+        if self.path.is_file() {
+            if let Ok(prev) = std::fs::read(&self.path) {
+                let bak = self.path.with_extension("json.bak");
+                if mangosteen_platform::fs::atomic_write(&bak, &prev).is_ok() {
+                    let _ = mangosteen_platform::fs::set_private_permissions(&bak);
+                }
+            }
+        }
         let text = serde_json::to_string_pretty(state)
             .map_err(|e| MnError::config("state", format!("序列化失败：{e}")))?;
         eprintln!(
