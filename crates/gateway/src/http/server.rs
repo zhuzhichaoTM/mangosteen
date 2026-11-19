@@ -399,7 +399,23 @@ impl GatewayServer {
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(|s| s.trim().to_string())
             .or_else(|| req.header("x-api-key").map(|s| s.trim().to_string()));
-        matches!(provided, Some(k) if k == self.api_key)
+        // P1-3 恒定时间比较（2026-11-19）：`==` 短路比较会泄漏长度/
+        // 前缀信息（timing side-channel，回环+网络抖动下难利用但专家
+        // 规范要求）。改为逐字节 diff 累计——相同长度时耗时与内容无关。
+        match provided {
+            Some(k) => {
+                let a = k.as_bytes();
+                let b = self.api_key.as_bytes();
+                let mut diff: u8 = (a.len() ^ b.len()) as u8;
+                for i in 0..a.len().max(b.len()) {
+                    let x = a.get(i).copied().unwrap_or(0);
+                    let y = b.get(i).copied().unwrap_or(0);
+                    diff |= x ^ y;
+                }
+                diff == 0
+            }
+            None => false,
+        }
     }
 
     // ---------------------------------------------------------------- 处理器

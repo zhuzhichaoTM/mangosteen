@@ -12,7 +12,7 @@ use crate::protocol::{self, BackendTarget};
 
 impl GatewayServer {
     pub(crate) fn chat(&self, req: &ParsedRequest) -> Response {
-        let parsed: ChatRequest = match serde_json::from_slice(&req.body) {
+        let mut parsed: ChatRequest = match serde_json::from_slice(&req.body) {
             Ok(r) => r,
             Err(e) => {
                 return Response::json(
@@ -21,6 +21,14 @@ impl GatewayServer {
                 )
             }
         };
+        // P1-4 max_tokens 上限（2026-11-19）：客户端可请求极大值耗尽 GPU
+        // 时长/成本（成本型 DoS）。clamp 到 1..=4096，未指定则不注入
+        //（保持 OpenAI 原义，llama-server 使用自身默认）。
+        if let Some(m) = parsed.sampling.max_tokens {
+            if m == 0 || m > 4096 {
+                parsed.sampling.max_tokens = Some(m.clamp(1, 4096));
+            }
+        }
         let target = match self.backend_for_model(Some(parsed.model.as_str())) {
             Ok(t) => t,
             Err(e) => return Response::error(&e),

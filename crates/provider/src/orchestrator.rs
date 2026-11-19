@@ -712,10 +712,10 @@ impl CloudOrchestrator {
         instance_id: &str,
     ) -> MnResult<mangosteen_device::remote::SshTarget> {
         let driver = self.registry.get(provider)?;
-        let mut inst = driver.describe(instance_id)?;
-        // 强制使用固定密码 "1qaz@WSX"
-        inst.network.ssh_password = Some("1qaz@WSX".to_string());
-        ensure_key_target(&inst, &self.config, Some("1qaz@WSX"))
+        let inst = driver.describe(instance_id)?;
+        // P0-1（2026-11-19）：不再覆盖固定密码——restore_login_credential
+        // 已设随机密码到 inst.network.ssh_password（内存），沿用之。
+        ensure_key_target(&inst, &self.config, None)
     }
 
     /// **停止服务**：只停**指定模型**的远端推理进程，保留实例。
@@ -1797,10 +1797,15 @@ fn vendor_password_target(
             ),
         })?;
     let port = instance.network.ssh_port.unwrap_or(22);
-    // 强制使用固定密码 "1qaz@WSX"，确保所有云端实例使用统一凭证。
-    // 厂商返回的实例自带密码不可知（不回传），配置统一密码可能失效，
-    // 统一重置后的 "1qaz@WSX" 是唯一可靠的凭证。
-    let password = Some("1qaz@WSX".to_string());
+    // P0-1（2026-11-19）：密码来自 instance.network.ssh_password（内存，
+    // restore_login_credential 设的随机值）——不再硬编码固定密码。
+    // 存量未加固实例若 describe 无密码（厂商不回传）：返回错误由调用方
+    // 降级处理（deploy 引导失败时重新重置）。
+    let password = instance
+        .network
+        .ssh_password
+        .clone()
+        .filter(|p| !p.trim().is_empty());
 
     Ok(mangosteen_device::remote::SshTarget {
         host,
@@ -1956,11 +1961,67 @@ fn restore_login_credential(
         );
         return;
     }
-    let password = "1qaz@WSX".to_string();
+    // 密码获取策略（2026-11-19 用户裁决最终版）：
+    // ① 优先——厂商 describe 直接下发的密码（AutoDL root_password 等，
+    //    NetworkEndpoint.ssh_password 非空）：直接复用，不重置（重置本身
+    //    也有短暂窗口与 API 调用风险，能不碰就不碰）；
+    // ② 为空——优云等「密码需主动设置」的厂商：重置为随机密码（此前
+    //    硬编码 "1qaz@WSX" 在开源代码里，窗口期任何人可 root 登录；
+    //    随机密码 32 hex = 128 位熵，只在内存与厂商侧）。
+    // had_existing：复用厂商密码（true）时跳过 set_password API 与
+    // 生效等待验证——密码本来就可用，直接进 ensure_key_target。
+    let mut had_existing = false;
+    let password: String = match instance
+        .network
+        .ssh_password
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+    {
+        Some(existing) => {
+            eprintln!(
+                "[cloud] ✓ 实例 {} 复用厂商下发密码（无需重置）",
+                instance.id
+            );
+            had_existing = true;
+            existing
+        }
+        None => {
+            let generated = {
+                use std::io::Read as _;
+                std::fs::File::open("/dev/urandom")
+                    .ok()
+                    .and_then(|mut f| {
+                        let mut buf = [0u8; 16];
+                        f.read_exact(&mut buf).ok()?;
+                        Some(buf.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    })
+                    .unwrap_or_else(|| {
+                        // 熵降级兜底：时间戳 ^ pid ^ 栈地址
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos() as u64)
+                            .unwrap_or(0);
+                        let x = nanos ^ ((std::process::id() as u64) << 32)
+                            ^ (&instance as *const _ as u64);
+                        format!("{x:016x}{nanos:016x}")
+                    })
+            };
+            eprintln!(
+                "[cloud] 实例 {} 未获取到现有密码，重置为随机密码（仅内存）",
+                instance.id
+            );
+            generated
+        }
+    };
     eprintln!(
-        "[cloud] 实例 {} 开始重置登录密码，当前状态：{}",
+        "[cloud] 实例 {} 准备登录（密码就绪），当前状态：{}",
         instance.id, instance.state
     );
+    if had_existing {
+        // 复用路径：密码已可用，直接返回（ensure_key_target 会用
+        // instance.network.ssh_password 登录引导）。
+        return;
+    }
     match driver.set_password(&instance.id, &password) {
         Ok(()) => {
             eprintln!(

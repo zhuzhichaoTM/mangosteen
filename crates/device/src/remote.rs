@@ -1535,7 +1535,7 @@ pub fn ensure_llama_server(
          else \
            echo \"未配置代理，直连下载：{q_raw}\"; \
            timeout 150 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=2 --retry-wait=2 \
-             --check-certificate=false \
+             --check-certificate=true \
              --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
              -d {q_tmp} -o {q_file} {q_raw}; \
          fi; \
@@ -2763,8 +2763,14 @@ fn download_single_url(
             // 单轮次数用尽 → 判断是否还有轮次预算
             if attempts_in_round > ATTEMPTS_PER_ROUND {
                 if round >= MAX_ROUNDS {
+                    // P2-2 失败路径清理（2026-11-19）：MAX_ROUNDS 用尽仍失败
+                    // 时——先 tail 读日志（诊断信息进错误消息），再停下载器
+                    // 进程 + 删 .download.sh（含 CDN 签名 URL）/ .download.pid
+                    // / .download.log。.part 断点文件保留（恢复后可从断点
+                    // 续传），脚本与日志（URL 泄露面）必须删。
                     let tail = ssh_exec(target, &format!("tail -5 '{log}' 2>/dev/null"), 60)
                         .unwrap_or_default();
+                    let _ = ssh_exec(target, &format!("{stop_cmd}; rm -f '{script_path}' '{pid_file}' '{log}'"), 30);
                     let total_attempts = MAX_ROUNDS * ATTEMPTS_PER_ROUND;
                     return Err(MnError::Network {
                         stage: "云端下载模型".to_string(),
