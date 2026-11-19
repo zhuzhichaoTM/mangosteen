@@ -7,29 +7,164 @@ use super::*;
 use mangosteen_core::openai::ErrorResponse;
 use mangosteen_core::MnError;
 
+/// 恒定时间密钥比较（防时序侧信道）：比较长度与内容均不提前退出。
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let ba = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut diff: u8 = (ba.len() ^ bb.len()) as u8;
+    for i in 0..ba.len().max(bb.len()) {
+        diff |= ba.get(i).copied().unwrap_or(0) ^ bb.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
+/// UI 登录页（2026-11-19 用户要求）：开启鉴权且未登录时 GET / 返回。
+/// 输入 API Key → POST /api/auth/login → 成功写 HttpOnly Cookie 后刷新。
+/// 样式内联（CSP 已放宽），无外部依赖。
+const LOGIN_HTML: &str = r#"<!DOCTYPE html>
+<html lang="zh">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mangosteen 登录</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 340px; margin: 15vh auto; padding: 0 20px; color: #333; }
+  h2 { text-align: center; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; font-size: 14px; border: 1px solid #ddd; border-radius: 6px; }
+  button { width: 100%; padding: 10px; margin-top: 12px; font-size: 14px; background: #1a73e8; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #1765cc; }
+  #err { color: #d93025; font-size: 13px; text-align: center; min-height: 20px; margin-top: 10px; }
+  .hint { font-size: 12px; color: #888; text-align: center; margin-top: 16px; }
+  code { background: #f1f3f4; padding: 1px 4px; border-radius: 3px; }
+</style></head>
+<body>
+<h2>Mangosteen 控制台</h2>
+<form id="f" autocomplete="off">
+  <input id="k" type="password" placeholder="网关 API Key" autofocus>
+  <button type="submit">登 录</button>
+</form>
+<div id="err"></div>
+<div class="hint">API Key 查看：<code>mangosteen status</code> 或配置文件 gateway.key</div>
+<script>
+document.getElementById('f').addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  var err = document.getElementById('err');
+  err.textContent = '';
+  try {
+    var r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: document.getElementById('k').value })
+    });
+    if (r.ok) { location.reload(); }
+    else { err.textContent = 'API Key 错误，请重试（' + r.status + '）'; }
+  } catch (e) { err.textContent = '网络错误：' + e; }
+});
+</script>
+</body></html>"#;
+
 impl GatewayServer {
+    /// 检查请求是否携带有效 UI 会话 Cookie（HttpOnly ui_session）。
+    fn check_ui_session(&self, req: &ParsedRequest) -> bool {
+        if !self.require_key {
+            return false;
+        }
+        let cookie = req.header("cookie").unwrap_or("");
+        for part in cookie.split(';') {
+            let part = part.trim();
+            if let Some(v) = part.strip_prefix("ui_session=") {
+                return constant_time_eq(v, &self.ui_session_token);
+            }
+        }
+        false
+    }
+
+    /// POST /api/auth/login — Body: {api_key} → 校验后写 HttpOnly Cookie。
+    /// 登录失败返回 401（不回显 key 内容）。
+    fn api_auth_login(&self, req: &ParsedRequest) -> Response {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let key = body.get("api_key").and_then(|v| v.as_str()).unwrap_or("");
+        if key.is_empty() || !constant_time_eq(key, &self.api_key) {
+            let e = MnError::AccessDenied {
+                path: std::path::PathBuf::from("/api/auth/login"),
+                reason: "API Key 错误".to_string(),
+            };
+            return Response::json(401, &ErrorResponse::from_mn(&e));
+        }
+        let mut resp = Response::json(200, &serde_json::json!({ "ok": true }));
+        resp.headers.push((
+            "Set-Cookie".to_string(),
+            format!(
+                "ui_session={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400",
+                self.ui_session_token
+            ),
+        ));
+        resp
+    }
+
+    /// GET /api/auth/session — 返回当前会话登录态（供前端判断）。
+    fn api_auth_session(&self, authed: bool) -> Response {
+        Response::json(
+            200,
+            &serde_json::json!({ "authenticated": authed && self.require_key }),
+        )
+    }
+
     /// 路由分发。
     pub fn route(&self, req: &ParsedRequest) -> Response {
         // 鉴权（可选）。豁免：`/`（页面本体，无数据）、`/index.html`、
         // `/health`（探活）——数据与操作全部在 /v1/* 与 /api/* 后面，
         // 页面 JS 调 API 时带 token（URL ?token= 或 localStorage）。
-        if self.require_key && !self.authorized(req) && !matches!(req.path.as_str(), "/" | "/index.html" | "/health") {
+        //
+        // UI 会话中间件（2026-11-19 用户要求）：Web UI 登录后凭
+        // HttpOnly Cookie `ui_session` 访问 /api/* 与 /v1/*；未登录时
+        // GET / 返回登录页（输入 API Key），登录成功写 Cookie 回主页。
+        // 登录端点 /api/auth/login 与 /api/auth/session 免鉴权（否则
+        // 鸡生蛋）。Authorization: Bearer <api_key> 与会话 Cookie 任一
+        // 有效即放行（API 客户端仍可用 Bearer）。
+        let has_valid_session = self.check_ui_session(req);
+
+        if matches!((req.method.as_str(), req.path.as_str()), ("POST", "/api/auth/login")) {
+            return self.api_auth_login(req);
+        }
+        if matches!((req.method.as_str(), req.path.as_str()), ("GET", "/api/auth/session")) {
+            return self.api_auth_session(has_valid_session);
+        }
+
+        // 页面本体：开启鉴权且无有效会话 → 返回登录页（200，含登录表单）
+        if matches!(req.path.as_str(), "/" | "/index.html") {
+            if self.require_key && !has_valid_session {
+                return Response {
+                    status: 200,
+                    content_type: "text/html; charset=utf-8".to_string(),
+                    body: LOGIN_HTML.as_bytes().to_vec(),
+                    // 登录页需要内联 script——放宽 CSP（仅本页）
+                    headers: vec![(
+                        "Content-Security-Policy".to_string(),
+                        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'".to_string(),
+                    )],
+                };
+            }
+            return Response {
+                status: 200,
+                content_type: "text/html; charset=utf-8".to_string(),
+                body: mangosteen_webui::INDEX_HTML.as_bytes().to_vec(),
+                headers: Vec::new(),
+            };
+        }
+
+        // 数据/操作接口：Bearer key 或会话 Cookie 任一有效即放行
+        if self.require_key
+            && !self.authorized(req)
+            && !has_valid_session
+            && req.path.as_str() != "/health"
+        {
             let e = MnError::AccessDenied {
                 path: std::path::PathBuf::from(&req.path),
-                reason: "缺少或错误的 API Key（Authorization: Bearer <key>）".to_string(),
+                reason: "缺少或错误的 API Key（Authorization: Bearer <key> 或登录后访问）".to_string(),
             };
             return Response::json(401, &ErrorResponse::from_mn(&e));
         }
 
         match (req.method.as_str(), req.path.as_str()) {
-            // 内置 Web 控制台。挂在网关同一端口：同源即可调 /api 与 /v1，
-            // 不需要 CORS，也不需要额外的静态文件服务。
-            ("GET", "/") | ("GET", "/index.html") => Response {
-                status: 200,
-                content_type: "text/html; charset=utf-8".to_string(),
-                body: mangosteen_webui::INDEX_HTML.as_bytes().to_vec(),
-                headers: Vec::new(),
-            },
             ("GET", "/health") => self.health(),
             ("GET", "/v1/models") => self.models(),
             ("POST", "/v1/chat/completions") => self.chat(req),

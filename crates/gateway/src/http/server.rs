@@ -57,6 +57,12 @@ pub struct GatewayServer {
     pub(crate) backend_snapshot: Arc<RwLock<std::collections::BTreeMap<String, BackendTarget>>>,
     pub(crate) require_key: bool,
     pub(crate) api_key: String,
+    /// UI 会话令牌（2026-11-19 用户要求）：网关启动时生成 32B 随机令牌，
+    /// 持久化到 {config_dir}/ui.session（600）。Web UI 登录成功后向
+    /// 浏览器写 HttpOnly Cookie `ui_session=<token>`，后续 /api/* 与
+    /// /v1/* 请求凭 Cookie 放行；无会话访问 / 跳转登录页。与现有
+    /// Authorization: Bearer <api_key> 并行（二者任一即可）。
+    pub(crate) ui_session_token: String,
     pub(crate) upstream_timeout: Duration,
     pub(crate) sampler: mangosteen_platform::resmon::CpuSampler,
     pub(crate) pull_jobs: crate::pulljobs::PullJobs,
@@ -202,11 +208,44 @@ impl GatewayServer {
                 }
             }
         }
+        // UI 会话令牌：持久化到 {config_dir}/ui.session（600），网关重启
+        // 后会话不失效。文件不存在则随机生成。
+        let ui_session_path = mangosteen_platform::paths::config_dir(
+            &mangosteen_platform::paths::real_env,
+        )
+        .join("ui.session");
+        let ui_session_token = (|| -> std::io::Result<String> {
+            if let Ok(tok) = std::fs::read_to_string(&ui_session_path) {
+                if !tok.trim().is_empty() {
+                    return Ok(tok.trim().to_string());
+                }
+            }
+            use std::io::Read as _;
+            let mut buf = [0u8; 32];
+            let mut f = std::fs::File::open("/dev/urandom")?;
+            f.read_exact(&mut buf)?;
+            let tok = buf.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            if let Some(dir) = ui_session_path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            std::fs::write(&ui_session_path, tok.as_bytes())?;
+            let _ = mangosteen_platform::fs::set_private_permissions(&ui_session_path);
+            Ok(tok)
+        })().unwrap_or_else(|_| {
+            // 兜底：无法写文件时用进程内随机（重启后会话失效，可接受）
+            use std::io::Read as _;
+            let mut buf = [0u8; 32];
+            let _ = std::fs::File::open("/dev/urandom")
+                .and_then(|mut f| f.read_exact(&mut buf));
+            buf.iter().map(|b| format!("{b:02x}")).collect()
+        });
+
         Self {
             gateway,
             backend_snapshot,
             require_key,
             api_key,
+            ui_session_token,
             upstream_timeout,
             sampler: mangosteen_platform::resmon::CpuSampler::new(),
             pull_jobs: crate::pulljobs::PullJobs::new(),
