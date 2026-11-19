@@ -25,6 +25,7 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
 <html lang="zh">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mangosteen 登录</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'">
 <style>
   body { font-family: -apple-system, sans-serif; max-width: 340px; margin: 15vh auto; padding: 0 20px; color: #333; }
   h2 { text-align: center; font-weight: 600; }
