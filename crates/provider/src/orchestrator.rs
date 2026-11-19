@@ -1303,10 +1303,17 @@ fn bootstrap_deploy_target(
         // deploy 密钥通道可用（加固后仍有效）——用 deploy 身份（家目录可写）
         // 幂等补齐 workdir / aria2 / TLS 证书；均不需要 root。
         let workdir = config.remote_workdir.trim_end_matches('/').to_string();
-        // -R 递归：root 引导残留的文件（tmp 下载损坏包等）也要归 deploy，
-        // 否则 node-config 的 rm/覆盖均 Permission denied（实测根因）。
-        let workdir_cmd =
-            format!("mkdir -p {workdir} && chown -R {DEPLOY_USER}:{DEPLOY_USER} {workdir}");
+        // workdir 残留清理（2026-11-19 实测根因）：root 引导链（4d-4）
+        // 下载的损坏 llama.tar.gz 属主 root，deploy 的 node-config
+        // rm/覆盖均 Permission denied → 部署死路。用 root 密码通道
+        // chown -R 归 deploy（未加固实例 root 密码可用；已加固实例
+        // root 登录被 sshd 拒绝 → ssh_exec 失败静默跳过，无影响）。
+        if let Ok(root) = vendor_password_target(instance, config) {
+            let chown_cmd =
+                format!("chown -R {DEPLOY_USER}:{DEPLOY_USER} {workdir} 2>/dev/null || true");
+            let _ = mangosteen_device::remote::ssh_exec(&root, &chown_cmd, 15);
+        }
+        let workdir_cmd = format!("mkdir -p {workdir}");
         let _ = mangosteen_device::remote::ssh_exec(&target, &workdir_cmd, 15);
         let aria_cmd = "command -v aria2c >/dev/null 2>&1 || echo aria2-missing";
         if let Ok(out) = mangosteen_device::remote::ssh_exec(&target, &aria_cmd, 15) {
