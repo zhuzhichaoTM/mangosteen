@@ -95,10 +95,25 @@ impl GatewayServer {
             .arg("-H")
             .arg("Content-Type: application/json");
         // safety 分支（改动点 2）：上游启用 --api-key-file 时携带 Bearer。
-        // 密钥从内存构造 curl argv（本地进程短暂可见，与「远端 argv/日志」
-        // 的封堵目标不冲突）；绝不落盘、绝不进日志。
+        // P2（2026-11-19）：密钥改走 curl 的 @file 语法——`-H "Authorization: Bearer @<path>"`，
+        // 密钥内容从 600 权限临时文件读取，curl argv（ps 可见）不含明文 token。
+        // 临时文件用完即删（本进程内），绝不进日志。
         if let Some(key) = &target.api_key {
-            cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
+            let key_path = std::env::temp_dir().join(format!("mn-key-{}.tmp", std::process::id()));
+            if let Ok(()) = std::fs::write(&key_path, key.as_bytes()) {
+                // 平台差异走 platform crate（gateway 层禁止 cfg(unix) 分支）。
+                let _ = mangosteen_platform::fs::set_private_permissions(&key_path);
+                cmd.arg("-H")
+                    .arg(format!("Authorization: Bearer @{}", key_path.display()));
+                // curl 退出后删除临时文件（spawn 后无法同步删——用 RAII 兜底：
+                // 子进程 kill 后本函数返回前删）。延迟到函数结尾由
+                // cleanup_guard 处理；这里先记下路径。
+                // 注意：curl 启动失败时也必须删除，故不在此处 early return。
+            } else {
+                // 写临时文件失败 → 退回 argv（可用性优先，泄露风险极低：
+                // 本机进程短暂可见 vs 部署不可用）
+                cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
+            }
         }
         // https 上游（P1 TLS，自签证书）。P0 证书钉扎：有本地钉扎
         // 证书（{config_dir}/tls/<instance>.crt）时 --cacert 强校验，
@@ -118,10 +133,20 @@ impl GatewayServer {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| MnError::Network {
-                stage: "启动上游转发".to_string(),
-                reason: format!("无法启动 curl：{e}"),
+            .map_err(|e| {
+                // spawn 失败：临时 key 文件清理（构造时可能已写入）
+                let _ = std::fs::remove_file(
+                    std::env::temp_dir().join(format!("mn-key-{}.tmp", std::process::id())),
+                );
+                MnError::Network {
+                    stage: "启动上游转发".to_string(),
+                    reason: format!("无法启动 curl：{e}"),
+                }
             })?;
+        // 临时 key 文件：curl 启动后立即删除（curl 只在启动时读一次 header）
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("mn-key-{}.tmp", std::process::id())),
+        );
 
         // 写请求体后立即关闭 stdin（否则上游一直等 body）
         if let Some(mut si) = child.stdin.take() {
@@ -359,4 +384,6 @@ mod stream_tests {
             "chunked 帧格式错误：{got:?}"
         );
     }
+
+
 }

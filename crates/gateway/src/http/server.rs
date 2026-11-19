@@ -66,6 +66,62 @@ pub struct GatewayServer {
     /// `running` 回退为「台账状态是否 ready」，行为可预期且不发网络请求。
     pub(crate) runtime_probe: Option<crate::runprobe::RuntimeProbe>,
     pub(crate) sessions: mangosteen_session::SessionStore,
+    /// P1 上游熔断器（2026-11-19）：连续失败阈值内触发熔断（直接 503
+    /// + Retry-After），避免异常流量打爆远端 llama-server；成功请求
+    /// 清零计数。Arc 共享给所有工作线程。
+    pub(crate) upstream_guard: std::sync::Arc<std::sync::Mutex<UpstreamGuard>>,
+}
+
+/// P1 上游熔断器状态。
+///
+/// - 连续失败达到 `FAIL_THRESHOLD`（5）次 → 打开熔断，`OPEN_UNTIL`
+///   时间内所有上游请求直接拒绝（503 + Retry-After）；
+/// - 冷却结束自动转「半开」：放行一个探测请求，成功 → 关闭（清零）；
+///   失败 → 重新打开（冷却时长翻倍，指数退避上限 5 分钟）。
+pub(crate) struct UpstreamGuard {
+    failures: u32,
+    open_until: std::time::Instant,
+    cooldown: std::time::Duration,
+}
+
+impl UpstreamGuard {
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            open_until: std::time::Instant::now(),
+            cooldown: std::time::Duration::from_secs(10),
+        }
+    }
+    /// 请求前检查：熔断打开时返回 Retry-After 秒数（请求应被拒绝）。
+    fn check(&self) -> Option<u64> {
+        let now = std::time::Instant::now();
+        if now < self.open_until {
+            Some(
+                (self.open_until - now).as_secs().max(1),
+            )
+        } else {
+            None
+        }
+    }
+    /// 上游成功：清零失败计数，关闭熔断。
+    pub(crate) fn on_success(&mut self) {
+        self.failures = 0;
+        self.open_until = std::time::Instant::now();
+        self.cooldown = std::time::Duration::from_secs(10);
+    }
+    /// 上游失败（连接错误/5xx）：累计，达阈值打开熔断。
+    pub(crate) fn on_failure(&mut self) {
+        self.failures += 1;
+        if self.failures >= 5 {
+            self.open_until = std::time::Instant::now() + self.cooldown;
+            // 指数退避（上限 5 分钟）
+            self.cooldown = (self.cooldown * 2).min(std::time::Duration::from_secs(300));
+        }
+    }
+    /// 当前熔断打开时返回 Retry-After 头值。
+    pub(crate) fn retry_after(&self) -> Option<u64> {
+        self.check()
+    }
 }
 
 impl GatewayServer {
@@ -155,6 +211,7 @@ impl GatewayServer {
             sampler: mangosteen_platform::resmon::CpuSampler::new(),
             pull_jobs: crate::pulljobs::PullJobs::new(),
             runtime_probe: None,
+            upstream_guard: std::sync::Arc::new(std::sync::Mutex::new(UpstreamGuard::new())),
             sessions: mangosteen_session::SessionStore::new(
                 mangosteen_platform::paths::sessions_file(
                     &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>,
@@ -296,6 +353,19 @@ impl GatewayServer {
                 return Ok(());
             }
         };
+
+        // P2 X-Forwarded-For 校验（2026-11-19）：网关绑定 127.0.0.1（回环），
+        // 非回环来源本就不可达；显式拒绝「非回环 + X-Forwarded-For」（伪造
+        // 来源头）请求——防代理链欺骗审计与限流逻辑。
+        let non_loopback = !peer.starts_with("127.") && peer != "::1" && peer != "-";
+        if non_loopback && req.header("x-forwarded-for").is_some() {
+            let e = MnError::bad_request(
+                "网关仅接受本机回环访问（检测到伪造的 X-Forwarded-For 头）".to_string(),
+            );
+            let mut s = stream;
+            let _ = s.write_all(&Response::error(&e).to_bytes());
+            return Ok(());
+        }
 
         // ---- 流式推理请求：必须走直通路径 ----
         //

@@ -231,6 +231,59 @@ pub fn run(args: Args) -> MnResult<i32> {
     // Config（深拷贝 Arc 内容），修改不影响网关共享的 Arc
     let mut cfg = (*gw.config()).clone();
 
+    // P0-1 配置迁移（2026-11-19）：若 gateway.api_key 仍是 Inline 明文
+    // （旧版自动生成的 token 写在 config.toml 里），启动时自动迁移到
+    // {config_dir}/gateway.key（600）+ file 引用，并清除明文。
+    if let mangosteen_core::config::SecretRef::Inline(plain) = &cfg.gateway.api_key {
+        if !plain.trim().is_empty() {
+            let key_path = mangosteen_platform::paths::config_dir(
+                &mangosteen_platform::paths::real_env,
+            )
+            .join("gateway.key");
+            let migrated = (|| -> std::io::Result<()> {
+                if let Some(dir) = key_path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                // 幂等：已有文件且非空 → 直接引用（内容可能是同一 token）
+                let exists = std::fs::read_to_string(&key_path)
+                    .map(|c| !c.trim().is_empty())
+                    .unwrap_or(false);
+                if !exists {
+                    std::fs::write(&key_path, plain.as_bytes())?;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &key_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                Ok(())
+            })();
+            match migrated {
+                Ok(_) => {
+                    cfg.gateway.api_key =
+                        mangosteen_core::config::SecretRef::File(key_path.clone());
+                    let store = mangosteen_base::config::ConfigStore::platform_default(None);
+                    if let Err(e) = store.save(&cfg) {
+                        eprintln!("[gateway-auth] ⚠ Inline key 迁移后配置写回失败（{e}），本次会话临时生效");
+                    } else {
+                        eprintln!(
+                            "[gateway-auth] ✓ 旧 Inline 明文密钥已迁移到 {}（config.toml 明文已清除）",
+                            key_path.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[gateway-auth] ⚠ Inline key 迁移失败（{e}），保留旧行为（明文仍在配置中）"
+                    );
+                }
+            }
+        }
+    }
+
     let host = args.get("host").unwrap_or(&cfg.gateway.host).to_string();
     let port = args.get_num::<u16>("port")?.unwrap_or(cfg.gateway.port);
 

@@ -13,6 +13,9 @@ pub struct Response {
     pub status: u16,
     pub content_type: String,
     pub body: Vec<u8>,
+    /// P1 额外响应头（2026-11-19）：503/429 时的 Retry-After（秒）。
+    /// 空 = 不发送额外头（默认行为不变）。
+    pub headers: Vec<(String, String)>,
 }
 
 impl Response {
@@ -23,6 +26,7 @@ impl Response {
             status,
             content_type: "application/json".to_string(),
             body,
+            headers: Vec::new(),
         }
     }
 
@@ -32,6 +36,7 @@ impl Response {
             status,
             content_type: "text/plain; charset=utf-8".to_string(),
             body: body.into().into_bytes(),
+            headers: Vec::new(),
         }
     }
 
@@ -49,14 +54,18 @@ impl Response {
 
     /// 序列化为 HTTP 报文。
     pub fn to_bytes(&self) -> Vec<u8> {
-        let head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nServer: mangosteen/{}\r\nConnection: close\r\n\r\n",
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nServer: mangosteen/{}\r\nConnection: close\r\n",
             self.status,
             reason_phrase(self.status),
             self.content_type,
             self.body.len(),
             mangosteen_core::identity::VERSION
         );
+        for (k, v) in &self.headers {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+        head.push_str("\r\n");
         let mut out = head.into_bytes();
         out.extend_from_slice(&self.body);
         out

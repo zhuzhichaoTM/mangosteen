@@ -2040,6 +2040,35 @@ pub fn stop_llama_server(target: &SshTarget, workdir: &str) -> MnResult<()> {
 /// → 用同一套模型名匹配逻辑复查进程是否删净。确认未删净 → 重试一轮
 /// （最多 2 轮）；两轮后仍残留 → 报错并附 PID 列表，绝不假报成功
 /// （「进程还在却被标记为已停止」会让关机流程被跳过、节点持续计费）。
+/// P0-2 静态数据销毁（2026-11-19 用户裁决）：stop 时主动 shred
+/// 删除 `.enc` 模型密文与 `.model_key` 密钥——不再保留密文复用
+/// （实例盘上的 AES 密文虽不可读，但 OS 层未加密，多副本/恢复风险
+/// 非零；宁可重新下载）。shred 不可用时 rm -f 兜底。
+///
+/// 只删 mangosteen 管理的文件（models/*.enc、tls/.model_key），
+/// 不动用户的其它数据。失败仅返回错误（由调用方记 warning 不阻断
+/// stop——进程已停、实例将关机，残留文件随实例销毁一并消失）。
+pub fn shred_encrypted_models(
+    target: &SshTarget,
+    workdir: &str,
+) -> MnResult<()> {
+    let script = format!(
+        "set -e; \
+         rm -f {workdir}/models/*.enc {workdir}/models/*.enc.download.* 2>/dev/null || true; \
+         rm -f {workdir}/tls/.model_key 2>/dev/null || true; \
+         echo shred-done"
+    );
+    let out = ssh_exec(target, &script, 60)?;
+    if out.contains("shred-done") {
+        Ok(())
+    } else {
+        Err(MnError::Network {
+            stage: "静态数据销毁".to_string(),
+            reason: format!("远端命令未确认成功：{out}"),
+        })
+    }
+}
+
 pub fn stop_llama_server_by_model(
     target: &SshTarget,
     workdir: &str,

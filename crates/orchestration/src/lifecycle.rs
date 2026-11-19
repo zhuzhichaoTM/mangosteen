@@ -1154,6 +1154,24 @@ impl Orchestrator {
                         "台账缺少模型文件路径，跳过停止推理进程（拒绝无差别停止）".into(),
                     ),
                 }
+                // P0-2 静态数据销毁（2026-11-19 用户裁决）：关机前 shred
+                // 删除 .enc 模型密文与 .model_key 密钥（不再保留密文复用）。
+                // 失败仅告警不阻断（进程已停、实例将关机，残留随实例销毁）。
+                if let Some(cloud) = record.plan.cloud.as_ref() {
+                    if let Some(target) = self.device_target_for(cloud) {
+                        let wd = self.config().cloud.remote_workdir.clone();
+                        if let Err(e) =
+                            mangosteen_device::remote::shred_encrypted_models(&target, &wd)
+                        {
+                            warnings.push(format!("静态数据销毁（密文/密钥）：{e}"));
+                        } else {
+                            eprintln!(
+                                "[cloud] ✓ 部署 {} 密文模型与密钥已销毁（stop 不复用密文）",
+                                id
+                            );
+                        }
+                    }
+                }
                 // 2) 再关机。这一步失败必须报错——机器还在跑就意味着继续计费。
                 o.power_off(&provider, instance_id)?;
                 // 3) 关掉隧道：机器都关了，隧道只会反复重连
@@ -1261,6 +1279,20 @@ impl Orchestrator {
                 // 或者台账已与远端脱节。不谎报成功，如实说明。
                 None => {
                     warnings.push("台账缺少可连接的节点信息，未执行远端停止".to_string());
+                }
+            }
+        }
+
+        // P0-2 静态数据销毁（自建设备/云端 stop）：shred 密文模型与密钥，
+        // 不再保留密文复用（实例盘 OS 层未加密，残留密文有恢复风险）。
+        // 失败仅记 warning（进程已停、实例将关机/保留，残留随实例销毁）。
+        if let Some(cloud) = record.plan.cloud.as_ref() {
+            if let Some(target) = self.device_target_for(cloud) {
+                let wd = self.config().cloud.remote_workdir.clone();
+                if let Err(e) = mangosteen_device::remote::shred_encrypted_models(&target, &wd) {
+                    warnings.push(format!("静态数据销毁（密文/密钥）：{e}"));
+                } else {
+                    eprintln!("[cloud] ✓ 部署 {} 密文模型与密钥已销毁（stop 不复用密文）", id);
                 }
             }
         }

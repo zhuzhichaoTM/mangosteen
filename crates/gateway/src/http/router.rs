@@ -28,6 +28,7 @@ impl GatewayServer {
                 status: 200,
                 content_type: "text/html; charset=utf-8".to_string(),
                 body: mangosteen_webui::INDEX_HTML.as_bytes().to_vec(),
+                headers: Vec::new(),
             },
             ("GET", "/health") => self.health(),
             ("GET", "/v1/models") => self.models(),

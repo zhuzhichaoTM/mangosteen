@@ -149,42 +149,85 @@ impl GatewayServer {
     /// 转发 JSON 请求到上游，并把上游响应归一化。
     pub(crate) fn forward_json(&self, path: &str, body: &[u8], target: &BackendTarget) -> Response {
         let url = target.url_for(path);
-        match http_post_json_with_key_tls(
-            &url,
-            body,
-            self.upstream_timeout,
-            target.api_key.as_deref(),
-            target.tls,
-            target.tls_cert_path.as_deref().map(std::path::Path::new),
-        ) {
-            Ok((status, resp_body)) => {
-                // 上游错误 → 归一化
-                if !(200..300).contains(&status) {
-                    let e = MnError::Network {
-                        stage: format!("上游推理服务（HTTP {status}）"),
-                        reason: summarize_body(&resp_body),
-                    };
-                    return Response::error(&e);
-                }
-                // 上游会把 model 填成模型文件绝对路径（llama.cpp 行为），
-                // 这里统一改写为 Mangosteen 的模型 ID，保证与 /v1/models
-                // 一致，且不向调用方泄漏本机路径。SSE 流也走同一函数
-                // （内部按 data: 行逐条改写）。
-                let body = protocol::rewrite_response_model(&resp_body, &target.model_id);
-                // stream=true 时上游返回 SSE，Content-Type 必须是
-                // text/event-stream，否则标准 OpenAI SDK 的流式解析器不认。
-                let content_type = if protocol::looks_like_sse(&body) {
-                    "text/event-stream"
-                } else {
-                    "application/json"
-                };
-                Response {
-                    status,
-                    content_type: content_type.to_string(),
-                    body: body.into_bytes(),
-                }
+        // P1 熔断/限流（2026-11-19）：熔断打开时直接拒绝（503 + Retry-After），
+        // 避免异常流量打爆远端 llama-server；5xx/429 重试最多 2 次（退避）。
+        {
+            let guard = self.upstream_guard.lock().unwrap();
+            if let Some(retry_after) = guard.retry_after() {
+                let payload = mangosteen_core::openai::ErrorResponse::bad_request(
+                    format!("上游推理服务暂时不可用（熔断中），请 {retry_after}s 后重试"),
+                    None,
+                );
+                let mut resp = Response::json(503, &payload);
+                resp.headers
+                    .push(("Retry-After".to_string(), retry_after.to_string()));
+                return resp;
             }
-            Err(e) => Response::error(&e),
+        }
+
+        let mut attempt = 0u32;
+        loop {
+            let r = http_post_json_with_key_tls(
+                &url,
+                body,
+                self.upstream_timeout,
+                target.api_key.as_deref(),
+                target.tls,
+                target.tls_cert_path.as_deref().map(std::path::Path::new),
+            );
+            match r {
+                // 503（模型加载期）/429（限流）：退避重试，最多 2 次
+                Ok((status, resp_body)) if status == 503 || status == 429 => {
+                    if attempt < 2 {
+                        attempt += 1;
+                        self.upstream_guard.lock().unwrap().on_failure();
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            500 * attempt as u64,
+                        ));
+                        continue;
+                    }
+                    // 重试用尽：503 + Retry-After（模型加载估算 30s；429 取 5s）
+                    self.upstream_guard.lock().unwrap().on_failure();
+                    let ra = if status == 503 { 30u64 } else { 5u64 };
+                    let payload = mangosteen_core::openai::ErrorResponse::bad_request(
+                        format!("上游推理服务暂时不可用（HTTP {status}），请稍后重试"),
+                        None,
+                    );
+                    let mut resp = Response::json(503, &payload);
+                    resp.headers.push(("Retry-After".to_string(), ra.to_string()));
+                    return resp;
+                }
+                Ok((status, resp_body)) => {
+                    self.upstream_guard.lock().unwrap().on_success();
+                    // 上游错误 → 归一化
+                    if !(200..300).contains(&status) {
+                        let e = MnError::Network {
+                            stage: format!("上游推理服务（HTTP {status}）"),
+                            reason: summarize_body(&resp_body),
+                        };
+                        return Response::error(&e);
+                    }
+                    // 上游会把 model 填成模型文件绝对路径（llama.cpp 行为），
+                    // 这里统一改写为 Mangosteen 的模型 ID，保证与 /v1/models
+                    // 一致，且不向调用方泄漏本机路径。SSE 流也走同一函数
+                    // （内部按 data: 行逐条改写）。
+                    let body = protocol::rewrite_response_model(&resp_body, &target.model_id);
+                    // stream=true 时上游返回 SSE，Content-Type 必须是
+                    // text/event-stream，否则标准 OpenAI SDK 的流式解析器不认。
+                    let content_type = if protocol::looks_like_sse(&body) {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    };
+                    return Response {
+                        status,
+                        content_type: content_type.to_string(),
+                        body: body.into_bytes(),
+                        headers: Vec::new(),
+                    };
+                }
+                Err(e) => return Response::error(&e),
+            }
         }
     }
 
