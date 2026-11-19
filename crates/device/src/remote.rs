@@ -1479,7 +1479,7 @@ pub fn ensure_llama_server(
            for p in {proxy_list}; do \
              u=\"${{p}}{q_raw}\"; \
              echo \"尝试下载：$u\"; \
-             timeout 900 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
+             timeout 120 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
                --check-certificate=false \
                --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
                -d {q_tmp} -o {q_file} \"$u\"; rc=$?; \
@@ -1488,7 +1488,7 @@ pub fn ensure_llama_server(
            done; \
          else \
            echo \"未配置代理，直连下载：{q_raw}\"; \
-           timeout 900 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
+           timeout 120 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=3 --retry-wait=2 \
              --check-certificate=false \
              --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
              -d {q_tmp} -o {q_file} {q_raw}; \
