@@ -1999,7 +1999,17 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
     // spec_id 用 "reuse:provider:instance" 防止与厂商规格 ID / 设备 ID 冲突；
     // 确认后请求携带 reuse_instance_id / reuse_provider，部署不再新建实例。
     // 已停机实例由后端按 GPU 型号在后台自动开机复用，不进选择列表。
-    const existing = (pv.cloud_instances || []).map(inst => ({
+    // 只保留运行中的实例：stopped 实例无法复用（开机可能无库存，如
+    // V100S 实测 226604 无库存），列出来只会误导用户点中后部署失败。
+    // 已停机实例由后端按 GPU 型号在后台自动开机复用（若库存允许），
+    // 不进选择列表。2026-11-20 实测：stopped 实例显示导致用户选中后
+    // 报 start_timeout（600s 未 Running）。
+    const existing = (pv.cloud_instances || [])
+      .filter(inst => {
+        const st = (inst.state || "").toLowerCase();
+        return st === "running" || st === "active";
+      })
+      .map(inst => ({
       reuse: true,
       provider: inst.provider,
       instance_id: inst.instance_id,
@@ -2076,7 +2086,7 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
     return new Promise(resolve => {
       const box = el("div", "gpu-confirm");
       box.innerHTML = '<h3>确认设备</h3><div class="hint">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>' +
-        '<div class="row" style="margin-top:10px"><button class="primary sm" id="gpu-auto-pick" title="跳过手动选择，由后端四维打分自动挑选最优节点（与 CLI 默认行为一致）">自动选点（推荐，与 CLI 一致）</button></div>';
+        '<div class="row" style="margin-top:10px"><button class="primary sm" id="gpu-auto-pick" title="跳过手动选择，由后端四维打分自动挑选最优节点">自动选点</button></div>';
       const list = el("div", "gpu-pick"); let selected = null;
       cands.forEach((x, i) => {
         const av = availability(x);
