@@ -2026,6 +2026,19 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
     if (!candidates.length && pv.cloud) candidates.push(pv.cloud);
     const chosen = await chooseGpu(candidates);
     if (!chosen) { renderChain(1, "已取消：未确认设备", true); return; }
+    // __AUTO__ = 用户点了「自动选点（推荐）」：与 CLI 默认行为一致，
+    // 不传 cloud_spec / gpu_model，后端四维打分自动挑最优节点。
+    if (chosen === "__AUTO__") {
+      const source = mdef.source;
+      const payload = {model:source, model_id:mdef.id, deploy:true, target:"cloud", config_template:template, config_template_text:tplText};
+      renderChain(1, "已启用自动选点（与 CLI 一致），正在提交部署任务");
+      const r = await api("/api/models/pull", { method:"POST", body:JSON.stringify(payload) }).catch(e => ({error:e.message}));
+      if (r.error) { renderChain(1, r.error.message || r.error, true); return; }
+      currentJob = r.job_id;
+      if (!currentJob) { renderChain(1, "部署任务未返回有效任务 ID", true); return; }
+      pollChain();
+      return;
+    }
     const selectedCandidate = candidates.find(x => (x.spec_id || x.gpu_model) === chosen) || {};
     const source = mdef.source;
     const payload = {model:source, model_id:mdef.id, deploy:true, target:"cloud", config_template:template, config_template_text:tplText};
@@ -2062,7 +2075,8 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
     const usable = cands.filter(x => availability(x).ok);
     return new Promise(resolve => {
       const box = el("div", "gpu-confirm");
-      box.innerHTML = '<h3>确认设备</h3><div class="hint">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>';
+      box.innerHTML = '<h3>确认设备</h3><div class="hint">列表包含两类节点：有库存的可新购 GPU 规格，以及你正在使用的运行中节点（复用，不新建实例）。库存为 0 的规格不展示；已停机的同型号实例也不会出现在这里——确认部署后系统会在后台自动开机复用它们，避免重复创建。</div>' +
+        '<div class="row" style="margin-top:10px"><button class="primary sm" id="gpu-auto-pick" title="跳过手动选择，由后端四维打分自动挑选最优节点（与 CLI 默认行为一致）">自动选点（推荐，与 CLI 一致）</button></div>';
       const list = el("div", "gpu-pick"); let selected = null;
       cands.forEach((x, i) => {
         const av = availability(x);
@@ -2086,6 +2100,9 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
       });
       box.appendChild(list); const foot = el("div", "row"); const cancel = el("button", "", "取消"); const ok = el("button", "primary", "确认节点"); ok.disabled = usable.length === 0; list.onclick = () => { ok.disabled = !selected; };
       if (!usable.length) box.appendChild(el("div", "banner err", "实时接口未返回空闲可部署节点：" + cands.map(x => (x.gpu_model || "?") + "（" + availability(x).reason + "）").join("；")));
+      // 自动选点：与 CLI `mangosteen deploy <model>`（不带 --gpu-model）行为一致——
+      // 后端按价格/延迟/库存/硬件四维打分自动挑最优节点，用户无需手动选。
+      $("gpu-auto-pick").onclick = () => { box.remove(); resolve("__AUTO__"); };
       cancel.onclick = () => { box.remove(); resolve(null); }; ok.onclick = () => { box.remove(); resolve(selected); }; foot.append(cancel, ok); box.appendChild(foot); $("dp-chain").appendChild(box);
     });
   }
