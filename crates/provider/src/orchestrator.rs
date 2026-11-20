@@ -547,6 +547,29 @@ impl CloudOrchestrator {
                             *instance = fresh;
                         }
                         Err(e) => {
+                            // 账户类错误（欠费/未实名/鉴权失败/参数非法/已过期）
+                            // 重试必然再失败——直接快速失败并告诉用户去处理，
+                            // 不浪费 300s 空等后报 start_timeout（掩盖真实原因）。
+                            if let MnError::Provider { code, .. } = &e {
+                                let non_retryable = matches!(
+                                    code.as_str(),
+                                    "226601" |  // 欠费
+                                    "226602" |  // 过期
+                                    "226606" |  // 未实名
+                                    "8919"     // 未支付订单
+                                );
+                                if non_retryable {
+                                    return Err(MnError::Provider {
+                                        provider: instance.provider.clone(),
+                                        code: code.clone(),
+                                        message: format!(
+                                            "实例 {} 启动失败（账户类问题，重试无效）：{}。\
+                                             请到优云智算控制台结清未支付订单/欠费后重试。",
+                                            instance.id, e
+                                        ),
+                                    });
+                                }
+                            }
                             eprintln!(
                                 "[cloud] ⚠ 实例 {} 启动指令失败（{}），30s 后重试",
                                 instance.id, e
