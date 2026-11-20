@@ -1724,7 +1724,7 @@ pub fn start_llama_server_with_key(
     //   * 组合式：--mmproj=/path/to/x.enc（flag=path，同一 arg 里）
     // 覆盖 --model/-m/--mmproj/--draft-model，以及任何以 --xxx= 形式夹带
     // .enc 路径的参数。
-    let path_flags = ["--model", "-m", "--mmproj", "--draft-model"];
+    let path_flags = ["--model", "-m", "--mmproj", "--model-draft"];
     let mut decrypted_args: Vec<String> = args.to_vec();
     decrypted_args.extend(tls_args);
     let mut args: Vec<String> = decrypted_args;
