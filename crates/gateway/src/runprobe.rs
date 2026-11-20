@@ -195,7 +195,22 @@ fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
         // P0 TLS 证书钉扎（2026-11-19）：有本地钉扎证书（{config_dir}/tls/
         // <instance>.crt）时 --cacert 强校验，指纹不符/缺失才降级 --insecure
         // （兼容旧台账——引导链未拉回证书的实例）。
-        let url = format!("https://{host}:{port}{path}");
+        //
+        // 修复（2026-11-20 实测）：证书 CN=llama-server（引导链自签），
+        // --cacert 校验时 curl 同时校验 hostname——URL 用 127.0.0.1 会报
+        // 「certificate subject name 'llama-server' does not match target
+        // host name '127.0.0.1'」(curl 60)，探测恒失败 → run_status 永远
+        // unactive。改为：URL host 用证书 CN（llama-server），--resolve
+        // 把 (llama-server, port) 映射到 127.0.0.1——证书链钉扎与 hostname
+        // 校验同时成立（钉扎保护完整保留）。无钉扎证书时维持 127.0.0.1。
+        let (url, resolve) = if cacert.is_some() {
+            (
+                format!("https://llama-server:{port}{path}"),
+                Some(format!("llama-server:{port}:127.0.0.1")),
+            )
+        } else {
+            (format!("https://{host}:{port}{path}"), None)
+        };
         let mut cmd = std::process::Command::new("curl");
         cmd.arg("--silent")
             .arg("--show-error")
@@ -203,6 +218,9 @@ fn probe_target_of(rec: &DeploymentRecord) -> ProbeTarget {
             .arg("*");
         if let Some(cert) = cacert {
             cmd.arg("--cacert").arg(cert);
+            if let Some(r) = resolve {
+                cmd.arg("--resolve").arg(r);
+            }
         } else {
             cmd.arg("--insecure");
         }
