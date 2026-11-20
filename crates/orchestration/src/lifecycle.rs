@@ -1017,7 +1017,27 @@ impl Orchestrator {
         rec.status = DeploymentStatus::Failed;
         rec.updated_at = mangosteen_core::time::now_unix();
         let msg = format!("实例已被厂商回收/删除（{reason}）——部署自动标记失败，请重新部署");
+        // 幽灵计费防护（2026-11-20 实测）：实例还在 running 时标记部署
+        // failed 后必须停实例，否则用户看到「部署 failed 但实例在计费」。
+        // 实例已被厂商回收时 stop 会失败——容忍（实例不存在=无计费）。
+        let provider = match &rec.plan.origin {
+            ComputeOrigin::Cloud { provider, instance_id } if !provider.trim().is_empty() && !instance_id.trim().is_empty() => {
+                Some((provider.clone(), instance_id.clone()))
+            }
+            _ => None,
+        };
         self.state.save(&state)?;
+        if let Some((provider, instance_id)) = provider {
+            let mut cloud = self.cloud();
+            if let Some(o) = cloud.as_mut() {
+                if let Ok(d) = o.registry().get(&provider) {
+                    match d.stop(&instance_id) {
+                        Ok(_) => eprintln!("[cloud] 部署 {id} 已标记失败，实例 {instance_id} 已同步停机关闭计费"),
+                        Err(e) => eprintln!("[cloud] 部署 {id} 已标记失败；实例 {instance_id} 停机失败（可能已被回收）：{e}"),
+                    }
+                }
+            }
+        }
         eprintln!("[cloud] ⚠ 部署 {id}：{msg}");
         Ok(())
     }

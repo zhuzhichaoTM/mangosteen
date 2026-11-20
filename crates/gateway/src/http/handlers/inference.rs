@@ -365,7 +365,14 @@ pub(crate) fn rebuild_snapshot(
         snapshot.insert(
             model_id.clone(),
             BackendTarget {
-                host: "127.0.0.1".to_string(),
+                // 证书 CN=llama-server（引导链自签），tls 时 URL host 必须
+                // 与之匹配才能过 curl hostname 校验（upstream/relay 已加
+                // --resolve llama-server:port:127.0.0.1 映射回环）。
+                host: if record.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false) {
+                    "llama-server".to_string()
+                } else {
+                    "127.0.0.1".to_string()
+                },
                 port,
                 model_id,
                 origin_label: record.plan.origin.label(),

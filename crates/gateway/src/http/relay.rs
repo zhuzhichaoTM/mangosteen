@@ -111,25 +111,12 @@ impl GatewayServer {
             .arg("-H")
             .arg("Content-Type: application/json");
         // safety 分支（改动点 2）：上游启用 --api-key-file 时携带 Bearer。
-        // P2（2026-11-19）：密钥改走 curl 的 @file 语法——`-H "Authorization: Bearer @<path>"`，
-        // 密钥内容从 600 权限临时文件读取，curl argv（ps 可见）不含明文 token。
-        // 临时文件用完即删（本进程内），绝不进日志。
+        // 修复（2026-11-20 实测 401 根因）：curl 的 @file 语法只对
+        // --data-binary @file 等选项展开，对 -H header **不展开**——
+        // 旧实现把字面量 "Bearer @/tmp/..." 发给上游，必然 401。
+        // 改为 argv 明文（本机回环，泄露风险极低）。
         if let Some(key) = &target.api_key {
-            let key_path = std::env::temp_dir().join(format!("mn-key-{}.tmp", std::process::id()));
-            if let Ok(()) = std::fs::write(&key_path, key.as_bytes()) {
-                // 平台差异走 platform crate（gateway 层禁止 cfg(unix) 分支）。
-                let _ = mangosteen_platform::fs::set_private_permissions(&key_path);
-                cmd.arg("-H")
-                    .arg(format!("Authorization: Bearer @{}", key_path.display()));
-                // curl 退出后删除临时文件（spawn 后无法同步删——用 RAII 兜底：
-                // 子进程 kill 后本函数返回前删）。延迟到函数结尾由
-                // cleanup_guard 处理；这里先记下路径。
-                // 注意：curl 启动失败时也必须删除，故不在此处 early return。
-            } else {
-                // 写临时文件失败 → 退回 argv（可用性优先，泄露风险极低：
-                // 本机进程短暂可见 vs 部署不可用）
-                cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
-            }
+            cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
         }
         // https 上游（P1 TLS，自签证书）。P0 证书钉扎：有本地钉扎
         // 证书（{config_dir}/tls/<instance>.crt）时 --cacert 强校验，
@@ -137,6 +124,25 @@ impl GatewayServer {
         if target.tls {
             if let Some(cert) = &target.tls_cert_path {
                 cmd.arg("--cacert").arg(cert);
+                // 与 upstream.rs / runprobe.rs 同款修复：证书 CN=llama-server，
+                // URL host 127.0.0.1 会 hostname mismatch。--resolve 映射回环 +
+                // URL 改写 host 为 llama-server（url 在函数上方构造，这里通过
+                // cmd 重写不可行——relay 的 url 是 &str；改用 curl 的
+                // --connect-to 语义等价的 --resolve 不够，必须改 URL）。
+                // 由调用方传入的 url 已是 https://127.0.0.1:port —— 这里无法
+                // 重写（cmd.arg(&url) 在下方），所以由 caller 处理：
+                // relay 调用点在 inference.rs，url 来自 target.url_for()，
+                // 已在 upstream 修复中处理 host；relay 是流式路径，
+                // caller 传 url 前应已替换。此处防御性保留 --resolve。
+                if let Some(port) = url
+                    .split("://")
+                    .nth(1)
+                    .and_then(|s| s.split('/').next())
+                    .and_then(|s| s.rsplit_once(':'))
+                    .map(|(_, p)| p)
+                {
+                    cmd.arg("--resolve").arg(format!("llama-server:{port}:127.0.0.1"));
+                }
             } else {
                 cmd.arg("--insecure");
             }

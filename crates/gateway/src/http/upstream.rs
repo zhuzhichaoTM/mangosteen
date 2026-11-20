@@ -73,6 +73,21 @@ pub fn http_post_json_with_key_tls(
             .arg("*");
         if let Some(cert) = cacert {
             cmd.arg("--cacert").arg(cert);
+            // 修复（2026-11-20 实测）：与 runprobe.rs 同款——证书 CN=llama-server
+            // （引导链自签），--cacert 校验时 curl 同时校验 hostname，URL 用
+            // 127.0.0.1 会报 curl(60) 'subject name llama-server does not match
+            // target host name 127.0.0.1'，推理转发全挂（UI 对话报网络操作失败）。
+            // 从 URL 解析 port，--resolve llama-server:port:127.0.0.1 映射。
+            if let Some(port) = url
+                .split("://")
+                .nth(1)
+                .and_then(|s| s.split('/').next())
+                .and_then(|s| s.rsplit_once(':'))
+                .map(|(_, p)| p)
+            {
+                cmd.arg("--resolve").arg(format!("llama-server:{port}:127.0.0.1"));
+            }
+
         } else {
             cmd.arg("--insecure");
         }
@@ -92,17 +107,11 @@ pub fn http_post_json_with_key_tls(
         // @file 语法（临时 600 文件），argv/ps 不含明文 token，用完即删。
         // 写临时文件失败才退回 argv（可用性优先）。
         if let Some(key) = api_key {
-            let key_path = std::env::temp_dir().join(format!("mn-key-up-{}.tmp", std::process::id()));
-            match std::fs::write(&key_path, key.as_bytes()) {
-                Ok(()) => {
-                    let _ = mangosteen_platform::fs::set_private_permissions(&key_path);
-                    cmd.arg("-H")
-                        .arg(format!("Authorization: Bearer @{}", key_path.display()));
-                }
-                Err(_) => {
-                    cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
-                }
-            }
+            // 修复（2026-11-20 实测 401 根因）：curl 的 @file 语法只对
+            // --data-binary @file 等选项展开，对 -H header **不展开**——
+            // 旧实现 Authorization: Bearer @/tmp/... 是把字面量发给上游，
+            // 必然 401。改为 argv 明文（本机回环 + 600 权限环境，风险可接受）。
+            cmd.arg("-H").arg(format!("Authorization: Bearer {key}"));
         }
         use std::io::Write as _;
         let mut child = cmd
