@@ -45,6 +45,15 @@ const LOGIN_HTML: &str = r#"<!DOCTYPE html>
 <div id="err"></div>
 <div class="hint">API Key 查看：<code>mangosteen status</code> 或配置文件 gateway.key</div>
 <script>
+// 一键登录（2026-11-20 普通用户友好）：URL 带 ?token=xxx 时自动写入
+// localStorage 并直接刷新进控制台（CLI `ui start` 打印的链接即此格式），
+// 用户无需手动输入 API Key。
+(function () {
+  try {
+    var t = new URLSearchParams(location.search).get('token');
+    if (t) { localStorage.setItem('gw_token', t); location.replace('/'); }
+  } catch (e) {}
+})();
 document.getElementById('f').addEventListener('submit', async function (ev) {
   ev.preventDefault();
   var err = document.getElementById('err');

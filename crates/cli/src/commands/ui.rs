@@ -170,6 +170,27 @@ fn start_background(args: &Args) -> MnResult<i32> {
                 let _ = fs::write(&pid_path, child.id().to_string());
             }
             output::print_success(&format!("UI/API 网关已启动：http://127.0.0.1:{port}"));
+            // 便捷访问（普通用户友好）：鉴权开启时读 gateway.key，
+            // 打印带 token 的一键登录地址（前端 initGatewayToken 会
+            // 自动写入 localStorage，无需手动输入）。
+            let gw_for_key = crate::commands::build_gateway(&args).ok();
+            if let Some(gw) = gw_for_key {
+                if gw.config().gateway.require_api_key {
+                    let key = gw
+                        .config()
+                        .gateway
+                        .api_key
+                        .resolve(mangosteen_platform::paths::real_env)
+                        .unwrap_or_default();
+                    if !key.is_empty() {
+                        println!();
+                        output::print_info(&format!(
+                            "一键登录（已带 Key，直接点开即用）：http://127.0.0.1:{port}/?token={key}"
+                        ));
+                        println!();
+                    }
+                }
+            }
             return Ok(0);
         }
         if let Ok(Some(_)) = child.try_wait() {
@@ -451,11 +472,19 @@ pub fn run(args: Args) -> MnResult<i32> {
     // 打开浏览器放在服务开始接受连接之前：listen 已 bind，端口一定可用，
     // 浏览器不会遇到「连接被拒」。
     if !args.has("no-open") {
-        match open_browser(&url) {
+        // 便捷访问：鉴权开启时把 key 拼进 URL（?token=xxx），浏览器
+        // 打开即自动登录（前端 initGatewayToken 写入 localStorage）。
+        // 未开鉴权或 key 为空则退回裸 URL。
+        let open_url = if require_key && !api_key.is_empty() {
+            format!("{url}?token={api_key}")
+        } else {
+            url.clone()
+        };
+        match open_browser(&open_url) {
             Ok(()) => {}
             Err(e) => {
                 // 打不开浏览器不是致命错误：用户可手工粘贴地址
-                output::print_warning(&format!("无法自动打开浏览器（{e}）。请手工访问：{url}"));
+                output::print_warning(&format!("无法自动打开浏览器（{e}）。请手工访问：{open_url}"));
             }
         }
     }
