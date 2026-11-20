@@ -2100,10 +2100,12 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
       });
       box.appendChild(list); const foot = el("div", "row"); const cancel = el("button", "", "取消"); const ok = el("button", "primary", "确认节点"); ok.disabled = usable.length === 0; list.onclick = () => { ok.disabled = !selected; };
       if (!usable.length) box.appendChild(el("div", "banner err", "实时接口未返回空闲可部署节点：" + cands.map(x => (x.gpu_model || "?") + "（" + availability(x).reason + "）").join("；")));
-      // 自动选点：与 CLI `mangosteen deploy <model>`（不带 --gpu-model）行为一致——
-      // 后端按价格/延迟/库存/硬件四维打分自动挑最优节点，用户无需手动选。
-      $("gpu-auto-pick").onclick = () => { box.remove(); resolve("__AUTO__"); };
       cancel.onclick = () => { box.remove(); resolve(null); }; ok.onclick = () => { box.remove(); resolve(selected); }; foot.append(cancel, ok); box.appendChild(foot); $("dp-chain").appendChild(box);
+      // 自动选点：必须在 box 进 DOM 之后再绑定——$() 是 getElementById，
+      // box 未进文档时查不到按钮会抛 TypeError，导致 Promise 永远 pending、
+      // begin() 卡死（「节点选择卡住」的根因，2026-11-20 实测定位）。
+      const autoPick = $("gpu-auto-pick");
+      if (autoPick) autoPick.onclick = () => { box.remove(); resolve("__AUTO__"); };
     });
   }
 
