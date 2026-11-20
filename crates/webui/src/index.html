@@ -1981,7 +1981,12 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
     // 只传槽位名（mode1）后端拿不到配置内容，只能退回按模型名硬编码——
     // 那正是「选 Uncensored 却下载 default 权重」的根因。
     const tplText = templateText(mdef.id, template);
-    const pv = await api("/api/preview", {method:"POST", body:JSON.stringify({model:model ? model.id : mdef.id, model_id:mdef.id, target:"cloud", config_template:template, config_template_text:tplText})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
+    // timeoutMs 放宽到 30s（2026-11-20 实测根因）：preview 要查厂商
+    // 实时库存，实测耗时 15-16s > 默认 API_TIMEOUT(10s)，浏览器会
+    // AbortController abort → pv 落 catch 空对象 → candidates 为空 →
+    // 误报「实时接口未返回空闲可部署节点」。服务端仍返回 200（audit
+    // 可见），但浏览器已放弃。
+    const pv = await api("/api/preview", {method:"POST", timeoutMs: 30000, body:JSON.stringify({model:model ? model.id : mdef.id, model_id:mdef.id, target:"cloud", config_template:template, config_template_text:tplText})}).catch(e => ({cloud_error:e.message, cloud_candidates:[], devices:[]}));
     console.log("DEBUG: pv response:", pv);
     renderChain(1, "模型评估完成 → 云端搜索中，请选择可用节点后继续");
     const saved = (pv.devices || []).map(d => ({
