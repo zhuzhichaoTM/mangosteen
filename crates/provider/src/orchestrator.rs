@@ -2542,11 +2542,36 @@ impl CloudOrchestrator {
             // Running 唯一有效的处置。
             // start 结果处理同 GPU 匹配分支：状态赋回 instance，避免
             // wait_until_running 重复 start 撞 226619 限频。
+            //
+            // 账户类错误（欠费/未支付订单/库存不足）：重试 600s 必然
+            // 再失败——立即失败并提示用户处理，不空等（2026-11-21 实测：
+            // 226604 无库存时每 30s 重试一轮、连撞 226619 限频，600s 后
+            // 报 start_timeout 掩盖真实原因）。
             match driver.start(&instance.id) {
                 Ok(fresh) => {
                     instance = fresh;
                 }
                 Err(e) => {
+                    if let MnError::Provider { code, .. } = &e {
+                        let non_retryable = matches!(
+                            code.as_str(),
+                            "226601" |  // 欠费
+                            "226602" |  // 过期
+                            "226604" |  // 无库存
+                            "226606" |  // 未实名
+                            "8919"     // 未支付订单
+                        );
+                        if non_retryable {
+                            return Err(MnError::Provider {
+                                provider: provider.clone(),
+                                code: code.clone(),
+                                message: format!(
+                                    "实例 {} 启动失败（{}，重试无效）：{}。请处理账户/库存问题后重试。",
+                                    instance.id, code, e
+                                ),
+                            });
+                        }
+                    }
                     eprintln!("[cloud] ⚠ 实例 {} 启动指令失败：{e}", instance.id);
                 }
             }
@@ -2615,6 +2640,28 @@ impl CloudOrchestrator {
                         eprintln!("[cloud] ✓ 实例 {} 启动指令已发送", instance.id);
                     }
                     Err(e) => {
+                        // 账户类/库存类错误快速失败（同 reuse 分支）：
+                        // 重试 600s 必然再失败，立即报真实原因。
+                        if let MnError::Provider { code, .. } = &e {
+                            let non_retryable = matches!(
+                                code.as_str(),
+                                "226601" |  // 欠费
+                                "226602" |  // 过期
+                                "226604" |  // 无库存
+                                "226606" |  // 未实名
+                                "8919"     // 未支付订单
+                            );
+                            if non_retryable {
+                                return Err(MnError::Provider {
+                                    provider: instance.provider.clone(),
+                                    code: code.clone(),
+                                    message: format!(
+                                        "实例 {} 启动失败（{}，重试无效）：{}。请处理账户/库存问题后重试。",
+                                        instance.id, code, e
+                                    ),
+                                });
+                            }
+                        }
                         eprintln!("[cloud] ⚠ 实例 {} 启动指令失败：{e}", instance.id);
                     }
                 }
