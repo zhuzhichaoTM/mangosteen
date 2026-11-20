@@ -169,17 +169,19 @@ impl Scheduler {
         use std::sync::atomic::Ordering;
         let reserved = self.reserved.lock().map(|v| v.clone()).unwrap_or_default();
         let span = self.config_port_span().max(1);
-        let start_offset = self.next_port_offset.fetch_add(1, Ordering::Relaxed);
+        let base = self.local_port_base();
 
+        // 优先从区间起点扫描，找最小可用端口（端口回收：已释放的端口优先复用）。
+        // 这样已释放端口（如 stop/失败后的 11435）不会被长期浪费，新部署
+        // 会优先复用较小的端口，避免端口号无端递增（11435→11441 等问题）。
         for i in 0..span {
-            let port = self.local_port_base() + ((start_offset.wrapping_add(i)) % span) as u16;
+            let port = base + (i % span) as u16;
             if reserved.contains(&port) {
                 continue;
             }
             if !mangosteen_platform::process::is_port_bindable(port) {
                 continue;
             }
-            // 记入预留，防止同一进程内连续分配撞车
             if let Ok(mut v) = self.reserved.lock() {
                 if !v.contains(&port) {
                     v.push(port);
@@ -187,7 +189,25 @@ impl Scheduler {
             }
             return port;
         }
-        self.local_port_base()
+
+        // 区间耗尽，退回轮转（保持原有兜底行为）。
+        let start_offset = self.next_port_offset.fetch_add(1, Ordering::Relaxed);
+        for i in 0..span {
+            let port = base + ((start_offset.wrapping_add(i)) % span) as u16;
+            if reserved.contains(&port) {
+                continue;
+            }
+            if !mangosteen_platform::process::is_port_bindable(port) {
+                continue;
+            }
+            if let Ok(mut v) = self.reserved.lock() {
+                if !v.contains(&port) {
+                    v.push(port);
+                }
+            }
+            return port;
+        }
+        base
     }
 
     fn local_port_base(&self) -> u16 {
