@@ -39,9 +39,12 @@ pub enum DeploymentStatus {
 impl DeploymentStatus {
     /// 是否仍占用资源。
     pub fn is_active(self) -> bool {
+        // Failed 纳入 active（2026-11-20 实测）：失败部署的实例可能仍在
+        // 运行/计费，stop --all 与状态查询必须能看到它，否则用户
+        // 「看不见也停不掉」，产生幽灵计费。
         matches!(
             self,
-            DeploymentStatus::Provisioning | DeploymentStatus::Ready
+            DeploymentStatus::Provisioning | DeploymentStatus::Ready | DeploymentStatus::Failed
         )
     }
 

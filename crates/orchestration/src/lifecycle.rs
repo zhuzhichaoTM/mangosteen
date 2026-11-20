@@ -823,10 +823,15 @@ impl Orchestrator {
             .get(id)?
             .ok_or_else(|| MnError::bad_request(format!("部署 `{id}` 不存在")))?;
 
-        // 只能关闭 Ready 状态的部署
-        if record.status != DeploymentStatus::Ready {
+        // 关闭范围（2026-11-20 实测需求）：Ready 与 Failed 都可 stop——
+        // Failed 部署的实例可能还在运行（计费中），必须能关闭避免幽灵计费。
+        // Provisioning（正在创建）不能停：实例还没建好，停了会留下半成品。
+        if !matches!(
+            record.status,
+            DeploymentStatus::Ready | DeploymentStatus::Failed
+        ) {
             return Err(MnError::bad_request(format!(
-                "部署 `{id}` 当前状态为 {}，不能 stop。只有 ready 状态的部署可停止",
+                "部署 `{id}` 当前状态为 {}，不能 stop。只有 ready / failed 状态的部署可停止",
                 record.status.as_str()
             )));
         }
