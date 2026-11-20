@@ -551,17 +551,32 @@ impl Orchestrator {
             return Ok(None);
         };
 
+        // provider 回退顺序：origin.provider → cloud.provider（与 stop()
+        // 同一规则）。部署在「实例创建」阶段完成后续步骤时 cloud.provider
+        // 可能为空（实测台账 cloud.provider=''，origin.provider='compshare'），
+        // 直接拿空串查驱动会报「云端驱动 `` 未注册或未启用」——UI 登陆方式
+        // 永远显示「正在向云厂商获取登录信息」（2026-11-20 实测根因）。
+        let provider = match &rec.plan.origin {
+            ComputeOrigin::Cloud { provider, .. } if !provider.trim().is_empty() => {
+                provider.clone()
+            }
+            _ => cloud.provider.clone(),
+        };
+        if provider.trim().is_empty() {
+            return Ok(None);
+        }
+
         let cloud_guard = self.cloud();
         let o = cloud_guard
             .as_ref()
             .ok_or_else(|| MnError::NoViableCandidate {
                 reason: "未配置任何可用的云服务商".to_string(),
             })?;
-        let driver = o.registry().get(&cloud.provider)?;
+        let driver = o.registry().get(&provider)?;
         let inst = driver.describe(&instance_id)?;
         let info = ssh_info_from_instance(
             deployment_id,
-            &cloud.provider,
+            &provider,
             cloud.node_ssh_user.as_deref(),
             &inst,
         );
