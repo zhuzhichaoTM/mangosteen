@@ -898,7 +898,7 @@ function toast(msg, kind) {
 // 请求超时：服务端做网络操作（搜索仓库、抓网页、下载模型）时可能较慢，
 // 但没有超时会让界面永远停在「查询中」。给一个足够宽的上限，
 // 超时后明确报错，用户可重试——比无限转圈诚实。
-const API_TIMEOUT = 10000;    // 10 秒：模型元数据查询与网页抓取（避免失败时卡死）
+const API_TIMEOUT = 30000;    // 30 秒：覆盖部署期间服务端阻塞（SSH/实例创建/模型下载），避免轮询超时
 const PULL_TIMEOUT = 3600000; // 1 小时：覆盖大模型下载
 
 /* ============ P0 网关鉴权：token 注入 ============ */
@@ -1401,7 +1401,7 @@ Tabs.register("chat", (() => {
     unmount() { /* 无常驻定时器；历史保留 */ },
     async refresh() {
       try {
-        const st = await api("/api/status");
+        const st = await api("/api/status", { timeoutMs: 30000 });
         // 模型选择器只列**运行中且就绪**的实例。
         //
         // 为什么不能读 `/v1/models`：那个接口返回的是**已下载**的全部模型，
@@ -1728,8 +1728,8 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
         else { $("dp-detail").hidden = true; $("dp-detail").innerHTML = ""; $("dp-detail-btn").textContent = "详情"; }
       };
     }
-    const r = await api("/api/models").catch(() => ({models:[]}));
-    const d = await api("/api/deployments").catch(() => ({deployments:[]}));
+    const r = await api("/api/models", { timeoutMs: 30000 }).catch(() => ({models:[]}));
+    const d = await api("/api/deployments", { timeoutMs: 30000 }).catch(() => ({deployments:[]}));
     registry = {}; liveMap = {};
     models.forEach((mdef) => {
       registry[mdef.id] = (r.models || []).find(x => String(x.id || "").toLowerCase().includes(mdef.id)) || null;
@@ -2156,7 +2156,7 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
   }
 
   async function waitCancellation(id, startedAt) {
-    const j = await api("/api/models/jobs?id=" + encodeURIComponent(id)).catch(() => null);
+    const j = await api("/api/models/jobs?id=" + encodeURIComponent(id), { timeoutMs: 30000 }).catch(() => null);
     const age = Date.now() - (startedAt || Date.now());
     const cleanupPending = j && j.note && j.note.indexOf("已发出取消请求") >= 0;
     if (j && (cleanupPending || !["cancelled", "failed", "done"].includes(j.state)) && age < 120000) {
@@ -2171,7 +2171,7 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
   async function pollChain() {
     if (!currentJob) return;
     const id = currentJob;
-    const j = await api("/api/models/jobs?id=" + encodeURIComponent(id)).catch(() => null);
+    const j = await api("/api/models/jobs?id=" + encodeURIComponent(id), { timeoutMs: 30000 }).catch(() => null);
     window.__currentDeployJob = j;
     renderStageTrail(j);
     if (!j) {
@@ -2651,7 +2651,7 @@ Tabs.register("setting", (() => {
 
 async function pollStatus() {
   try {
-    const st = await api("/api/status");
+    const st = await api("/api/status", { timeoutMs: 30000 });
     const active = (st.active || []).filter((a) => a.ready);
     const dot = $("st-dot"), txt = $("st-text");
     if (active.length) {
