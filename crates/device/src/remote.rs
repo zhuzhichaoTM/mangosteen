@@ -1714,61 +1714,94 @@ pub fn start_llama_server_with_key(
             Vec::new()
         }
     };
-    // P2 模型静态解密（2026-11-18）：args 里 --model/-m 指向 .enc 加密
-    // 文件时，解密到 /dev/shm（tmpfs 内存盘）并把 -m 指向明文副本。
+    // P2 模型静态解密（2026-11-18）：args 里指向 .enc 加密文件的路径参数
+    // 都需解密到 /dev/shm（tmpfs 内存盘），并把 arg 指向明文副本。
     // 解密失败返回 Err（启动失败快照里能看到原因）；.enc 不存在（明文
     // 部署/加密跳过）时 args 原样透传。
+    //
+    // 支持两种参数形态：
+    //   * 分离式：--mmproj /path/to/x.enc（flag + 紧跟的 path arg）
+    //   * 组合式：--mmproj=/path/to/x.enc（flag=path，同一 arg 里）
+    // 覆盖 --model/-m/--mmproj/--draft-model，以及任何以 --xxx= 形式夹带
+    // .enc 路径的参数。
+    let path_flags = ["--model", "-m", "--mmproj", "--draft-model"];
     let mut decrypted_args: Vec<String> = args.to_vec();
     decrypted_args.extend(tls_args);
     let mut args: Vec<String> = decrypted_args;
-    {
-        let model_arg = args.iter().position(|a| a == "--model" || a == "-m");
-        if let Some(pos) = model_arg {
-            if let Some(model_path) = args.get(pos + 1).cloned() {
-                if model_path.ends_with(".enc") {
-                    let key_path = "/home/deploy/mangosteen/tls/.model_key";
-                    let plain = format!(
-                        "/dev/shm/mangosteen-models/{}",
-                        model_path.rsplit('/').next().unwrap_or("model.gguf")
-                    );
-                    // P1-4 运行时完整性（2026-11-19）：解密前比对密文
-                    // SHA256 基线（{enc}.sha256，加密时写入）——防磁盘
-                    // 位翻转/实例存活期间的恶意篡改。基线缺失（旧实例）
-                    // 跳过校验（兼容），校验失败拒启动（exit 3）。
-                    let dec_cmd = format!(
-                        "mkdir -p /dev/shm/mangosteen-models; \
-                         if [ ! -s {q_plain} ]; then \
-                           if [ -f {q_enc}.sha256 ]; then \
-                             MKEY=\"$(cat {q_key})\"; \
-                             echo \"$(openssl dgst -sha256 -hmac \"$MKEY\" {q_enc} | awk '{{print $2}}')\" | \
-                               grep -qx \"$(cat {q_enc}.sha256)\" || \
-                               {{ echo \"模型密文完整性校验失败（{dest} 疑似损坏或被篡改），拒绝解密\" >&2; exit 3; }}; \
-                           fi; \
-                           openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 \
-                             -in {q_enc} -out {q_plain} -pass file:{q_key} || exit 1; \
-                         fi; echo decrypted-ok",
-                        q_plain = shell_quote(&plain),
-                        q_enc = shell_quote(&model_path),
-                        q_key = shell_quote(key_path),
-                        dest = model_path,
-                    );
-                    let dec = ssh_exec(target, &dec_cmd, 600).map_err(|e| {
-                        MnError::Network {
-                            stage: "模型解密".to_string(),
-                            reason: format!("加密模型解密失败：{e}"),
-                        }
-                    })?;
-                    if !dec.contains("decrypted-ok") {
-                        return Err(MnError::Network {
-                            stage: "模型解密".to_string(),
-                            reason: format!("解密命令未确认成功：{dec}"),
-                        });
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let (flag, value) = if path_flags.contains(&arg.as_str()) {
+            // 分离式：flag 跟一个 path 值
+            let value = args.get(i + 1).cloned();
+            (arg.clone(), value)
+        } else if let Some((f, v)) = arg.split_once('=') {
+            // 组合式：--xxx=value
+            if path_flags.contains(&f) {
+                (arg.clone(), Some(v.to_string()))
+            } else {
+                i += 1;
+                continue;
+            }
+        } else {
+            i += 1;
+            continue;
+        };
+        if let Some(path) = value {
+            if path.ends_with(".enc") {
+                let key_path = "/home/deploy/mangosteen/tls/.model_key";
+                let plain = format!(
+                    "/dev/shm/mangosteen-models/{}",
+                    path.rsplit('/').next().unwrap_or("model.gguf")
+                );
+                // P1-4 运行时完整性（2026-11-19）：解密前比对密文
+                // SHA256 基线（{enc}.sha256，加密时写入）——防磁盘
+                // 位翻转/实例存活期间的恶意篡改。基线缺失（旧实例）
+                // 跳过校验（兼容），校验失败拒启动（exit 3）。
+                let dec_cmd = format!(
+                    "mkdir -p /dev/shm/mangosteen-models; \
+                     if [ ! -s {q_plain} ]; then \
+                       if [ -f {q_enc}.sha256 ]; then \
+                         MKEY=\"$(cat {q_key})\"; \
+                         echo \"$(openssl dgst -sha256 -hmac \"$MKEY\" {q_enc} | awk '{{print $2}}')\" | \
+                           grep -qx \"$(cat {q_enc}.sha256)\" || \
+                           {{ echo \"模型密文完整性校验失败（{dest} 疑似损坏或被篡改），拒绝解密\" >&2; exit 3; }}; \
+                       fi; \
+                       openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 \
+                         -in {q_enc} -out {q_plain} -pass file:{q_key} || exit 1; \
+                     fi; echo decrypted-ok",
+                    q_plain = shell_quote(&plain),
+                    q_enc = shell_quote(&path),
+                    q_key = shell_quote(key_path),
+                    dest = path,
+                );
+                let dec = ssh_exec(target, &dec_cmd, 600).map_err(|e| {
+                    MnError::Network {
+                        stage: "模型解密".to_string(),
+                        reason: format!("加密模型解密失败：{e}"),
                     }
-                    // args 里的 .enc 路径替换为 /dev/shm 明文路径
-                    args[pos + 1] = plain;
+                })?;
+                if !dec.contains("decrypted-ok") {
+                    return Err(MnError::Network {
+                        stage: "模型解密".to_string(),
+                        reason: format!("解密命令未确认成功：{dec}"),
+                    });
+                }
+                // args 里的 .enc 路径替换为 /dev/shm 明文路径
+                match flag.as_str() {
+                    f if path_flags.contains(&f) => {
+                        if i + 1 < args.len() {
+                            args[i + 1] = plain;
+                        }
+                    }
+                    _ => {
+                        // 组合式 --xxx=path
+                        args[i] = format!("{}={}", flag.split_once('=').unwrap().0, plain);
+                    }
                 }
             }
         }
+        i += 1;
     }
     let args: &[String] = &args;
     let log = match port_from_args(args) {
