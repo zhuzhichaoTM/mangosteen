@@ -151,7 +151,15 @@ impl GatewayServer {
                 status: 200,
                 content_type: "text/html; charset=utf-8".to_string(),
                 body: mangosteen_webui::INDEX_HTML.as_bytes().to_vec(),
-                headers: Vec::new(),
+                // P1-3 修复（2026-11-20 实测）：控制台页面有 67KB 内联
+                // <script>（UI 全部逻辑），to_bytes 全局严格 CSP
+                //（script-src 'self'）会拦截内联 JS——页面显示但所有
+                // 按钮/轮询/模型加载全部失效（表现为模型下拉永远
+                // “加载中”）。与登录页同款：自定义宽松 CSP 覆盖全局。
+                headers: vec![(
+                    "Content-Security-Policy".to_string(),
+                    "default-src 'self'; script-src 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'".to_string(),
+                )],
             };
         }
 

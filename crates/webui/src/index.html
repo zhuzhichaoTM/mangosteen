@@ -898,7 +898,7 @@ function toast(msg, kind) {
 // 请求超时：服务端做网络操作（搜索仓库、抓网页、下载模型）时可能较慢，
 // 但没有超时会让界面永远停在「查询中」。给一个足够宽的上限，
 // 超时后明确报错，用户可重试——比无限转圈诚实。
-const API_TIMEOUT = 180000;   // 3 分钟：覆盖模型元数据查询与网页抓取
+const API_TIMEOUT = 10000;    // 10 秒：模型元数据查询与网页抓取（避免失败时卡死）
 const PULL_TIMEOUT = 3600000; // 1 小时：覆盖大模型下载
 
 /* ============ P0 网关鉴权：token 注入 ============ */
@@ -1457,7 +1457,15 @@ Tabs.register("chat", (() => {
 
         // 生成中按钮保持停止图标且可点击；空闲时按模型就绪状态禁用。
         setSendButtonState(streaming);
-      } catch (e) { /* 轮询失败静默 */ }
+      } catch (e) {
+        // 轮询失败：把模型下拉改为明确的错误提示（避免永远“加载中”）
+        const sel = $("chat-model");
+        if (sel && sel.options.length === 1 && sel.options[0].textContent.includes("加载中")) {
+          sel.options[0].textContent = "（加载失败，可刷新页面重试）";
+          sel.disabled = true;
+          sel.title = "获取模型列表失败：" + (e && e.message ? e.message : String(e));
+        }
+        throw e;
     },
   };
 })());
