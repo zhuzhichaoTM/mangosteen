@@ -575,13 +575,35 @@ impl Orchestrator {
                 }
             };
             // 下载/加密的真实结果路径（P2：加密成功时为 .enc）。
-            let downloaded = mangosteen_provider::orchestrator::download_model_node(
+            // 辅助模型（mmproj/MTP 等）下载失败不阻断部署：多模态投影与
+            // 投机解码对纯文本推理不是必须的，失败时只记警告并跳过，
+            // 主模型就绪后即可正常对话（2026-11-20 实测：mmproj-BF16.gguf
+            // 不存在于 unsloth/Qwen3.8-27B-GGUF 仓库，导致 default 模板
+            // 部署失败；修复后辅助文件缺失不再卡死部署）。
+            let is_aux = path != main_model_path;
+            let downloaded = match mangosteen_provider::orchestrator::download_model_node(
                 &ssh,
                 &file_plan,
                 hf_token.as_deref(),
                 Some(&staged),
                 None,
-            )?;
+            ) {
+                Ok(d) => d,
+                Err(e) if is_aux => {
+                    sink(
+                        DeployStage::Downloading,
+                        StageOutcome::Skipped,
+                        format!(
+                            "[{}/{total}] 辅助模型 {name} 下载失败，已跳过（纯文本推理不受影响）：{e}",
+                            i + 1,
+                            name = name,
+                            e = e
+                        ),
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             // 主模型路径回写：加密后（.enc）必须替换 cloud_plan.model_path
             // 与 engine.model_path——启动前检查（commit_cloud_inner）与
             // launch_config 读的是 engine.model_path，只回写顶层字段会
@@ -589,6 +611,32 @@ impl Orchestrator {
             if path == main_model_path {
                 cloud_plan.model_path = downloaded.clone();
                 cloud_plan.engine.model_path = downloaded;
+            } else {
+                // 辅助文件（mmproj/MTP）路径回写：加密后（.enc）必须替换
+                // cloud_plan.mmproj_path / draft_model_path 与 engine 对应字段——
+                // 启动命令读的是这些字段，若仍是明文路径（明文已删），
+                // llama-server 报 failed to open GGUF file 而退出
+                //（2026-11-20 实测：Qwen3.8-27B default 的 MTP 启动失败根因）。
+                if let Some(mmproj) = cloud_plan.mmproj_path.as_mut() {
+                    if path == *mmproj {
+                        *mmproj = downloaded.clone();
+                    }
+                }
+                if let Some(draft) = cloud_plan.draft_model_path.as_mut() {
+                    if path == *draft {
+                        *draft = downloaded.clone();
+                    }
+                }
+                if let Some(mmproj) = cloud_plan.engine.mmproj_path.as_mut() {
+                    if path == *mmproj {
+                        *mmproj = downloaded.clone();
+                    }
+                }
+                if let Some(draft) = cloud_plan.engine.draft_model_path.as_mut() {
+                    if path == *draft {
+                        *draft = downloaded.clone();
+                    }
+                }
             }
             let size = mangosteen_device::remote::remote_file_size(ssh, &path)?;
             sink(
@@ -602,21 +650,14 @@ impl Orchestrator {
             );
         }
 
-        // 终检：不读 `.download.ok`，也不信任务表状态，只看远端真实文件。
-        // 任一文件缺失/为空都禁止进入模型加载。
-        for path in std::iter::once(cloud_plan.model_path.clone()).chain(
-            cloud_plan
-                .auxiliary_downloads
-                .iter()
-                .map(|a| a.path.clone()),
-        ) {
-            let size = mangosteen_device::remote::remote_file_size(ssh, &path)?;
-            if size == 0 {
-                return Err(MnError::Network {
-                    stage: "模型下载".to_string(),
-                    reason: format!("模板声明的远端模型文件不存在或为空：{path}"),
-                });
-            }
+        // 终检：只检查主模型文件。辅助文件（mmproj/MTP）下载失败已
+        // 在上方跳过并记警告，不应再阻断部署（纯文本推理不依赖它们）。
+        let size = mangosteen_device::remote::remote_file_size(ssh, &cloud_plan.model_path)?;
+        if size == 0 {
+            return Err(MnError::Network {
+                stage: "模型下载".to_string(),
+                reason: format!("主模型文件不存在或为空：{}", cloud_plan.model_path),
+            });
         }
         sink(
             DeployStage::Downloading,
