@@ -1664,7 +1664,11 @@ pub fn start_llama_server_with_key(
         let key = key.to_string();
         ssh_exec_with_stdin(
             target,
-            &format!("umask 077; mkdir -p {workdir}; cat > {api_key_file}"),
+            &format!(
+                "umask 077; mkdir -p {}; cat > {}",
+                shell_quote(workdir),
+                shell_quote(&api_key_file)
+            ),
             key.into_bytes(),
             30,
         )?;
@@ -2331,8 +2335,12 @@ fn build_stop_script(workdir: &str, port: Option<u16>) -> String {
         None => "! pgrep -x llama-server >/dev/null 2>&1".to_string(),
     };
     let cleanup = match port {
-        Some(_) => format!("rm -f {pid_path}"),
-        None => format!("rm -f {workdir}/llama-server.pid {workdir}/llama-server-*.pid"),
+        Some(_) => format!("rm -f {}", shell_quote(&pid_path)),
+        None => format!(
+            "rm -f {} {}",
+            shell_quote(&format!("{workdir}/llama-server.pid")),
+            shell_quote(&format!("{workdir}/llama-server-*.pid"))
+        ),
     };
     stop_script(&term_all, &kill_all, &scope_check, &cleanup)
 }
@@ -2688,7 +2696,7 @@ fn download_single_url(
 
     loop {
         if should_cancel.map(|check| check()).unwrap_or(false) {
-            let _ = ssh_exec(target, &format!("{stop_cmd}; rm -f '{pid_file}'"), 30);
+            let _ = ssh_exec(target, &format!("{stop_cmd}; rm -f {}", shell_quote(&pid_file)), 30);
             return Err(MnError::Cancelled {
                 stage: "云端模型下载".to_string(),
             });
@@ -2799,7 +2807,7 @@ fn download_single_url(
             size_at_last_attempt = size;
 
             if stalled_attempts >= MAX_STALLED_ATTEMPTS {
-                let tail = ssh_exec(target, &format!("tail -5 '{log}' 2>/dev/null"), 60)
+                let tail = ssh_exec(target, &format!("tail -5 {} 2>/dev/null", shell_quote(&log)), 60)
                     .unwrap_or_default();
                 return Err(MnError::Network {
                     stage: "云端下载模型".to_string(),
@@ -2823,9 +2831,9 @@ fn download_single_url(
                     // 进程 + 删 .download.sh（含 CDN 签名 URL）/ .download.pid
                     // / .download.log。.part 断点文件保留（恢复后可从断点
                     // 续传），脚本与日志（URL 泄露面）必须删。
-                    let tail = ssh_exec(target, &format!("tail -5 '{log}' 2>/dev/null"), 60)
+                    let tail = ssh_exec(target, &format!("tail -5 {} 2>/dev/null", shell_quote(&log)), 60)
                         .unwrap_or_default();
-                    let _ = ssh_exec(target, &format!("{stop_cmd}; rm -f '{script_path}' '{pid_file}' '{log}'"), 30);
+                    let _ = ssh_exec(target, &format!("{stop_cmd}; rm -f {} {} {}", shell_quote(&script_path), shell_quote(&pid_file), shell_quote(&log)), 30);
                     let total_attempts = MAX_ROUNDS * ATTEMPTS_PER_ROUND;
                     return Err(MnError::Network {
                         stage: "云端下载模型".to_string(),
@@ -3036,6 +3044,31 @@ pub fn remote_file_is_gguf(target: &SshTarget, path: &str) -> MnResult<bool> {
     )?;
     // "GGUF" 的十六进制是 47475546
     Ok(out.trim().eq_ignore_ascii_case("47475546"))
+}
+
+/// 读取远端 GGUF 文件的 `general.architecture` 字段。
+///
+/// GGUF 头部元数据区包含 `general.architecture` 键（如 `qwen2`/`qwen3`/
+/// `llama`），其值以字符串形式紧跟在键名后。用 `strings` + `grep -A1`
+/// 提取——比完整 GGUF 解析轻量，适合远端 shell 场景。
+///
+/// 返回 `Some("qwen3")` 或 `None`（文件不存在/非 GGUF/无 architecture 字段）。
+pub fn remote_file_gguf_architecture(target: &SshTarget, path: &str) -> MnResult<Option<String>> {
+    let out = ssh_exec(
+        target,
+        &format!(
+            "if [ -f '{path}' ]; then \
+               head -c 8192 '{path}' 2>/dev/null | strings | grep -A1 '^general\\.architecture$' | tail -1; \
+             fi"
+        ),
+        60,
+    )?;
+    let arch = out.trim().to_string();
+    if arch.is_empty() || arch == "missing" {
+        Ok(None)
+    } else {
+        Ok(Some(arch))
+    }
 }
 
 #[cfg(test)]

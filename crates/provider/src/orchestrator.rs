@@ -3250,6 +3250,29 @@ pub fn download_model_node(
         });
     }
 
+    // 架构校验（2026-11-21 安全加固）：GGUF 魔数正确不代表架构正确——
+    // 错误架构的模型（如 qwen2 当 qwen3 加载）启动失败或行为异常。
+    // 从 model_id 推导期望架构，与 GGUF 头部 general.architecture 比对。
+    let expected_arch = expected_architecture_for_model(&plan.model_path);
+    if let Some(expected) = expected_arch {
+        if let Some(actual) =
+            mangosteen_device::remote::remote_file_gguf_architecture(target, remote_model)?
+        {
+            if actual != expected {
+                return Err(MnError::Network {
+                    stage: "云端下载模型".to_string(),
+                    reason: format!(
+                        "模型架构不匹配：期望 {expected}，实际 {actual}（{remote_model}）。\
+                         请检查下载地址是否指向正确的模型文件"
+                    ),
+                });
+            }
+            eprintln!("[cloud] ✓ 模型架构校验通过：{actual}");
+        }
+        // actual == None（无法读取 architecture）：跳过校验，不阻断部署
+        // （部分 GGUF 可能无 architecture 字段，魔数校验已兜底）。
+    }
+
     // P2 静态加密（2026-11-18 用户裁决）：明文 GGUF → AES-256 加密 +
     // 删明文 + 标记。密钥在引导链 4d-2 生成（600，deploy 可读）。
     // 加密失败不阻断部署（安全降级：明文保留，llama-server 走明文路径）。
@@ -4350,5 +4373,22 @@ mod tests {
         // 空 specs 会让 collect_candidates 报「都没有返回可用规格」
         let e = o.cheapest(&SelectionConstraints::default()).unwrap_err();
         assert!(!e.to_string().is_empty());
+    }
+}
+
+/// 从模型路径推导期望的 GGUF 架构（2026-11-21 安全加固）。
+///
+/// GGUF 的 `general.architecture` 字段标识模型架构系列（`qwen2`/`qwen3`/
+/// `llama` 等）。从模型文件名推导期望值，与下载文件的 GGUF 头部比对，
+/// 防止下载错误架构的模型。
+fn expected_architecture_for_model(model_path: &str) -> Option<&'static str> {
+    let name = model_path.to_lowercase();
+    if name.contains("qwen3") {
+        Some("qwen3")
+    } else if name.contains("qwen2") {
+        Some("qwen2")
+    } else {
+        // 未知模型不校验（避免误杀新模型）。
+        None
     }
 }

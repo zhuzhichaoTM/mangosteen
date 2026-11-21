@@ -50,10 +50,13 @@ pub struct Askpass {
 
 impl Askpass {
     /// 删除脚本与密码文件。重复调用、文件已不存在都视为成功。
+    ///
+    /// 安全加固（2026-11-21）：用 `shred -u` 安全擦除（覆写后删除），
+    /// 而非 `rm`（仅删目录项，磁盘可能残留）。shred 不可用时回退 rm。
     pub fn cleanup(&self) {
-        let _ = std::fs::remove_file(&self.script);
+        secure_remove(&self.script);
         if let Some(s) = &self.secret {
-            let _ = std::fs::remove_file(s);
+            secure_remove(s);
         }
     }
 
@@ -61,6 +64,17 @@ impl Askpass {
     pub fn script_arg(&self) -> String {
         self.script.display().to_string()
     }
+}
+
+/// 安全删除文件：优先 `shred -u`（覆写 3 轮 + 删除），回退 `rm`。
+fn secure_remove(path: &std::path::Path) {
+    let p = path.display().to_string();
+    let _ = std::process::Command::new("shred")
+        .args(["-u", "-n", "3", &p])
+        .status()
+        .is_ok();
+    // shred 失败（如 macOS 无 shred）时 rm 兜底
+    let _ = std::fs::remove_file(path);
 }
 
 /// 本平台的 ssh 可执行文件名（Windows 需要 `.exe`）。
@@ -118,46 +132,32 @@ pub fn write_askpass(tag: &str, password: Option<&str>) -> MnResult<Option<Askpa
     };
 
     let dir = std::env::temp_dir();
-    // 密码 sidecar：内容就是密码原文，不加换行——脚本负责补换行。
-    let secret = dir.join(format!("mn-askpass-{tag}.secret"));
-    std::fs::write(&secret, pw.as_bytes())
-        .map_err(|e| MnError::io(format!("写入 askpass 密码文件 {}", secret.display()), &e))?;
-    // sidecar 含明文密码，必须是 0600（Unix）；Windows 继承用户目录 ACL。
-    pfs::set_private_permissions(&secret)?;
-
+    // 安全加固（2026-11-21）：密码直接嵌入脚本（不再单独写 .secret 文件），
+    // 减少明文落盘文件数（2→1）。脚本 0700，cleanup 用 shred -u 安全擦除。
     let (script_path, body) = if cfg!(target_os = "windows") {
-        // Windows：批处理逐行输出。`type` 会把文件内容原样吐出；
-        // 密码文件末尾没有换行，所以补一个 `echo.` 保证 ssh 读到完整一行
-        // （ssh 读到 EOF 也算结束，这里补换行只是为了行为与 Unix 一致）。
         let p = dir.join(format!("mn-askpass-{tag}.cmd"));
-        let quoted = secret.display().to_string().replace('"', "\"\"");
-        (
-            p,
-            format!("@echo off\r\ntype \"{quoted}\"\r\necho.\r\n"),
-        )
+        // Windows：密码作为 echo 参数嵌入批处理。
+        (p, format!("@echo off\r\necho {}\r\n", pw.replace('"', "\"\"")))
     } else {
-        // Unix：sh 脚本用绝对路径 cat 出密码。/bin/sh 一定存在，不依赖 PATH。
+        // Unix：密码作为 printf 参数嵌入 sh 脚本，用单引号转义防注入。
         let p = dir.join(format!("mn-askpass-{tag}.sh"));
-        let quoted = shell_single_quote(&secret.display().to_string());
-        (p, format!("#!/bin/sh\nexec cat {quoted}\n"))
+        let quoted = shell_single_quote(pw);
+        (p, format!("#!/bin/sh\nprintf '%s\\n' {quoted}\n"))
     };
 
     std::fs::write(&script_path, body.as_bytes()).map_err(|e| {
-        let _ = std::fs::remove_file(&secret);
         MnError::io(
             format!("写入 askpass 脚本 {}", script_path.display()),
             &e,
         )
     })?;
-    // 脚本必须是可执行 + 仅属主可读（0700）；sidecar 已在上面收敛为 0600。
     if let Err(e) = pfs::set_private_permissions(&script_path) {
-        let _ = std::fs::remove_file(&secret);
         return Err(e);
     }
 
     Ok(Some(Askpass {
         script: script_path,
-        secret: Some(secret),
+        secret: None, // 不再单独写 .secret 文件
     }))
 }
 
