@@ -467,18 +467,29 @@ impl Scheduler {
             download_bytes: req.model_download.as_ref().and_then(|d| d.expected_bytes),
             // P0-1（2026-11-19）：模型 SHA256 白名单兜底——ModelDownloadSpec
             // 未带哈希时按文件名内置校验（代理下载场景防投毒的唯一防线）。
-            download_sha256: req
-                .model_download
-                .as_ref()
-                .and_then(|d| d.expected_sha256.clone())
-                .or_else(|| {
-                    let fname = req
-                        .model_download
-                        .as_ref()
-                        .map(|d| d.url.rsplit('/').next().unwrap_or("").to_lowercase())
-                        .unwrap_or_default();
-                    builtin_sha256(&fname)
-                }),
+            // 安全加固（2026-11-21）：自定义模板未配置 sha256 时告警，
+            // 提示用户该下载无供应链校验（内置模板已全量覆盖）。
+            download_sha256: {
+                let sha = req
+                    .model_download
+                    .as_ref()
+                    .and_then(|d| d.expected_sha256.clone())
+                    .or_else(|| {
+                        let fname = req
+                            .model_download
+                            .as_ref()
+                            .map(|d| d.url.rsplit('/').next().unwrap_or("").to_lowercase())
+                            .unwrap_or_default();
+                        builtin_sha256(&fname)
+                    });
+                if sha.is_none() {
+                    eprintln!(
+                        "[cloud] ⚠ 模型下载无 SHA256 校验（自定义模板未配置且非内置白名单），\
+                         供应链防投毒缺失。建议在模板中添加 sha256 字段"
+                    );
+                }
+                sha
+            },
             remote_model: None,
             node_ip: None,
             // 用户在确认弹窗里选定的 GPU 型号；用于下次部署时匹配

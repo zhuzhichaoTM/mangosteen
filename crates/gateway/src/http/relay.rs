@@ -77,6 +77,21 @@ impl GatewayServer {
         let model = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
             .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(String::from));
+        // P2 速率限制（2026-11-21）：流式路径也接入 token bucket，
+        // 防高频流式请求绕过限流。
+        if let Some(m) = &model {
+            if let Err(retry) = self.rate_limiter.lock().unwrap().try_acquire(m) {
+                let payload = mangosteen_core::openai::ErrorResponse::bad_request(
+                    format!("请求过于频繁，请 {retry}s 后重试"),
+                    None,
+                );
+                let mut resp = crate::http::Response::json(429, &payload);
+                resp.headers
+                    .push(("Retry-After".to_string(), retry.to_string()));
+                let _ = client.write_all(&resp.to_bytes());
+                return Ok(());
+            }
+        }
         let target = self.backend_for_model(model.as_deref())?;
         let url = target.url_for(&req.path);
 

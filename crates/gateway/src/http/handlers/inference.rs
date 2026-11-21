@@ -29,6 +29,19 @@ impl GatewayServer {
                 parsed.sampling.max_tokens = Some(m.clamp(1, 4096));
             }
         }
+        // P2 速率限制（2026-11-21）：按模型分桶 token bucket，防成本型 DoS。
+        if let Err(retry) = self.rate_limiter.lock().unwrap().try_acquire(&parsed.model) {
+            let mut resp = Response::json(
+                429,
+                &ErrorResponse::bad_request(
+                    format!("请求过于频繁，请 {retry}s 后重试"),
+                    None,
+                ),
+            );
+            resp.headers
+                .push(("Retry-After".to_string(), retry.to_string()));
+            return resp;
+        }
         let target = match self.backend_for_model(Some(parsed.model.as_str())) {
             Ok(t) => t,
             Err(e) => return Response::error(&e),
@@ -57,6 +70,19 @@ impl GatewayServer {
                     )
                 }
             };
+        // P2 速率限制（2026-11-21）：按模型分桶 token bucket，防成本型 DoS。
+        if let Err(retry) = self.rate_limiter.lock().unwrap().try_acquire(&parsed.model) {
+            let mut resp = Response::json(
+                429,
+                &ErrorResponse::bad_request(
+                    format!("请求过于频繁，请 {retry}s 后重试"),
+                    None,
+                ),
+            );
+            resp.headers
+                .push(("Retry-After".to_string(), retry.to_string()));
+            return resp;
+        }
         let target = match self.backend() {
             Ok(t) => t,
             Err(e) => return Response::error(&e),
@@ -267,6 +293,18 @@ impl GatewayServer {
             );
         }
 
+        // P2 速率限制（2026-11-21）：Anthropic 兼容接口也接入 token bucket。
+        if let Err(retry) = self.rate_limiter.lock().unwrap().try_acquire(&parsed.model) {
+            let mut resp = Response::json(
+                429,
+                &mangosteen_core::anthropic::AnthropicErrorResponse::bad_request(format!(
+                    "请求过于频繁，请 {retry}s 后重试"
+                )),
+            );
+            resp.headers
+                .push(("Retry-After".to_string(), retry.to_string()));
+            return resp;
+        }
         // 选择后端
         let target = match self.backend_for_model(Some(parsed.model.as_str())) {
             Ok(t) => t,

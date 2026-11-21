@@ -262,7 +262,7 @@ impl GatewayServer {
                 200,
                 &serde_json::json!({"ok": true, "id": id, "status": "stopped"}),
             ),
-            Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
+            Err(e) => Response::json(500, &serde_json::json!({"error": crate::http::handlers::sanitize_error(&e.to_string())})),
         }
     }
     /// 启动服务：云端开机并重新拉起推理进程。
@@ -273,7 +273,7 @@ impl GatewayServer {
                 200,
                 &serde_json::json!({"ok": true, "id": id, "status": "ready"}),
             ),
-            Err(e) => Response::json(500, &serde_json::json!({"error": e.to_string()})),
+            Err(e) => Response::json(500, &serde_json::json!({"error": crate::http::handlers::sanitize_error(&e.to_string())})),
         }
     }
     /// 登陆方式：向云厂商 API 查询实例的 SSH 登录指令。

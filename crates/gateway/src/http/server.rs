@@ -76,6 +76,56 @@ pub struct GatewayServer {
     /// + Retry-After），避免异常流量打爆远端 llama-server；成功请求
     /// 清零计数。Arc 共享给所有工作线程。
     pub(crate) upstream_guard: std::sync::Arc<std::sync::Mutex<UpstreamGuard>>,
+    /// P2 推理速率限制（2026-11-21）：按模型分桶的 token bucket，
+    /// 防成本型 DoS（高频调用耗尽 GPU 时长/云费用）。默认每模型
+    /// 60 请求/分钟，突发 10。Arc 共享给所有工作线程。
+    pub(crate) rate_limiter: std::sync::Arc<std::sync::Mutex<RateLimiter>>,
+}
+
+/// P2 推理速率限制器（2026-11-21）。
+///
+/// 按模型分桶的 token bucket：每桶容量 `capacity`，按 `refill_per_sec`
+/// 速率补充 token。请求消耗 1 个 token，桶空则拒绝（429）。
+///
+/// 默认参数：每模型 60 请求/分钟（1 个/秒），突发 10 个。
+/// 仅限制推理接口（/v1/chat/completions、/v1/completions），
+/// 不限制管理接口（/api/*）。
+pub(crate) struct RateLimiter {
+    buckets: std::collections::HashMap<String, (f64, std::time::Instant)>,
+    capacity: f64,
+    refill_per_sec: f64,
+}
+
+impl RateLimiter {
+    pub(crate) fn new() -> Self {
+        Self {
+            buckets: std::collections::HashMap::new(),
+            capacity: 10.0,
+            refill_per_sec: 1.0,
+        }
+    }
+
+    /// 尝试消耗一个 token。返回 `Ok(())` 放行，`Err(retry_after_secs)` 拒绝。
+    pub(crate) fn try_acquire(&mut self, model: &str) -> Result<(), u64> {
+        let now = std::time::Instant::now();
+        let entry = self
+            .buckets
+            .entry(model.to_string())
+            .or_insert((self.capacity, now));
+        let (tokens, last) = entry;
+        // 按经过时间补充 token
+        let elapsed = now.duration_since(*last).as_secs_f64();
+        *tokens = (*tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        *last = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            Ok(())
+        } else {
+            // 还需多少秒才能补满 1 个 token
+            let retry = ((1.0 - *tokens) / self.refill_per_sec).ceil() as u64;
+            Err(retry.max(1))
+        }
+    }
 }
 
 /// P1 上游熔断器状态。
@@ -251,6 +301,7 @@ impl GatewayServer {
             pull_jobs: crate::pulljobs::PullJobs::new(),
             runtime_probe: None,
             upstream_guard: std::sync::Arc::new(std::sync::Mutex::new(UpstreamGuard::new())),
+            rate_limiter: std::sync::Arc::new(std::sync::Mutex::new(RateLimiter::new())),
             sessions: mangosteen_session::SessionStore::new(
                 mangosteen_platform::paths::sessions_file(
                     &mangosteen_platform::paths::real_env as &dyn Fn(&str) -> Option<String>,
@@ -801,6 +852,10 @@ fn audit_log(peer: &str, req: &ParsedRequest, status: u16) {
         .split_once('?')
         .map(|(base, _)| base.to_string())
         .unwrap_or_else(|| req.path.clone());
+    // CRLF 过滤（2026-11-21）：path 来自 HTTP 请求，用户可控，
+    // 过滤 \r\n 防伪造审计日志条目。
+    let audit_path = crate::http::handlers::sanitize_log(&audit_path);
+    let auth_prefix = crate::http::handlers::sanitize_log(&auth_prefix);
     let line = format!(
         "{} {} \"{} {}\" {}{} key={}\n",
         now, peer, req.method, audit_path, status, flags, auth_prefix

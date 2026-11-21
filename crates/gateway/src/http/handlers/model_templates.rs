@@ -266,7 +266,7 @@ fn template_summary(model: &str, text: &str) -> serde_json::Value {
             "draft_model": s.draft_model,
             "aux_count": s.aux_files.len(),
         }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        Err(e) => serde_json::json!({ "ok": false, "error": crate::http::handlers::sanitize_error(&e.to_string()) }),
     }
 }
 
