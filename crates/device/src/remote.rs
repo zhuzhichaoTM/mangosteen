@@ -2554,7 +2554,29 @@ fn download_single_url(
         _ => String::new(),
     };
     let downloader = format!(
-        "{proxy_env}aria2c -x16 -s16 --min-split-size=4M --file-allocation=none --allow-overwrite=true --continue=true {auth} -d {workdir} -o {q_file_name} {q_url} 2>/dev/null; status=$?; if [ \"$status\" -ne 0 ]; then curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 --speed-time 60 -o {q_dest} {q_url}; status=$?; fi{sha_check}; if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; exit \"$status\"",
+        "if [ -f {q_dest} ] && [ -s {q_dest} ]; then \
+           if head -c 512 {q_dest} 2>/dev/null | grep -q '<!DOCTYPE\\|<html\\|<HTML\\|<Error>'; then \
+             echo 'P2: detected HTML error page, removing partial file' >&2; \
+             rm -f {q_dest} {q_dest}.aria2; \
+           fi; \
+         fi; \
+         {proxy_env}aria2c -x16 -s16 --min-split-size=4M --file-allocation=none \
+           --allow-overwrite=true --continue=true --check-integrity=true \
+           {auth} -d {workdir} -o {q_file_name} {q_url} 2>/dev/null; status=$?; \
+         if [ \"$status\" -ne 0 ]; then \
+           curl -fL -C - --retry 5 --retry-delay 3 --connect-timeout 20 \
+             --speed-time 60 -o {q_dest} {q_url}; status=$?; \
+         fi{sha_check}; \
+         if [ \"$status\" -eq 0 ]; then echo \"$(stat -c %s {q_dest})\" > {q_ok}; fi; \
+         exit \"$status\"",
+        proxy_env = proxy_env,
+        workdir = shell_quote(&workdir),
+        q_file_name = q_file_name,
+        q_url = q_url,
+        q_dest = q_dest,
+        q_ok = q_ok,
+        auth = auth,
+        sha_check = sha_check,
     );
     // ## 为什么先把下载器写成脚本文件，再用一条短命令启动
     //
