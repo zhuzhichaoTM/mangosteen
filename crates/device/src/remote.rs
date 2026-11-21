@@ -1526,7 +1526,7 @@ pub fn ensure_llama_server(
              u=\"${{p}}{q_raw}\"; \
              echo \"尝试下载：$u\"; \
              timeout 150 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=2 --retry-wait=2 \
-               --check-certificate=false \
+               --check-certificate=true \
                --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
                -d {q_tmp} -o {q_file} \"$u\"; rc=$?; \
                if [ $rc -eq 0 ]; then break; fi; \

@@ -229,6 +229,14 @@ pub struct CloudConfig {
     /// 路径复用同一把 key（不会每次启动换新钥导致网关 400）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<SecretRef>,
+    /// stop 时是否保留模型密文与密钥（2026-11-21 安全加固）。
+    ///
+    /// - `true`（默认）：stop 保留 `.enc` + `.model_key`，二次部署跳过
+    ///   16GB 下载（18min → 2min）。适合开发/测试频繁 stop+deploy。
+    /// - `false`：stop 时 shred 密文与密钥，满足高安全/合规场景
+    ///   （生产环境长期不用、多租户共享、等保审计）。
+    #[serde(default = "default_keep_ciphertext")]
+    pub stop_keep_ciphertext: bool,
 }
 
 fn default_bind_host() -> String {
@@ -253,6 +261,10 @@ fn default_github_proxy() -> String {
     "https://ghfast.top/;https://shturl.cc//;https://gh.llkk.cc/".to_string()
 }
 
+fn default_keep_ciphertext() -> bool {
+    true
+}
+
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
@@ -264,6 +276,7 @@ impl Default for CloudConfig {
             github_proxy: default_github_proxy(),
             bind_host: default_bind_host(),
             api_key: None,
+            stop_keep_ciphertext: default_keep_ciphertext(),
         }
     }
 }

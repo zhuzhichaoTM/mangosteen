@@ -959,12 +959,35 @@ impl Orchestrator {
                     // 下载降到 ~0s，二次部署总耗时从 18min 缩短到 2min 以内。
                     // 安全：.enc 为 AES-256 密文，密钥文件权限 600；仅在
                     // 显式 destroy 实例时才随磁盘一并清除。
+                    // stop_keep_ciphertext=false 时 shred（高安全/合规场景）。
+                    let keep_ciphertext = self
+                        .config()
+                        .cloud
+                        .stop_keep_ciphertext;
                     let shred_target = self.vendor_wait_target(&provider, instance_id);
-                    if shred_target.is_some() {
-                        eprintln!(
-                            "[cloud] ✓ 部署 {} 密文已保留（stop 后二次部署可跳过下载）",
-                            id
-                        );
+                    if let Some(target) = shred_target {
+                        if keep_ciphertext {
+                            eprintln!(
+                                "[cloud] ✓ 部署 {} 密文已保留（stop 后二次部署可跳过下载）",
+                                id
+                            );
+                        } else {
+                            let wd = self.config().cloud.remote_workdir.clone();
+                            if let Err(e) = mangosteen_device::remote::shred_encrypted_models(
+                                &target, &wd,
+                            ) {
+                                eprintln!("[cloud] ⚠ 部署 {} 静态数据销毁失败（{e}）", id);
+                            } else {
+                                eprintln!(
+                                    "[cloud] ✓ 部署 {} 密文已销毁（stop_keep_ciphertext=false）",
+                                    id
+                                );
+                                mangosteen_platform::fs::audit_critical(&format!(
+                                    "model-shredded {}",
+                                    id
+                                ));
+                            }
+                        }
                     } else {
                         eprintln!("[cloud] ⚠ 部署 {} 无法获取 SSH 目标，保留密文", id);
                     }
@@ -1197,12 +1220,32 @@ impl Orchestrator {
                 // P0 优化（2026-11-21）：stop_service 保留密文与密钥，
                 // 二次部署跳过下载（.enc 已存在且 sha256 匹配）。安全同上：
                 // 密文 AES-256、密钥 600；destroy 时随磁盘清除。
+                // stop_keep_ciphertext=false 时 shred（高安全/合规场景）。
+                let keep_ciphertext = self.config().cloud.stop_keep_ciphertext;
                 if let Some(cloud) = record.plan.cloud.as_ref() {
-                    if self.device_target_for(cloud).is_some() {
-                        eprintln!(
-                            "[cloud] ✓ 部署 {} 密文已保留（stop 后二次部署可跳过下载）",
-                            id
-                        );
+                    if let Some(target) = self.device_target_for(cloud) {
+                        if keep_ciphertext {
+                            eprintln!(
+                                "[cloud] ✓ 部署 {} 密文已保留（stop 后二次部署可跳过下载）",
+                                id
+                            );
+                        } else {
+                            let wd = self.config().cloud.remote_workdir.clone();
+                            if let Err(e) = mangosteen_device::remote::shred_encrypted_models(
+                                &target, &wd,
+                            ) {
+                                warnings.push(format!("静态数据销毁（密文/密钥）：{e}"));
+                            } else {
+                                eprintln!(
+                                    "[cloud] ✓ 部署 {} 密文已销毁（stop_keep_ciphertext=false）",
+                                    id
+                                );
+                                mangosteen_platform::fs::audit_critical(&format!(
+                                    "model-shredded {}",
+                                    id
+                                ));
+                            }
+                        }
                     }
                 }
                 // 2) 再关机。这一步失败必须报错——机器还在跑就意味着继续计费。
@@ -1316,16 +1359,35 @@ impl Orchestrator {
             }
         }
 
-        // P0-2 静态数据销毁（自建设备/云端 stop）：shred 密文模型与密钥，
         // P0 优化（2026-11-21）：自建设备 stop 也保留密文与密钥，
         // 二次部署跳过下载。安全：密文 AES-256、密钥 600；destroy 时
         // 随磁盘清除。失败仅记 warning（不影响后续关机/隧道清理）。
+        // stop_keep_ciphertext=false 时 shred（高安全/合规场景）。
+        let keep_ciphertext = self.config().cloud.stop_keep_ciphertext;
         if let Some(cloud) = record.plan.cloud.as_ref() {
-            if self.device_target_for(cloud).is_some() {
-                eprintln!(
-                    "[cloud] ✓ 部署 {} 密文已保留（stop 后二次部署可跳过下载）",
-                    id
-                );
+            if let Some(target) = self.device_target_for(cloud) {
+                if keep_ciphertext {
+                    eprintln!(
+                        "[cloud] ✓ 部署 {} 密文已保留（stop 后二次部署可跳过下载）",
+                        id
+                    );
+                } else {
+                    let wd = self.config().cloud.remote_workdir.clone();
+                    if let Err(e) =
+                        mangosteen_device::remote::shred_encrypted_models(&target, &wd)
+                    {
+                        warnings.push(format!("静态数据销毁（密文/密钥）：{e}"));
+                    } else {
+                        eprintln!(
+                            "[cloud] ✓ 部署 {} 密文已销毁（stop_keep_ciphertext=false）",
+                            id
+                        );
+                        mangosteen_platform::fs::audit_critical(&format!(
+                            "model-shredded {}",
+                            id
+                        ));
+                    }
+                }
             }
         }
 
