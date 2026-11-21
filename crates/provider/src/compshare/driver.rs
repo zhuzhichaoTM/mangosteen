@@ -59,6 +59,10 @@ pub struct CompshareDriver<T: Transport> {
     /// 只能单独调 `GetProjectList` 查。项目 ID 在账号生命周期内不变，
     /// 因此查一次就缓存——否则每次设置定时关机都多一次网络往返。
     project_id: std::sync::Mutex<Option<String>>,
+    /// 可用规格缓存（2026-11-21 P3）：`list_available_specs` 每次调用
+    /// 并发查询厂商库存 + 价格（多次 API 往返，10-30s），UI「云端搜索」
+    /// 每次打开弹窗都触发 preview。60s TTL 缓存让重复 preview <1ms 返回。
+    spec_cache: std::sync::Mutex<Option<(Instant, Vec<AvailableSpec>)>>,
 }
 
 impl<T: Transport> std::fmt::Debug for CompshareDriver<T> {
@@ -98,6 +102,7 @@ impl<T: Transport> CompshareDriver<T> {
             config,
             client,
             project_id: std::sync::Mutex::new(None),
+            spec_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -611,6 +616,15 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
     /// 墙钟降到最慢一次调用的时长。调用总量不变（仍是每型号 1 次），
     /// 厂商限频按次数计算而非并发数，且 6 个并发远低于常见 QPS 阈值。
     fn list_available_specs(&self) -> MnResult<Vec<AvailableSpec>> {
+        // P3 缓存（2026-11-21）：60s TTL 内直接返回缓存，避免重复查询
+        // 厂商 API（available_types + check_capacity + price_detail 多次
+        // 往返，10-30s）。UI「云端搜索」每次打开弹窗都触发 preview。
+        const CACHE_TTL: Duration = Duration::from_secs(60);
+        if let Some((ts, cached)) = self.spec_cache.lock().unwrap().as_ref() {
+            if ts.elapsed() < CACHE_TTL {
+                return Ok(cached.clone());
+            }
+        }
         let types = self.client.available_types()?;
         let mut out = Vec::new();
         let mut price_budget = self.config.max_price_queries;
@@ -694,6 +708,7 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
                 }
             }
         }
+        *self.spec_cache.lock().unwrap() = Some((Instant::now(), out.clone()));
         Ok(out)
     }
 
