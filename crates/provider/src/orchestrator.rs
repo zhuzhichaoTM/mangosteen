@@ -688,7 +688,16 @@ impl CloudOrchestrator {
                                     let text = e.to_string().to_ascii_lowercase();
                                     let transient = text.contains("8903")
                                         || text.contains("in the task")
-                                        || text.contains("try again later");
+                                        || text.contains("try again later")
+                                        // 226619 接口调用过于频繁（厂商限流）：
+                                        // 退避重试可恢复，不应直接判失败。
+                                        // 实测 UI 删除 Running 实例时，stop 后的
+                                        // describe 轮询撞限流 → 500「删除失败」。
+                                        || text.contains("226619")
+                                        // 部分限流错误以「too frequent」/
+                                        // 「rate limit」文案返回，一并兜底。
+                                        || text.contains("too frequent")
+                                        || text.contains("rate limit");
                                     last = Some(e);
                                     if !transient || i + 1 == ATTEMPTS {
                                         break;

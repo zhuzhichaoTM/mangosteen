@@ -2562,9 +2562,11 @@ Tabs.register("setting", (() => {
         };
         const delBtn = row.querySelector(".ci-destroy");
         if (delBtn) delBtn.onclick = async () => {
-          if (!confirm("确定删除实例 " + instanceId + "？\n实例与磁盘会被销毁（不可恢复），其上的模型文件一并丢失。")) return;
+          if (!confirm("确定删除实例 " + instanceId + "？\n实例与磁盘会被销毁（不可恢复），其上的模型文件一并丢失。\n运行中的实例需先关机再删除，可能需要几分钟，请勿关闭页面。")) return;
           delBtn.disabled = true; delBtn.textContent = "删除中…";
-          try { await api("/api/cloud/instances/" + encodeURIComponent(provider) + "/" + encodeURIComponent(instanceId), { method: "DELETE", timeoutMs: 120000 }); toast("实例已删除", "ok"); }
+          // timeoutMs 300s（2026-11-21）：销毁流程 = 关机 + 等 Stopped
+          // + 释放磁盘，Running 实例实测可达 2-5min，120s 会误报失败。
+          try { await api("/api/cloud/instances/" + encodeURIComponent(provider) + "/" + encodeURIComponent(instanceId), { method: "DELETE", timeoutMs: 300000 }); toast("实例已删除", "ok"); }
           catch (e) { toast("删除失败：" + e.message, "err"); }
           delBtn.disabled = false; delBtn.textContent = "删除";
           loadCloudInstances();
