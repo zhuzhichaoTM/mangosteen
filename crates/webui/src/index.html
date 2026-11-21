@@ -2034,7 +2034,6 @@ const stages = ["模型评估", "云端搜索", "设备选择", "设备配置", 
       existing,
       (pv.cloud_candidates || []).filter(x => x.stock == null || x.stock > 0)
     );
-    if (!candidates.length && pv.cloud) candidates.push(pv.cloud);
     const chosen = await chooseGpu(candidates);
     if (!chosen) { renderChain(1, "已取消：未确认设备", true); return; }
     // __AUTO__ = 用户点了「自动选点（推荐）」：与 CLI 默认行为一致，
