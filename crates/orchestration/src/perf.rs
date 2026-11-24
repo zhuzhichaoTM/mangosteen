@@ -109,10 +109,11 @@ impl DeployPerfTrace {
     }
 
     /// 进入一个新阶段（自动结束上一个阶段）。
-    pub fn enter(&mut self, label: &'static str) {
+    pub fn enter(&mut self, label: impl Into<String>) {
         self.leave_current();
+        let label = label.into();
         eprintln!("[perf] ▶ 阶段 {} ({})", label, self.deploy_id);
-        self.current = Some((label, Instant::now()));
+        self.current = Some((Box::leak(label.into_boxed_str()), Instant::now()));
     }
 
     /// 结束当前阶段并输出描述。

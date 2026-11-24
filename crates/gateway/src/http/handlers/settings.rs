@@ -297,7 +297,7 @@ impl GatewayServer {
                             "id": e.id(),
                             "name": e.display_name(),
                             "supported": e.is_supported(),
-                            "format": e.required_format(),
+                            "format": e.recommended_format(),
                             "binary": e.binary_name(),
                         }))
                         .collect::<Vec<_>>(),

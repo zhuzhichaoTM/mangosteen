@@ -375,13 +375,8 @@ impl Orchestrator {
         // 其它模型的推理可能正在运行。此时绝不能 stop_service（会停掉
         // 整机全部 llama-server 并关机），只能保留实例运行状态。
         let shared_node = self.has_other_active_on_node(id, &rec);
-
         let mut note = err.to_string();
-        if vendor_managed
-            && !shared_node
-            && !provider.trim().is_empty()
-            && !instance_id.trim().is_empty()
-        {
+        if vendor_managed && !shared_node {
             if let Some(o) = self.cloud().as_mut() {
                 // 先按模型名停本部署的进程（可能已起来），再关机。
                 // 按模型名精确停止（用户要求）：端口是分配资源会漂移，
@@ -460,11 +455,21 @@ impl Orchestrator {
             .and_then(|token| token.resolve(mangosteen_platform::paths::real_env).ok());
 
         // 清单：主模型在前，辅助模型按模板顺序。索引从 1 开始，供 UI 显示
-        // 「第 n/N 个文件」，让多文件模型不再表现为“只下一个就结束”。
-        let mut manifest: Vec<(String, Option<String>, Option<u64>, String)> = vec![(
+        // 「第 n/N 个文件」，让多文件模型不再表现为"只下一个就结束"。
+        // 五元组：(path, url, bytes, sha256, kind)。
+        // 主模型 sha 来自 cloud_plan.download_sha256；aux 文件 sha 来自
+        // aux.sha256（2026-11-23 修复：aux 文件之前 sha256=None 导致
+        // mmproj/MTP draft 等辅助文件跳过校验）。
+        // 六元组：(path, url, bytes, sha256, required, kind)。
+        // required=true 的分片（如 flash-next 的 00002）下载失败必须阻断部署，
+        // required=false 的可选辅助（mmproj/MTP）失败跳过不阻断。
+        let mut manifest: Vec<(String, Option<String>, Option<u64>, Option<String>, bool, String)> = vec![(
             cloud_plan.model_path.clone(),
             cloud_plan.download_url.clone(),
             cloud_plan.download_bytes,
+            cloud_plan.download_sha256.clone(),
+            // 主模型分片视为 required
+            true,
             "主模型".to_string(),
         )];
         for aux in &cloud_plan.auxiliary_downloads {
@@ -472,6 +477,8 @@ impl Orchestrator {
                 aux.path.clone(),
                 Some(aux.url.clone()),
                 aux.bytes,
+                aux.sha256.clone(),
+                aux.required,
                 "辅助模型".to_string(),
             ));
         }
@@ -479,7 +486,7 @@ impl Orchestrator {
         // 主模型路径（P2 加密后回写用）：加密后主模型路径变为 .enc，
         // 回写 cloud_plan.model_path，供启动前检查与 launch_config 使用。
         let main_model_path = cloud_plan.model_path.clone();
-        for (i, (path, url, bytes, kind)) in manifest.into_iter().enumerate() {
+        for (i, (path, url, bytes, sha256, required, kind)) in manifest.into_iter().enumerate() {
             let name = path.rsplit('/').next().unwrap_or(&path).to_string();
             sink(
                 DeployStage::Downloading,
@@ -498,10 +505,15 @@ impl Orchestrator {
                     url.as_deref().unwrap_or("（无地址）")
                 ),
             );
+            // sha256 来自 manifest 五元组：主模型用 cloud_plan.download_sha256，
+            // aux 文件用 aux.sha256（2026-11-23 修复：aux 之前 None 跳过校验）。
+            // aux 仍跳过 GGUF 魔数校验（is_aux=true，mmproj 非 GGUF）。
+            let is_aux = path != main_model_path;
             let file_plan = mangosteen_core::plan::CloudPlan {
                 model_path: path.clone(),
                 download_url: url,
                 download_bytes: bytes,
+                download_sha256: sha256,
                 ..cloud_plan.clone()
             };
             // 字节进度要**同时**写进阶段输出。
@@ -581,15 +593,16 @@ impl Orchestrator {
             // 不存在于 unsloth/Qwen3.8-27B-GGUF 仓库，导致 default 模板
             // 部署失败；修复后辅助文件缺失不再卡死部署）。
             let is_aux = path != main_model_path;
-            let downloaded = match mangosteen_provider::orchestrator::download_model_node(
+            let downloaded = match mangosteen_provider::orchestrator::download_model_node_inner(
                 &ssh,
                 &file_plan,
                 hf_token.as_deref(),
                 Some(&staged),
                 None,
+                is_aux, // 辅助文件跳过 GGUF 魔数校验（可能非 GGUF）
             ) {
                 Ok(d) => d,
-                Err(e) if is_aux => {
+                Err(e) if is_aux && !required => {
                     sink(
                         DeployStage::Downloading,
                         StageOutcome::Skipped,
@@ -699,12 +712,13 @@ impl Orchestrator {
             crate::progress::StageOutcome::Running,
             "正在配置目标节点的运行环境".to_string(),
         );
+        let cfg = self.config();
         mangosteen_provider::orchestrator::configure_node(
             &ssh,
             &device.workdir,
-            &self.config().cloud.llama_server_url,
-            &self.config().cloud.github_proxy,
-            &self.config().cloud.llama_server_sha256,
+            cloud_plan.engine.engine,
+            cfg.cloud.engine_install_url(cloud_plan.engine.engine).as_deref(),
+            &cfg.cloud.github_proxy,
         )?;
         // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署
         // 成功后」统一加固——下载/启动/健康检查期间 root 通道保持可用
@@ -720,6 +734,11 @@ impl Orchestrator {
             crate::progress::StageOutcome::Running,
             "开始在目标节点下载模型".to_string(),
         );
+        // 预下载模式（全引擎统一）：mangosteen 负责下载 GGUF 到 models/，
+        // Strata 启动时复用已下载的文件（文件已存在则秒过）。
+        // 引擎自管存储（Strata/Ollama）的文件检查与显存预检在启动阶段跳过
+        // （supports_model_path=false），但下载阶段仍走预下载链路，
+        // 保证下载进度可见、断点续传可控（2026-11-22 用户裁决）。
         self.download_all_node_models(&ssh, &mut cloud_plan, progress, sink)?;
 
         // 本地端口必须从调度器的 11435-11999 区间分配（全局唯一），绝不能用远端
@@ -908,12 +927,13 @@ impl Orchestrator {
         let ssh = p.ssh.clone();
         // 节点配置内部严格执行：依赖安装与验证 → llama-server 下载与可执行性验证。
         // 只有整个函数成功返回，才允许推进到模型下载。
+        let cfg = self.config();
         mangosteen_provider::orchestrator::configure_node(
             &ssh,
             &p.workdir,
-            &self.config().cloud.llama_server_url,
-            &self.config().cloud.github_proxy,
-            &self.config().cloud.llama_server_sha256,
+            cloud_plan.engine.engine,
+            cfg.cloud.engine_install_url(cloud_plan.engine.engine).as_deref(),
+            &cfg.cloud.github_proxy,
         )?;
         // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署
         // 成功后」统一加固——与 deploy_instance 路径一致，下载/启动/健康
@@ -936,6 +956,12 @@ impl Orchestrator {
             ),
         );
         perf.enter("模型下载");
+        // 引擎自管模型存储（Strata/Ollama，supports_model_path=false）：
+        // 预下载模式（全引擎统一）：mangosteen 负责下载 GGUF 到 models/，
+        // Strata 启动时复用已下载的文件（文件已存在则秒过）。
+        // 引擎自管存储的文件检查与显存预检在启动阶段跳过
+        // （supports_model_path=false），但下载阶段仍走预下载链路，
+        // 保证下载进度可见、断点续传可控（2026-11-22 用户裁决）。
         self.download_all_node_models(&ssh, &mut cloud_plan, progress, sink)?;
         perf.leave("模型下载完成");
         perf.finish(true);
@@ -1001,6 +1027,32 @@ impl Orchestrator {
             .cloud
             .clone()
             .ok_or_else(|| MnError::bad_request("部署方案缺少云端参数".to_string()))?;
+        // Strata 启动前：如果预下载的模型文件已存在，用 --model-path 替代
+        // --family/--model，让 Strata 直接复用已下载文件，避免重新下载
+        //（2026-11-22 用户裁决：预下载 + Strata 复用，不重复下载）。
+        // 2026-11-23 用户裁决：通过 EnginePlugin 多态方法 adapt_launch_args
+        // 统一处理，引擎自管存储（Strata）覆写；llama.cpp 默认不动。
+        let engine_plugin = mangosteen_device::plugin::plugin_for(
+            cloud_plan.engine.engine,
+        );
+        if !cloud_plan.engine.engine.capabilities().supports_model_path {
+            let model_size = mangosteen_device::remote::remote_file_size(&ssh, &cloud_plan.engine.model_path)
+                .unwrap_or(0);
+            if model_size > 0 {
+                if let Some(p) = engine_plugin {
+                    p.adapt_launch_args(&mut cloud_plan.engine.extra_args, &cloud_plan.engine.model_path);
+                }
+                sink(
+                    crate::progress::DeployStage::Launching,
+                    crate::progress::StageOutcome::Running,
+                    format!(
+                        "预下载文件已存在（{} 字节），使用 --model-path 复用，跳过 Strata 重新下载",
+                        model_size
+                    ),
+                );
+            }
+        }
+
         let launch_config = self.cloud_launch_config(&cloud_plan)?;
         // 性能统计：启动模型子阶段全程计时
         let mut perf = DeployPerfTrace::new(&id);
@@ -1014,57 +1066,58 @@ impl Orchestrator {
         // 因此这里保留预检，但**查询失败只记录并跳过**，绝不阻断启动：
         // 真正的连接问题会在后续起引擎时以准确错误暴露。
         if cloud_plan.device_id.is_some() {
-            match mangosteen_device::remote::remote_gpu_memory(&ssh) {
-                Ok(Some((total_vram, free_vram))) => {
-                    let required = cloud_plan.vram_bytes_per_gpu;
-                    let safety = 512u64 * 1024 * 1024;
-                    if free_vram < required.saturating_add(safety) {
-                        let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                        let e = MnError::bad_request(format!(
-                            "远端 GPU 显存不足，禁止启动推理引擎：总显存 {:.2} GiB，当前空闲 {:.2} GiB，预计至少需要 {:.2} GiB（含 512 MiB 运行余量）。请更换显存更大的节点，或降低量化/上下文长度；本次未启动 llama-server。",
-                            gib(total_vram),
-                            gib(free_vram),
-                            gib(required.saturating_add(safety))
-                        ));
-                        self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
-                        return Err(e);
+            // 显存预检仅对「预下载模式」引擎（llama.cpp，supports_model_path=true）生效。
+            // 引擎自管存储（Strata/Ollama，supports_model_path=false）走三级存储/
+            // 按需加载，不需要把整个模型塞进显存——跳过该检查，避免误判
+            // 「远端 GPU 显存不足」（2026-11-22 实测：Strata 在 12GB 卡上
+            // 通过专家热缓存仍可跑 125B MoE）。
+            if cloud_plan.engine.engine.capabilities().supports_model_path {
+                match mangosteen_device::remote::remote_gpu_memory(&ssh) {
+                    Ok(Some((total_vram, free_vram))) => {
+                        let required = cloud_plan.vram_bytes_per_gpu;
+                        let safety = 512u64 * 1024 * 1024;
+                        if free_vram < required.saturating_add(safety) {
+                            let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                            let e = MnError::bad_request(format!(
+                                "远端 GPU 显存不足，禁止启动推理引擎：总显存 {:.2} GiB，当前空闲 {:.2} GiB，预计至少需要 {:.2} GiB（含 512 MiB 运行余量）。请更换显存更大的节点，或降低量化/上下文长度；本次未启动 llama-server。",
+                                gib(total_vram),
+                                gib(free_vram),
+                                gib(required.saturating_add(safety))
+                            ));
+                            self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
+                            return Err(e);
+                        }
                     }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!("[deploy] 显存预检跳过（查询失败，不阻断启动）：{e}");
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("[deploy] 显存预检跳过（查询失败，不阻断启动）：{e}");
+                    }
                 }
             }
         }
-        // 启动前先确认远端确实有模型文件。下载阶段若因残留标记或命名不一致
-        // 被跳过，这里要给出指向「模型下载」的明确结论，而不是让
-        // llama-server 抛出难以定位的 GGUF 打不开错误。
-        let model_size =
-            mangosteen_device::remote::remote_file_size(&ssh, &cloud_plan.engine.model_path)?;
-        if model_size == 0 {
-            let e = MnError::Network {
-                stage: "启动云端推理服务".to_string(),
-                reason: format!(
-                    "远端模型文件不存在：{}。请在「模型下载」阶段确认文件已完整落盘",
-                    cloud_plan.engine.model_path
-                ),
-            };
-            self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
-            return Err(e);
+        // 启动前先确认远端确实有模型文件（仅预下载模式，supports_model_path=true）。
+        // 下载阶段若因残留标记或命名不一致被跳过，这里要给出指向「模型下载」的
+        // 明确结论，而不是让 llama-server 抛出难以定位的 GGUF 打不开错误。
+        //
+        // 引擎自管模型存储（Strata/Ollama，supports_model_path=false）：模型由
+        // 引擎启动时自行下载（strata launch 从 HF 拉取），启动前文件本就不存在，
+        // 跳过该检查——否则会误报「远端模型文件不存在」（2026-11-22 实测）。
+        if cloud_plan.engine.engine.capabilities().supports_model_path {
+            let model_size =
+                mangosteen_device::remote::remote_file_size(&ssh, &cloud_plan.engine.model_path)?;
+            if model_size == 0 {
+                let e = MnError::Network {
+                    stage: "启动云端推理服务".to_string(),
+                    reason: format!(
+                        "远端模型文件不存在：{}。请在「模型下载」阶段确认文件已完整落盘",
+                        cloud_plan.engine.model_path
+                    ),
+                };
+                self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
+                return Err(e);
+            }
         }
-        sink(
-            DeployStage::Launching,
-            StageOutcome::Running,
-            format!(
-                "正在启动推理引擎：{}@{}:{} · {}",
-                ssh.user,
-                ssh.host,
-                ssh.port,
-                cloud_plan.engine.engine.display_name()
-            ),
-        );
-
-        perf.enter("拉起llama-server进程");
+        perf.enter(format!("拉起{}进程", cloud_plan.engine.engine.display_name()));
         // TLS 探测（P1）：引导链已生成证书则启动参数含 --ssl-*（start_node_
         // engine 内部自动追加），这里探测证书存在性写台账——后续探活/relay
         // 按此走 https。探测失败按 false（明文）处理，不阻断部署。
@@ -1087,11 +1140,95 @@ impl Orchestrator {
             }
         }
         let started =
-            mangosteen_provider::orchestrator::start_node_engine(&ssh, &workdir, &launch_config);
-        perf.leave("llama-server启动完成");
+            mangosteen_provider::orchestrator::start_node_engine(&ssh, &workdir, &launch_config, cloud_plan.engine.engine);
+        // 日志语义修正（2026-11-23 用户裁决）：start_node_engine 只代表
+        // 「启动命令已下发」，不代表引擎就绪。真正的「引擎启动完成」在
+        // 下方远端就绪轮询通过后才输出。
+        perf.leave(&format!("{}启动命令已下发", cloud_plan.engine.engine.display_name()));
         if let Err(e) = started {
             self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
             return Err(e);
+        }
+
+        // 远端就绪轮询（2026-11-23 修复）：ssh -L 惰性转发在远端端口未监听
+        // 时会被中间设备/网关回收（实测 Strata 22GB 加载 195s 期间隧道空闲
+        // 被 reset，之后健康检查永远 curl (56)）。必须先在远端确认引擎已
+        // 监听端口，再建立隧道——隧道建立即通，无空闲窗口。
+        {
+            let caps = cloud_plan.engine.engine.capabilities();
+            // TLS 感知（2026-11-24 修复）：llama-server 启用 TLS 时监听 HTTPS，
+            // HTTP 探针会失败。按 tls 标记选择 http/https + -k（跳过自签证书校验）。
+            let tls_on = cloud_plan.tls;
+            let scheme = if tls_on { "https" } else { "http" };
+            let insecure = if tls_on { "-k " } else { "" };
+            let ready_probe = format!(
+                "curl -fsS {insecure}--max-time 3 {scheme}://127.0.0.1:{}{} >/dev/null 2>&1 && echo ready || echo not_ready",
+                cloud_plan.engine_port,
+                caps.health_path
+            );
+            // 远端就绪预算：统一 3min 上限（2026-11-23 用户裁决，不做分档）。
+            let ready_budget = Duration::from_secs(240);
+            let probe_start = std::time::Instant::now();
+            let mut attempt_num = 0u32;
+            loop {
+                attempt_num += 1;
+                if let Ok(out) = mangosteen_device::remote::ssh_exec(&ssh, &ready_probe, 30) {
+                    eprintln!(
+                        "[ready-poll] attempt={} elapsed={}s output={:?}",
+                        attempt_num,
+                        probe_start.elapsed().as_secs(),
+                        out
+                    );
+                    if out.trim() == "ready" {
+                        perf.leave(&format!(
+                            "远端引擎就绪（{}s）",
+                            probe_start.elapsed().as_secs()
+                        ));
+                        break;
+                    }
+                } else {
+                    eprintln!(
+                        "[ready-poll] attempt={} elapsed={}s ssh_exec FAILED",
+                        attempt_num,
+                        probe_start.elapsed().as_secs()
+                    );
+                }
+                if probe_start.elapsed() >= ready_budget {
+                    perf.leave("远端引擎就绪");
+                    let tail = mangosteen_device::remote::ssh_exec(
+                        &ssh,
+                        &format!("tail -20 {workdir}/strata.log 2>/dev/null || tail -20 {workdir}/llama.log 2>/dev/null"),
+                        15,
+                    )
+                    .unwrap_or_default();
+                    self.rollback_failed_cloud(
+                        &id,
+                        &ssh,
+                        &workdir,
+                        &plan.origin,
+                        &MnError::Network {
+                            stage: "等待远端引擎就绪".to_string(),
+                            reason: format!(
+                                "远端引擎 {}s 内未监听 {}:{}。日志尾部：{}",
+                                ready_budget.as_secs(),
+                                cloud_plan.engine_port,
+                                caps.health_path,
+                                tail
+                            ),
+                        },
+                    );
+                    return Err(MnError::Network {
+                        stage: "等待远端引擎就绪".to_string(),
+                        reason: format!(
+                            "远端引擎 {}s 内未监听 {}:{}，请查看远端日志",
+                            ready_budget.as_secs(),
+                            cloud_plan.engine_port,
+                            caps.health_path
+                        ),
+                    });
+                }
+                std::thread::sleep(Duration::from_secs(5));
+            }
         }
 
         // 经隧道确认端到端可用。少了这一步，台账会标 Ready 而对话直接 502。
@@ -1135,22 +1272,71 @@ impl Orchestrator {
             updated.plan.cloud = Some(c);
             self.state.upsert(updated)?;
         }
-        // TLS（P1）：台账标记 tls 时走 https（自签证书，curl -k 已内置）
-        let tls_on = cloud_plan.tls;
+        // TLS 协商走 EnginePlugin 多态方法（2026-11-23 用户裁决：
+        // 「tls 认证调用推理引擎提供的方法，支持就激活，不支持就忽略」）。
+        // 台账标记 tls=true 的引擎，插件判断自身能力决定是否启用。
+        //
+        // 注意：health_url 的 host 参数固定传 "127.0.0.1"（隧道回环地址）。
+        // llama.cpp 的插件默认实现在 TLS 时会返回 "llama-server"（自签证书
+        // CN，供 upstream/relay 的 --resolve 映射），但**健康检查走的是
+        // SSH 隧道的本地回环**——127.0.0.1 才能连通，llama-server 这个
+        // 主机名在本地解析不了（curl: (6) Could not resolve host）。
+        // 2026-11-23 实测：health_url(host=llama-server) 导致健康检查
+        // 必然失败。网关转发层有自己的 host 逻辑（inference.rs 独立处理
+        // llama-server 映射），此处只拼本地隧道 URL。
+        let engine_plugin = mangosteen_device::plugin::plugin_for(
+            cloud_plan.engine.engine,
+        );
+        let tls_on = engine_plugin
+            .map(|p| p.tls_enabled(cloud_plan.tls))
+            .unwrap_or(cloud_plan.tls);
+        let tls_cert_path = if tls_on { cloud_plan.tls_cert_path.clone() } else { None };
+        cloud_plan.tls = tls_on;
+        cloud_plan.tls_cert_path = tls_cert_path;
+        // 健康检查 URL：固定 127.0.0.1（隧道回环），scheme 按 TLS 协商结果。
+        // 路径按引擎能力表（llama.cpp /health，Strata /v1/models）。
+        let health_path = cloud_plan.engine.engine.capabilities().health_path;
         let scheme = if tls_on { "https" } else { "http" };
-        let health = format!("{scheme}://127.0.0.1:{local_port}/health");
-        let timeout = Duration::from_secs(self.config().scheduler.launch_timeout_secs);
-        perf.enter("健康检查(/health就绪)");
-        if let Err(e) =
-            mangosteen_device::remote::wait_http_ready(&health, timeout, Duration::from_secs(2))
-        {
+        let _ = engine_plugin; // 插件已用于 TLS 协商；URL 拼装走本地回环
+        let health = format!("{scheme}://127.0.0.1:{local_port}{health_path}");
+        // 健康检查超时：统一 3min 上限（2026-11-23 用户裁决，不做分档）。
+        let timeout = Duration::from_secs(180);
+        perf.enter("健康检查就绪");
+        // 健康检查：Strata 用 /v1/models（HTTP，无 TLS），llama.cpp 用 /health（可能 HTTPS）
+        // 通过 capabilities.api_key_mode 判断是否需要 Bearer Token
+        let api_key = cloud_plan.engine.api_key.as_deref();
+        let health_result = mangosteen_device::remote::wait_http_ready_with_key(
+            &health,
+            timeout,
+            Duration::from_secs(2),
+            api_key,
+        );
+        if let Err(e) = health_result {
             perf.leave("健康检查失败");
-            let diagnostic = mangosteen_device::remote::llama_server_start_diagnostics(
-                &ssh,
-                &workdir,
-                cloud_plan.engine_port,
-            )
-            .unwrap_or_else(|diag_err| format!("远端诊断获取失败：{diag_err}"));
+            // 诊断信息：优先取引擎专属诊断（llama-server），其它引擎给通用摘要。
+            // 通过 capabilities.pid_name 判断是否有专属诊断，避免引擎字面量。
+            let caps = cloud_plan.engine.engine.capabilities();
+            let diagnostic = if caps.pid_name == "llama-server" {
+                mangosteen_device::llama_cpp::llama_server_start_diagnostics(
+                    &ssh,
+                    &workdir,
+                    cloud_plan.engine_port,
+                )
+                .unwrap_or_else(|diag_err| format!("远端诊断获取失败：{diag_err}"))
+            } else {
+                // 通用诊断：tail 引擎专属日志文件（strata.log / ollama.log 等）
+                let log_file = format!("{workdir}/{}.log", caps.pid_name);
+                let tail_out = mangosteen_device::remote::ssh_exec(
+                    &ssh,
+                    &format!("tail -30 {log_file} 2>/dev/null || echo '(日志文件不存在)'"),
+                    30,
+                )
+                .unwrap_or_else(|_| "(远端诊断失败)".to_string());
+                format!(
+                    "引擎 {} 未就绪（端口 {}），远端日志尾部：\n{}",
+                    caps.pid_name, cloud_plan.engine_port, tail_out
+                )
+            };
             let e = MnError::Network {
                 stage: "等待云端推理服务".to_string(),
                 reason: format!("{e}\n远端启动诊断：\n{diagnostic}"),
@@ -1251,17 +1437,17 @@ impl Orchestrator {
             (c.engine_port, if p.is_empty() { None } else { Some(p.to_string()) })
         }) {
             Some((_port, Some(m))) => {
-                let _ = mangosteen_device::remote::stop_llama_server_by_model(
+                let _ = mangosteen_device::llama_cpp::stop_llama_server_by_model(
                     ssh, workdir, &m,
                 );
             }
             Some((port, None)) => {
-                let _ = mangosteen_device::remote::stop_llama_server_on_port(
+                let _ = mangosteen_device::llama_cpp::stop_llama_server_on_port(
                     ssh, workdir, Some(port),
                 );
             }
             None => {
-                let _ = mangosteen_device::remote::stop_llama_server(ssh, workdir);
+                let _ = mangosteen_device::llama_cpp::stop_llama_server(ssh, workdir);
             }
         }
 

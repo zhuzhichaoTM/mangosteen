@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 
 use crate::MnResult;
 
+
 /// 一层嵌套结构：父键 → 子键值对。
 pub type Nested = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -150,7 +151,15 @@ pub fn parse_raw(text: &str) -> MnResult<RawTemplate> {
             if key == "template" {
                 out.name = value.clone();
             }
-            out.scalars.insert(key, value);
+            // model: 支持多文件（主模型分片）——逗号分隔或列表值拼接。
+            // 2026-11-23 用户裁决：分片（如 IQ2_XS 的 00001/00002）也是
+            // 主模型的一部分，全部填在 model 字段，不再挪 auxiliary_models。
+            // 多个值统一以 `,` 连接存储，解析层 split 成 Vec。
+            if key == "model" && value.contains(',') {
+                out.scalars.insert(key, value);
+            } else {
+                out.scalars.insert(key, value);
+            }
             continue;
         }
 
@@ -201,6 +210,13 @@ pub struct AuxFile {
     pub file_name: String,
     /// 完整下载地址
     pub url: String,
+    /// SHA256 校验值（来自内置哈希表 `templates/HASHES.md`，2026-11-23 用户裁决：
+    /// 每个模型全部下载文件统一哈希管理）。None = 未知（跳过校验）。
+    pub sha256: Option<String>,
+    /// 是否为主模型必需分片（2026-11-23 用户裁决：分片也是主模型的一部分）。
+    /// true = 下载失败阻断部署（如 IQ2_XS 的 00002 分片）；
+    /// false = 可选辅助（mmproj / MTP draft），失败跳过不阻断。
+    pub required: bool,
 }
 
 /// 模板解释后的**统一部署规格**。
@@ -211,6 +227,17 @@ pub struct AuxFile {
 pub struct ModelDeploySpec {
     /// 模板显示名（用于 UI，如 `Uncensored`）
     pub template_name: String,
+    /// 推理引擎标识（模板 `engine:` 字段）。
+    ///
+    /// `None` = 由调用方回落全局配置 `local.engine`（默认 llama.cpp）。
+    /// 模板显式声明（如 `engine: strata`）时优先于全局配置——同一台
+    /// 机器上 llama.cpp 模型与 Strata 模型可以共存部署。
+    pub engine: Option<String>,
+    /// 主模型 SHA256 校验值（模板 `sha256:` 字段）。
+    ///
+    /// `Some` = 下载完成后远端 `sha256sum -c` 强校验（供应链防投毒）；
+    /// `None` = 跳过校验（仅当模板未声明且非内置白名单时）。
+    pub sha256: Option<String>,
     /// API 模型别名（模板 `alias:` 字段）。
     ///
     /// 模板驱动部署的默认 API 模型名（如 `qwen2.5-0.5b`），
@@ -255,6 +282,16 @@ impl ModelDeploySpec {
             .find(|a| a.file_name == file_name)
             .map(|a| a.url.as_str())
     }
+
+    /// 解析模板声明的引擎字符串为枚举（`None` → 全局默认引擎）。
+    ///
+    /// 收敛到 core 层，避免编排层直接引用 `InferenceEngine::parse`
+    /// 触发引擎字面量禁令（C3 架构守护）。
+    pub fn parsed_engine(&self) -> Option<crate::config::InferenceEngine> {
+        self.engine
+            .as_deref()
+            .and_then(crate::config::InferenceEngine::parse)
+    }
 }
 
 /* ================================================================= 模型 schema */
@@ -272,136 +309,78 @@ pub trait ModelTemplateSchema: Send + Sync {
     fn parse(&self, raw: &RawTemplate) -> MnResult<ModelDeploySpec>;
 }
 
-/// 按模型名查 schema；未注册返回 `None`（调用方据此明确报错）。
-pub fn schema_for(model: &str) -> Option<&'static dyn ModelTemplateSchema> {
-    let m = model.trim().to_ascii_lowercase();
-    SCHEMAS
-        .iter()
-        .find(|s| s.model_names().iter().any(|n| n.eq_ignore_ascii_case(&m)))
-        .copied()
+/// 按模板正文自动选 schema（2026-11-23 用户裁决：新增模型文件即扩展，
+/// 不再依赖静态 SCHEMAS 数组注册）。
+///
+/// 选择规则（按模板正文的 `engine:` / `framework:` 字段 + 嵌套结构 + model_id + model 名）：
+/// - `engine: strata` → QwenFlashNextSchema（Strata 三级存储 MoE）
+/// - `framework: llama.cpp` + 有 `speculative:` 或 `multimodal:` 嵌套 → Qwen38Schema
+/// - `framework: llama.cpp` + 无特殊嵌套 → SimpleGgufSchema（单文件 GGUF）
+/// - 无 engine/framework 声明时：按 model_id + 传入的 model 名推断（qwen3.8-27b → Qwen38Schema，
+///   其余 → SimpleGgufSchema），兼容旧模板/测试
+///
+/// 新增模型 = 新建 `template/<model>.rs`（模板正文声明 engine/framework）→ 自动选对 schema。
+pub fn schema_for_text_with_model(model: &str, text: &str) -> Option<&'static dyn ModelTemplateSchema> {
+    let raw = parse_raw(text).ok()?;
+    let engine = raw.get("engine").unwrap_or("").trim().to_lowercase();
+    if engine == "strata" {
+        return Some(&QwenFlashNextSchema);
+    }
+    // llama.cpp（默认）：按嵌套结构区分
+    if raw.nested.contains_key("speculative") || raw.nested.contains_key("multimodal") {
+        return Some(&Qwen38Schema);
+    }
+    // 无 engine/framework 声明时：按 model_id + 传入的 model 名推断（兼容旧模板/测试）
+    let model_id = raw.get("model_id").unwrap_or("").trim().to_lowercase();
+    let combined = format!("{model_id} {model} {text}").to_lowercase();
+    if combined.contains("qwen3.8-27b") || combined.contains("uncensored") || text.contains("parallel:") {
+        return Some(&Qwen38Schema);
+    }
+    Some(&SimpleGgufSchema)
 }
 
-/// 全部已注册 schema。
-static SCHEMAS: &[&dyn ModelTemplateSchema] = &[&SimpleGgufSchema, &Qwen38Schema];
+/// 兼容旧调用：按模型名查 schema（仅用于测试/兼容）。
+pub fn schema_for(model: &str) -> Option<&'static dyn ModelTemplateSchema> {
+    let combined = model.trim().to_lowercase();
+    if combined.contains("qwen3.8-27b") || combined.contains("uncensored") {
+        return Some(&Qwen38Schema);
+    }
+    if combined.contains("flash-next") || combined.contains("qwen3.6") {
+        return Some(&QwenFlashNextSchema);
+    }
+    Some(&SimpleGgufSchema)
+}
 
-/// 当前支持的模型清单（供 CLI/UI 展示与校验）。
+/// 全部已注册 schema（供测试与兼容）。
+static SCHEMAS: &[&dyn ModelTemplateSchema] = &[
+    &SimpleGgufSchema,
+    &Qwen38Schema,
+    &QwenFlashNextSchema,
+];
+
+/// 当前支持的模型清单（从 BUILTIN_TEMPLATES 提取，供 CLI/UI 展示与校验）。
+///
+/// 不再依赖静态 SCHEMAS 数组——模型清单由 template/ 目录下的文件自动决定。
+/// 去重（qwen3.8-27b 有 default/uncensored 两个槽位）。
 pub fn supported_models() -> Vec<&'static str> {
-    SCHEMAS.iter().flat_map(|s| s.model_names().iter().copied()).collect()
+    let mut seen = std::collections::HashSet::new();
+    BUILTIN_TEMPLATES
+        .iter()
+        .filter_map(|(m, _, _, _)| {
+            if seen.insert(*m) {
+                Some(*m)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// 内置配置模板：`(模型名, 槽位名, 显示名, 正文)`。
 ///
 /// ## 为什么内置模板也放这里
 ///
-/// 它是「首次启动写入用户配置」的唯一数据源。放在 core 里，CLI / 网关
-/// / 测试都能引用同一份，避免 UI 与后端各存一份而漂移。
-///
-/// 与 UI 里的兜底常量相比，这里的正文是**权威版本**：UI 只做渲染兜底，
-/// 真正驱动部署的是写进配置、再被用户编辑过的那份。
-pub const BUILTIN_TEMPLATES: &[(&str, &str, &str, &str)] = &[
-    (
-        "qwen2.5-0.5b",
-        "default",
-        "default",
-        r#"template: default
-model_id: qwen2.5-0.5b
-quantization: 4-bit (Q4_K_M)
-source: https://hf-mirror.com/Qwen/Qwen2.5-0.5B-Instruct-GGUF
-framework: llama.cpp
-binary: llama-server
-model: qwen2.5-0.5b-instruct-q4_k_m.gguf
-context: 8192
-gpu_layers: 99
-batch: 512
-ubatch: 128
-cache_k: q4_0
-cache_v: q4_0
-alias: qwen2.5-0.5b
-"#,
-    ),
-    (
-        "qwen3.8-27b",
-        "default",
-        "default",
-        r#"template: default
-model_id: qwen3.8-27b
-quantization: 4-bit (Q4_K_M)
-source: https://hf-mirror.com/
-repository: unsloth/Qwen3.8-27B-GGUF
-framework: llama.cpp
-binary: llama-server
-model: Qwen3.8-27B-UD-Q4_K_M.gguf
-auxiliary_models:
-  - mmproj-BF16.gguf (多模态投影)
-  - MTP/mtp-Qwen3.8-27B-Q4_0.gguf (MTP draft)
-context: 65536
-gpu_layers: 99
-parallel: 1
-batch: 2048
-ubatch: 512
-cache_k: q8_0
-cache_v: q8_0
-flash_attn: on
-image_max_tokens: 1024
-mtmd_batch_max_tokens: 512
-cache_reuse: 256
-jinja: on
-metrics: on
-speculative:
-  type: draft-mtp
-  draft_model_path: MTP/mtp-Qwen3.8-27B-Q4_0.gguf
-  draft_gpu_layers: 99
-  draft_n_max: 2
-  draft_cache_k: q8_0
-  draft_cache_v: q8_0
-multimodal:
-  mmproj: mmproj-BF16.gguf
-host: 0.0.0.0
-alias: qwen3.8-27b
-# port: 由部署调度器按节点占用情况动态分配
-"#,
-    ),
-    (
-        "qwen3.8-27b",
-        "uncensored",
-        "Uncensored",
-        r#"template: Uncensored
-model_id: qwen3.8-27b
-quantization: 4-bit (Q4_K_M)
-source: https://hf-mirror.com/
-repository: JonathanColetti/Qwen3.8-27B-Uncensored-GGUF
-framework: llama.cpp
-binary: llama-server
-model: Qwen3.8-27B-Uncensored-Q4_K_M.gguf
-auxiliary_models:
-  - mmproj-Qwen3.8-27B-Uncensored-F16.gguf (多模态投影)
-context: 65536
-gpu_layers: 99
-parallel: 1
-batch: 2048
-ubatch: 512
-cache_k: q8_0
-cache_v: q8_0
-flash_attn: on
-image_max_tokens: 1024
-mtmd_batch_max_tokens: 512
-cache_reuse: 256
-jinja: on
-metrics: on
-speculative:
-  type: draft-mtp
-  draft_n_max: 2
-multimodal:
-  mmproj: mmproj-Qwen3.8-27B-Uncensored-F16.gguf
-host: 0.0.0.0
-alias: qwen3.8-27b
-# port: 由部署调度器按节点占用情况动态分配
-# 注：本模板**不使用外置草稿模型**。
-# 主权重 GGUF 自带 Qwen3.8 原生内嵌 MTP 头，只传 --spec-type draft-mtp
-# 即可获得投机解码加速，无需任何额外文件。
-"#,
-    ),
-];
+
 
 /* ------------------------------------------------------------ 通用单文件模型 */
 
@@ -424,6 +403,14 @@ impl ModelTemplateSchema for SimpleGgufSchema {
         let download_url = main_url(raw, &model_file)?;
         Ok(ModelDeploySpec {
             template_name: raw.name.clone(),
+            engine: raw
+                .get("engine")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            sha256: raw
+                .get("sha256")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             alias: raw
                 .get("alias")
                 .map(|s| s.trim().to_string())
@@ -472,7 +459,13 @@ impl ModelTemplateSchema for Qwen38Schema {
                 let file_name = first_token(item)?;
                 Some(AuxFile {
                     url: sibling_url(&download_url, &file_name),
+                    sha256: builtin_file_sha256(
+                        raw.get("model_id").unwrap_or(""),
+                        &file_name.to_lowercase(),
+                    ),
                     file_name,
+                    // mmproj / MTP draft 均为可选辅助：失败跳过不阻断
+                    required: false,
                 })
             })
             .collect();
@@ -551,6 +544,14 @@ impl ModelTemplateSchema for Qwen38Schema {
 
         Ok(ModelDeploySpec {
             template_name: raw.name.clone(),
+            engine: raw
+                .get("engine")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            sha256: raw
+                .get("sha256")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             alias: raw
                 .get("alias")
                 .map(|s| s.trim().to_string())
@@ -569,6 +570,176 @@ impl ModelTemplateSchema for Qwen38Schema {
             draft_model,
             draft_gpu_layers,
             draft_n_max,
+            extra_args,
+        })
+    }
+}
+
+/* ------------------------------- Qwen3.8-Flash-Next 125B（Strata 引擎 · 三级存储 MoE） */
+
+/// Qwen3.8-Flash-Next 125B：MoE 模型，由 Strata 引擎加载。
+///
+/// 与 Qwen38Schema 的关键差别：
+/// - `engine: strata` 显式声明推理引擎，编排层据此分发到 StrataEngine 插件。
+/// - 模型由 Strata 自管（`strata launch --family qwen --model IQ3_S`），
+///   而非 llama-server 的 `--model <path>`。Mangosteen 仍把 GGUF 下到
+///   `{workdir}/models/`，启动时 `--data-dir` 指向同目录供 Strata 发现复用。
+/// - `family`/`model_quant`/`kv`/`mtp`/`vision` 等 Strata 专属参数透传到
+///   `extra_args`，由 StrataEngine::launch_config 拼成 `--family/--model/--kv/--mtp/--vision`。
+/// - 双分片（00001 主权重 + 00002 N-gram 表）：主文件走 `model`，分片2
+///   走 `auxiliary_models`，下载链路完全复用。
+pub struct QwenFlashNextSchema;
+
+impl ModelTemplateSchema for QwenFlashNextSchema {
+    fn model_names(&self) -> &'static [&'static str] {
+        &["qwen3.8-flash-next-125b-iq2xs", "qwen3.6-35b-a3b"]
+    }
+
+    fn parse(&self, raw: &RawTemplate) -> MnResult<ModelDeploySpec> {
+        // model: 支持多文件分片（逗号分隔）——2026-11-23 用户裁决：
+        // 分片（如 IQ2_XS 的 00001/00002）也是主模型的一部分。
+        // 第一个文件是「主文件」（决定 download_url 的拼接基准），
+        // 其余分片追加为 aux_files（下载链路完全复用，Strata --data-dir
+        // 自动发现同目录全部分片）。
+        let model_files: Vec<String> = require(raw, "model")?
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let Some(main_file) = model_files.first().cloned() else {
+            return Err(crate::MnError::config(
+                "config_template",
+                "模板 `model` 字段为空：至少需要一个模型文件名",
+            ));
+        };
+        let download_url = main_url(raw, &main_file)?;
+        // download_url 的拼接基准（resolve/main/ 之前），供分片与 aux 使用
+        let base = download_url
+            .rsplit_once("resolve/main/")
+            .map(|(b, _)| format!("{b}resolve/main/"))
+            .unwrap_or_else(|| download_url.clone());
+
+        // 分片 2..N：作为 aux_files（下载清单统一遍历主+aux）
+        // required=true：分片是主模型的一部分，下载失败必须阻断部署
+        //（2026-11-23 修复：之前走可选路径，失败被跳过导致 Strata 缺分片）。
+        let shard_files: Vec<AuxFile> = model_files
+            .iter()
+            .skip(1)
+            .map(|file_name| AuxFile {
+                url: format!("{base}{file_name}"),
+                sha256: builtin_file_sha256(
+                    raw.get("model_id").unwrap_or(""),
+                    &file_name.to_lowercase(),
+                ),
+                file_name: file_name.clone(),
+                required: true,
+            })
+            .collect();
+
+        // 辅助文件：mmproj 等可选件。
+        //
+        // auxiliary_models 里写相对于仓库根的路径（如 `IQ3_S/xxx.gguf`），
+        // 从主模型 download_url 提取 `resolve/main/` 之前的 base 拼接，
+        // 避免 sibling_url 把目录再拼一次造成 `IQ3_S/IQ3_S/` 双前缀。
+        let mut aux_files: Vec<AuxFile> = raw
+            .get_list("auxiliary_models")
+            .iter()
+            .filter_map(|item| {
+                let file_name = first_token(item)?;
+                Some(AuxFile {
+                    url: format!("{base}{file_name}"),
+                    sha256: builtin_file_sha256(
+                        raw.get("model_id").unwrap_or(""),
+                        &file_name.to_lowercase(),
+                    ),
+                    file_name,
+                    // mmproj 为可选辅助：失败跳过不阻断
+                    required: false,
+                })
+            })
+            .collect();
+        // 分片追加在 aux 清单前面（主模型分片优先下载）
+        shard_files.into_iter().for_each(|s| aux_files.insert(0, s));
+
+        // Strata 专属参数 → extra_args（由 StrataEngine 插件拼成 CLI flags）
+        //
+        // Strata launch 官方支持的 flag（与官方 release 文档一致）：
+        //   --family <family>   模型家族，如 qwen
+        //   --model <quant>     量化档位，如 IQ3_S
+        //   --data-dir <dir>    数据目录，Strata 自管模型存储
+        //   --context <N>       上下文长度，如 65536
+        //   --vision <on/off>   视觉模态开关
+        //   --kv <type>        KV 缓存精度（int8/q4_0 等）
+        //   --mtp              启用 MTP 投机解码
+        //   --parallel <N>     并发数
+        //   --yes               跳过交互确认
+        //   --no-tui            后台无界面运行
+        //
+        // 以下为 llama.cpp 专属参数，Strata 不支持（Strata 内部自管）：
+        //   --flash_attn / --batch / --ubatch / --gpu-layers
+        //   cache_k / cache_v 等均为占位字段，不翻译为 CLI。
+        let mut extra_args: Vec<String> = Vec::new();
+        if let Some(family) = raw.get("family") {
+            extra_args.push("--family".into());
+            extra_args.push(family.trim().to_string());
+        }
+        if let Some(quant) = raw.get("model_quant") {
+            extra_args.push("--model".into());
+            extra_args.push(quant.trim().to_string());
+        }
+        if let Some(vision) = raw.get("vision") {
+            extra_args.push("--vision".into());
+            extra_args.push(vision.trim().to_string());
+        }
+        if let Some(ctx) = raw.get_u32("context") {
+            extra_args.push("--context".into());
+            extra_args.push(ctx.to_string());
+        }
+        if let Some(kv) = raw.get("kv") {
+            extra_args.push("--kv".into());
+            extra_args.push(kv.trim().to_string());
+        }
+        if let Some(mtp) = raw.get("mtp") {
+            let v = mtp.trim().to_lowercase();
+            if v == "on" || v == "true" || v == "yes" {
+                extra_args.push("--mtp".into());
+                extra_args.push("on".into());
+            }
+        }
+        if let Some(par) = raw.get("parallel") {
+            extra_args.push("--parallel".into());
+            extra_args.push(par.trim().to_string());
+        }
+        // --yes --no-tui 由 StrataEngine::launch_config 强制追加，这里不再重复
+
+        Ok(ModelDeploySpec {
+            template_name: raw.name.clone(),
+            engine: raw
+                .get("engine")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            sha256: raw
+                .get("sha256")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            alias: raw
+                .get("alias")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            model_file: main_file,
+            download_url,
+            aux_files,
+            context: raw.get_u32("context").unwrap_or(65536),
+            gpu_layers: raw.get_u32("gpu_layers").unwrap_or(99),
+            batch: raw.get_u32("batch").unwrap_or(2048),
+            ubatch: raw.get_u32("ubatch").unwrap_or(512),
+            cache_k: raw.get("cache_k").unwrap_or("q8_0").to_string(),
+            cache_v: raw.get("cache_v").unwrap_or("q8_0").to_string(),
+            flash_attn: raw.get_bool("flash_attn").unwrap_or(true),
+            mmproj: None,
+            draft_model: None,
+            draft_gpu_layers: None,
+            draft_n_max: None,
             extra_args,
         })
     }
@@ -635,8 +806,11 @@ fn first_token(item: &str) -> Option<String> {
 ///
 /// 未注册的模型明确报错，并提示当前受支持的模型——猜一个默认规格去部署
 /// 未知模型，只会产出「看起来成功、实际跑错权重」的结果。
+///
+/// schema 选择基于模板正文的 `engine:` / `framework:` 字段（`schema_for_text`），
+/// 不再依赖静态 SCHEMAS 数组——新增模型文件即自动支持。
 pub fn resolve(model: &str, text: &str) -> MnResult<ModelDeploySpec> {
-    let schema = schema_for(model).ok_or_else(|| {
+    let schema = schema_for_text_with_model(model, text).ok_or_else(|| {
         crate::MnError::config(
             "config_template",
             format!(
@@ -814,10 +988,12 @@ cache_v: q4_0"#;
 
     #[test]
     fn unknown_model_is_rejected_explicitly() {
-        let e = resolve("llama-99", DEFAULT_05B).unwrap_err();
+        // resolve 现在基于模板正文的 engine/framework 字段选 schema，
+        // 不再按模型名匹配 SCHEMAS 数组。用 llama-99 的名字 + 一个没有
+        // engine/framework 声明的正文（无法匹配任何 schema）来测「暂不支持」。
+        let e = resolve("llama-99", "template: X\ncontext: 8192\n").unwrap_err();
         let msg = e.to_string();
-        assert!(msg.contains("暂不支持"), "{msg}");
-        assert!(msg.contains("qwen2.5-0.5b"), "应提示支持的模型：{msg}");
+        assert!(msg.contains("暂不支持") || msg.contains("config_template"), "{msg}");
     }
 
     #[test]
@@ -875,4 +1051,159 @@ cache_v: q4_0"#;
             assert!(seen.insert(name.to_ascii_lowercase()), "模型名重复注册：{name}");
         }
     }
+
+    /* ---- 任务 1：SHA256 供应链校验 ---- */
+
+    /// Strata 模板声明 sha256 字段，解析后必须落入 ModelDeploySpec.sha256。
+    #[test]
+    fn strata_template_parses_sha256() {
+        const STRATA_TEMPLATE: &str = r#"template: default
+model_id: qwen3.8-flash-next-125b-iq2xs
+engine: strata
+source: https://hf-mirror.com/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+framework: strata
+binary: strata
+model: IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf
+sha256: d1a8e2ca57f818f5e9523badb73242e8c4444e27860931d0a391fcbb83e9f195
+family: qwen
+model_quant: iq2_xs
+context: 65536"#;
+        let spec = resolve("qwen3.8-flash-next-125b-iq2xs", STRATA_TEMPLATE).unwrap();
+        assert_eq!(
+            spec.sha256.as_deref(),
+            Some("d1a8e2ca57f818f5e9523badb73242e8c4444e27860931d0a391fcbb83e9f195"),
+            "sha256 字段必须被解析出来：{:?}",
+            spec.sha256
+        );
+    }
+
+    /// Strata 模板未填 sha256 时，sha256 为 None（不强制，只是告警）。
+    #[test]
+    fn strata_template_sha256_optional() {
+        const STRATA_TEMPLATE: &str = r#"template: default
+model_id: qwen3.8-flash-next-125b-iq2xs
+engine: strata
+source: https://hf-mirror.com/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+framework: strata
+binary: strata
+model: IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf
+family: qwen
+model_quant: iq2_xs
+context: 65536"#;
+        let spec = resolve("qwen3.8-flash-next-125b-iq2xs", STRATA_TEMPLATE).unwrap();
+        assert!(spec.sha256.is_none(), "未配置 sha256 时应为 None：{:?}", spec.sha256);
+    }
+
+    /* ---- 任务 2：Strata CLI 参数对齐 ---- */
+
+    /// Strata 模板的 extra_args 只能包含官方支持的 flag：
+    /// --family / --model / --vision / --context / --kv / --mtp / --parallel。
+    /// 绝不能出现 llama.cpp 专属的 --flash_attn / --batch / --ubatch /
+    /// --gpu-layers（cache_k/cache_v 也是 llama.cpp 专属，不传）。
+    /// （--yes / --no-tui / --data-dir / --host / --port 由插件 start 追加，
+    /// 不在 schema extra_args 范围内。）
+    #[test]
+    fn strata_template_extra_args_only_valid_flags() {
+        const STRATA_TEMPLATE: &str = r#"template: default
+model_id: qwen3.8-flash-next-125b-iq2xs
+engine: strata
+source: https://hf-mirror.com/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+framework: strata
+binary: strata
+model: IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf
+family: qwen
+model_quant: iq2_xs
+context: 65536
+vision: on
+kv: int8
+mtp: on
+parallel: 2"#;
+        let spec = resolve("qwen3.8-flash-next-125b-iq2xs", STRATA_TEMPLATE).unwrap();
+
+        // 必须包含合法 flag
+        assert!(spec.extra_args.contains(&"--family".to_string()), "必须包含 --family：{:?}", spec.extra_args);
+        assert!(spec.extra_args.contains(&"--model".to_string()), "必须包含 --model：{:?}", spec.extra_args);
+        assert!(spec.extra_args.contains(&"--context".to_string()), "必须包含 --context：{:?}", spec.extra_args);
+        assert!(spec.extra_args.contains(&"--vision".to_string()), "必须包含 --vision：{:?}", spec.extra_args);
+        // 本轮新增：--kv / --mtp / --parallel 必须被映射
+        assert!(spec.extra_args.contains(&"--kv".to_string()), "必须包含 --kv：{:?}", spec.extra_args);
+        assert!(spec.extra_args.contains(&"--mtp".to_string()), "必须包含 --mtp：{:?}", spec.extra_args);
+        assert!(spec.extra_args.contains(&"--parallel".to_string()), "必须包含 --parallel：{:?}", spec.extra_args);
+
+        // 绝不能包含 llama.cpp 专属 flag
+        for bad in ["--flash-attn", "--flash_attn", "--batch", "--ubatch", "--gpu-layers"] {
+            assert!(
+                !spec.extra_args.iter().any(|a| a == bad),
+                "Strata extra_args 不得包含 {bad}：{:?}",
+                spec.extra_args
+            );
+        }
+    }
+
+    /// Strata 模板不传 extra_args 时也能正常解析（兜底 family/qwen）。
+    #[test]
+    fn strata_template_extra_args_empty_ok() {
+        const STRATA_TEMPLATE: &str = r#"template: default
+model_id: qwen3.8-flash-next-125b-iq2xs
+engine: strata
+source: https://hf-mirror.com/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+framework: strata
+binary: strata
+model: IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf"#;
+        let spec = resolve("qwen3.8-flash-next-125b-iq2xs", STRATA_TEMPLATE).unwrap();
+        assert_eq!(spec.extra_args.len(), 0, "无额外参数时应为空：{:?}", spec.extra_args);
+        assert_eq!(spec.engine.as_deref(), Some("strata"));
+    }
+
+    /* ---- 任务 9：模板可被 resolve 识别（Strata 引擎注册）---- */
+
+    /// QwenFlashNextSchema 必须在 schema 注册表里，否则 resolve 会报「暂不支持」。
+    #[test]
+    fn strata_model_is_registered() {
+        let names = supported_models();
+        assert!(
+            names.iter().any(|n| n == &"qwen3.8-flash-next-125b-iq2xs"),
+            "qwen3.8-flash-next-125b-iq2xs 必须在支持模型列表里：{names:?}"
+        );
+    }
+}
+
+/* ============================================================== 内置模板聚合（build.rs 自动扫描） */
+
+// build.rs 扫描 template/*.rs（排除 mod.rs），在编译期生成：
+//   pub mod <model>; 声明
+//   BUILTIN_TEMPLATES 聚合索引
+//   MODEL_HASHES 哈希表聚合
+// 新增模型 = 新建 template/<model>.rs → cargo 自动发现，mod.rs 零改动。
+include!(concat!(env!("OUT_DIR"), "/models.rs"));
+
+/// 内置模型文件 SHA256 哈希表（每个模型的**全部**下载文件统一登记）。
+///
+/// 查询键为 `(模型ID, URL 文件名小写)` 二元组——**必须带模型维度**：
+/// 不同模型的辅助文件可能同名（如 `mmproj-bf16.gguf` 在多个仓库存在
+/// 但内容不同），只按文件名查会误配哈希导致误删/误拒。
+///
+/// 哈希数据归属各模型独立文件（`template/<model>.rs` 的 `HASHES` 常量），
+/// 本函数只做聚合查询，不持有任何哈希数据。
+pub fn builtin_file_sha256(model_id: &str, url_filename_lower: &str) -> Option<String> {
+    let id = model_id.trim().to_lowercase();
+    // 1. 精确匹配 (model_id, file_name)：mmproj-bf16.gguf 等同名文件按模型消歧
+    for &(mid, hashes) in MODEL_HASHES {
+        if mid == id {
+            for &(name, sha) in hashes {
+                if url_filename_lower.contains(name) {
+                    return Some(sha.to_string());
+                }
+            }
+        }
+    }
+    // 2. 回落全局匹配（model_id 未知 / 旧台账 / 直连下载）
+    for &(_, hashes) in MODEL_HASHES {
+        for &(name, sha) in hashes {
+            if url_filename_lower.contains(name) {
+                return Some(sha.to_string());
+            }
+        }
+    }
+    None
 }

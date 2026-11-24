@@ -223,11 +223,10 @@ impl Orchestrator {
         let engine = self.config().local.engine;
         if !self.engines_registry.has(engine) {
             return Err(MnError::bad_request(format!(
-                "当前推理引擎为 {}，但该引擎尚未适配（未注册插件；需要 {} 格式的模型，\
-                 且启动方式与 llama.cpp 不同）。\n\
-                 请在设置页改用已支持的引擎，或使用命令行工具自行启动 {}。",
+                "当前推理引擎为 {}，但该引擎尚未适配（未注册插件）。\n\
+                 请在设置页改用已支持的引擎（如 llama.cpp / Ollama / Strata），\
+                 或使用命令行工具自行启动 {}。",
                 engine.display_name(),
-                engine.required_format(),
                 engine.display_name()
             )));
         }

@@ -32,25 +32,37 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mangosteen_core::config::InferenceEngine;
+use mangosteen_core::config::{EngineCapabilities, InferenceEngine};
 use mangosteen_core::plan::EngineLaunchConfig;
 use mangosteen_core::plan::LocalPlan;
 use mangosteen_core::MnResult;
 
-use crate::engine::{LlamaCppEngine, OllamaEngine};
-use crate::llama_args::llama_cpp_args;
+use crate::llama_cpp::{llama_cpp_args, LlamaCppEngine};
+use crate::strata::StrataEngine;
 
 /// 一个推理引擎插件。
 ///
 /// 实现者负责该引擎的全部「形态差异」：怎么生成远端启动配置、
-/// 怎么判断活着、启动前要检查什么。
+/// 怎么判断活着、启动前要检查什么、**怎么在远端准备/启停引擎进程**。
 ///
 /// 本地进程启动（`launch`）已撤销：Mangosteen 只部署到云端/远端节点
 /// （本地推理交由 Ollama 承担），编排层只消费 [`EnginePlugin::launch_config`]
 /// 生成远端 SSH 拉起参数。
+///
+/// ## 生命周期方法（远端 SPI）
+///
+/// `ensure_engine` / `start` / `stop` / `is_running` 把「引擎进程在远端
+/// 节点上如何存在」收敛进插件。provider 与编排层只调用这些方法，
+/// 不再直接拼 `llama-server` 二进制路径或 pid 文件名——
+/// 这是 Strata 等 Second Engine 能不改主链路接入的前提。
 pub trait EnginePlugin: std::fmt::Debug + Send + Sync {
     /// 对应的引擎标识。
     fn engine(&self) -> InferenceEngine;
+
+    /// 引擎能力表（健康检查路径 / 端口 / TLS / 密钥方式等）。
+    fn capabilities(&self) -> EngineCapabilities {
+        self.engine().capabilities()
+    }
 
     /// 为目标节点生成标准化进程启动配置。
     ///
@@ -69,6 +81,124 @@ pub trait EnginePlugin: std::fmt::Debug + Send + Sync {
     /// 好给出比「启动超时」更有用的提示。
     fn precheck(&self) -> MnResult<()> {
         Ok(())
+    }
+
+    /// 远端准备引擎二进制：确保引擎可执行文件就位。
+    ///
+    /// * `url` —— 引擎发行包/安装脚本地址（配置驱动，可独立于 app
+    ///   版本演进）；返回 `Ok(None)` 表示「引擎已由镜像/系统提供」。
+    /// * 实现必须幂等：已存在且可执行时直接返回。
+    fn ensure_engine(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        url: Option<&str>,
+    ) -> MnResult<Option<String>> {
+        let _ = (target, workdir, url);
+        Ok(None)
+    }
+
+    /// 在远端节点拉起引擎进程。
+    ///
+    /// `launch` 来自 [`Self::launch_config`]（args + 任务级密钥）。
+    /// 密钥注入方式由 [`Self::capabilities`] 的 `api_key_mode` 决定：
+    /// File 模式由实现写远端 600 文件并追加启动参数；Env 模式注入
+    /// 进程环境变量——绝不进 argv、绝不进日志。
+    fn start(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        launch: &EngineLaunchConfig,
+    ) -> MnResult<()> {
+        let _ = (target, workdir, launch);
+        Err(mangosteen_core::MnError::bad_request(format!(
+            "{} 引擎尚未实现远端启动（start）",
+            self.engine().display_name()
+        )))
+    }
+
+    /// 停止远端节点上本引擎的进程（保留节点）。
+    ///
+    /// 默认实现按端口/进程名兜底；引擎有专属停止命令（如
+    /// `strata launch --stop`）时覆写。
+    fn stop(&self, target: &crate::remote::SshTarget, workdir: &str) -> MnResult<()> {
+        let caps = self.capabilities();
+        crate::remote::stop_engine_process(target, workdir, caps.pid_name, None)
+    }
+
+    /// 指定端口上的引擎进程是否仍在运行。
+    fn is_running(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        port: u16,
+    ) -> MnResult<bool> {
+        let caps = self.capabilities();
+        crate::remote::engine_process_running_on_port(target, workdir, caps.pid_name, port)
+    }
+
+    /// TLS 协商（多态，2026-11-23 用户裁决）：调用方传入台账里记录的
+    /// `tls` 意图，插件返回该引擎**实际**是否启用 TLS。
+    ///
+    /// - llama.cpp：`supports_tls=true`，请求即结果
+    /// - Strata：只监听 HTTP，任何请求都返回 false
+    ///
+    /// 网关转发（inference.rs）与健康检查（provision.rs）都调用本方法，
+    /// 不再出现 `matches!(...Strata)` 分支散落在各处的局面。
+    fn tls_enabled(&self, requested: bool) -> bool {
+        requested && self.capabilities().supports_tls
+    }
+
+    /// 健康检查 URL 拼装（多态）：按引擎能力生成 scheme/host/port/path 组合。
+    ///
+    /// 默认实现基于能力表（TLS 走 host=llama-server，否则 127.0.0.1）；
+    /// 引擎可覆写做定制。
+    fn health_url(&self, bind_host: &str, port: u16, tls: bool) -> String {
+        let caps = self.capabilities();
+        let scheme = if self.tls_enabled(tls) {
+            "https"
+        } else {
+            "http"
+        };
+        let host = if self.tls_enabled(tls) {
+            "llama-server" // 自签证书 CN
+        } else {
+            bind_host
+        };
+        format!("{scheme}://{host}:{port}{}", caps.health_path)
+    }
+
+    /// 预下载模型的远端落位目录（多态，2026-11-23 用户裁决）。
+    ///
+    /// 以 llama.cpp 部署链路为参考：预下载 GGUF 平铺在 `{workdir}/models/`。
+    /// 引擎自管存储（Strata）覆写为 `models/<family>/<quant>/` 子目录，
+    /// 与 Strata 内部布局一致，启动时直接复用已下载文件。
+    fn model_download_dir(&self, workdir: &str, plan: &LocalPlan) -> String {
+        let _ = plan;
+        format!("{}/models", workdir.trim_end_matches('/'))
+    }
+
+    /// 启动参数适配（多态）：预下载文件已存在时调整启动参数。
+    ///
+    /// llama.cpp 默认不动（--model 路径即下载路径，天然复用）。
+    /// Strata 覆写：移除 --family/--model，追加 --model-path 指向已下载文件
+    /// （避免 Strata 重新下载 23.8GB，2026-11-22 实测踩坑）。
+    fn adapt_launch_args(&self, args: &mut Vec<String>, model_path: &str) {
+        let _ = (args, model_path);
+    }
+
+    /// 启动前文件检查（多态）：预下载模式引擎校验模型文件存在性。
+    ///
+    /// llama.cpp：文件不存在 → 报错指向「模型下载」阶段。
+    /// Strata：自管存储，预下载文件不存在也可由引擎自行下载 → 默认跳过。
+    fn preflight_model_check(&self, model_path: &str) -> Result<(), String> {
+        if self.capabilities().supports_model_path {
+            Err(format!(
+                "远端模型文件不存在：{model_path}。请在「模型下载」阶段确认文件已完整落盘"
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -101,39 +231,68 @@ impl EnginePlugin for LlamaCppEngine {
         // 只做定位，不跑 `--version`（本机实测 20~30 秒，不能进请求路径）
         self.locate().map(|_| ())
     }
+
+    /// llama.cpp：下载发行包到 `{workdir}/bin/`（幂等）。
+    ///
+    /// 无 URL 或代理信息时退回「PATH / 镜像自带」探测（历史行为）。
+    fn ensure_engine(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        url: Option<&str>,
+    ) -> MnResult<Option<String>> {
+        let url = url.filter(|u| !u.trim().is_empty());
+        // 已存在且可执行 → 直接复用（幂等）
+        let bin = format!("{}/bin/llama-server", workdir.trim_end_matches('/'));
+        let probe = crate::remote::ssh_exec(
+            target,
+            &format!("if [ -x {bin} ]; then echo ok; else echo missing; fi"),
+            60,
+        )?;
+        if probe.trim() == "ok" {
+            return Ok(Some(bin));
+        }
+        match url {
+            Some(url) => {
+                crate::llama_cpp::ensure_llama_server_from_archive(target, workdir, url, "", "")?;
+                Ok(Some(bin))
+            }
+            // 无 URL：沿用镜像/系统 PATH 里的 llama-server（历史行为）
+            None => Ok(None),
+        }
+    }
+
+    fn start(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        launch: &EngineLaunchConfig,
+    ) -> MnResult<()> {
+        let bin = format!("{}/bin/llama-server", workdir.trim_end_matches('/'));
+        crate::llama_cpp::start_llama_server_with_key(
+            target,
+            &bin,
+            &launch.args,
+            workdir,
+            launch.api_key.as_deref(),
+        )
+    }
+
+    fn stop(&self, target: &crate::remote::SshTarget, workdir: &str) -> MnResult<()> {
+        crate::llama_cpp::stop_llama_server(target, workdir)
+    }
+
+    fn is_running(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        port: u16,
+    ) -> MnResult<bool> {
+        crate::llama_cpp::llama_server_running_on_port(target, workdir, port)
+    }
 }
 
 // ============================================================ Ollama
-
-impl EnginePlugin for OllamaEngine {
-    fn engine(&self) -> InferenceEngine {
-        InferenceEngine::Ollama
-    }
-
-    fn launch_config(&self, _plan: &LocalPlan, _bind_host: &str, _port: u16) -> EngineLaunchConfig {
-        EngineLaunchConfig::default()
-    }
-
-    fn probe(&self, _plan: &LocalPlan) -> bool {
-        // 注意：**不能**用 `plan.port`。Ollama 是常驻服务，端口固定
-        // （默认 11434），不是台账为「一次部署」分配的那个。
-        // 用错端口 + 用 `/health`（Ollama 没有该端点）会让部署刚成功
-        // 就被判成失败。
-        self.probe()
-    }
-
-    fn precheck(&self) -> MnResult<()> {
-        if self.probe() {
-            Ok(())
-        } else {
-            Err(mangosteen_core::MnError::bad_request(format!(
-                "未检测到 Ollama 服务（{}:{}）。请先启动 Ollama 应用或执行 `ollama serve`",
-                self.host(),
-                self.probe_port()
-            )))
-        }
-    }
-}
 
 /// 从本地模型文件路径推导 Ollama 里应使用的模型名。
 ///
@@ -174,13 +333,13 @@ impl EngineRegistry {
         self
     }
 
-    /// 用内置插件构造（llama.cpp + Ollama）。
+    /// 用内置插件构造（llama.cpp + Ollama + Strata）。
     ///
     /// 这是**唯一**的内置登记点：新增引擎只改这里，网关不动。
-    pub fn with_builtin(llama: LlamaCppEngine, ollama: OllamaEngine) -> Self {
+    pub fn with_builtin(llama: LlamaCppEngine, strata: StrataEngine) -> Self {
         Self::empty()
             .register(Arc::new(llama))
-            .register(Arc::new(ollama))
+            .register(Arc::new(strata))
     }
 
     /// 取指定引擎的插件。
@@ -195,8 +354,27 @@ impl EngineRegistry {
 
     /// 是否已登记该引擎。
     pub fn has(&self, engine: InferenceEngine) -> bool {
-        self.get(engine).is_some()
+        self.plugins.iter().any(|p| p.engine() == engine)
     }
+}
+
+/// 全局内置插件查找（多态入口，2026-11-23 用户裁决）。
+///
+/// 网关/编排层只需要一个引擎标识就能拿到插件，调用 `tls_enabled` /
+/// `health_url` 等多态方法——不再写 `matches!(...Strata)` 分支。
+/// 未注册的引擎（如旧台账）回落 None，调用方按「保守支持」处理。
+pub fn plugin_for(engine: InferenceEngine) -> Option<&'static dyn EnginePlugin> {
+    // 内置插件静态注册（进程级单例，无锁）
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<EngineRegistry> = OnceLock::new();
+    let reg = REGISTRY.get_or_init(|| {
+        EngineRegistry::with_builtin(
+            LlamaCppEngine::default(),
+            StrataEngine::new(),
+        )
+    });
+    // 借用静态注册表里的插件：生命周期与静态变量绑定
+    reg.get(engine).map(|arc| arc.as_ref() as &dyn EnginePlugin)
 }
 
 #[cfg(test)]
@@ -204,7 +382,10 @@ mod tests {
     use super::*;
 
     fn registry() -> EngineRegistry {
-        EngineRegistry::with_builtin(LlamaCppEngine::default(), OllamaEngine::new())
+        EngineRegistry::with_builtin(
+            LlamaCppEngine::default(),
+            StrataEngine::new(),
+        )
     }
 
     /// 已实现的引擎都能查到插件。
@@ -212,7 +393,9 @@ mod tests {
     fn builtin_plugins_are_registered() {
         let r = registry();
         assert!(r.has(InferenceEngine::LlamaCpp));
-        assert!(r.has(InferenceEngine::Ollama));
+        assert!(r.has(InferenceEngine::Strata));
+        // Ollama 已移除（2026-11-23 用户裁决）
+        assert!(!r.has(InferenceEngine::Ollama));
         assert_eq!(r.registered().len(), 2);
     }
 

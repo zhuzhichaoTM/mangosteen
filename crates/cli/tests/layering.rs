@@ -428,7 +428,8 @@ fn c3_engine_registry_is_single_source() {
 #[test]
 fn c3_unimplemented_engines_are_absent_from_registry() {
     // 这条是行为契约，实现在 local crate 的单测里（plugin::tests），
-    // 这里做源码级确认：内置注册只登记两个引擎。
+    // 这里做源码级确认：内置注册只登记已实现的引擎。
+    // 2026-11-23 用户裁决：Ollama 移除，当前仅 llama.cpp + Strata。
     let src = crate_sources("mangosteen-device")
         .into_iter()
         .find(|(p, _)| p.file_name().map(|f| f == "plugin.rs").unwrap_or(false))
@@ -439,11 +440,16 @@ fn c3_unimplemented_engines_are_absent_from_registry() {
     let seg = &code[i..];
     let end = seg.find("\n    }").unwrap_or(seg.len());
     let body = &seg[..end];
-    // 只允许 register 两次（llama.cpp + ollama）
+    // 只允许 register 已实现的引擎（llama.cpp + Strata）
     let registers = body.matches(".register(").count();
     assert_eq!(
         registers, 2,
-        "内置注册应只登记已实现的引擎（当前 llama.cpp + Ollama），实际 {registers} 次"
+        "内置注册应只登记已实现的引擎（llama.cpp + Strata），实际 {registers} 次"
+    );
+    // Ollama 已删除（2026-11-23 用户裁决）
+    assert!(
+        !body.contains("Ollama"),
+        "Ollama 已从内置注册移除，with_builtin 不应再引用"
     );
 }
 

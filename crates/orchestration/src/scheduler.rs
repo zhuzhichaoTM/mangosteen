@@ -43,6 +43,7 @@ use mangosteen_core::config::SchedulerConfig;
 use mangosteen_core::estimate::Placement;
 use mangosteen_core::plan::{CloudPlan, ComputeOrigin, DeploymentPlan, LocalPlan};
 use mangosteen_core::policy::SelectionConstraints;
+use mangosteen_core::template::ModelDeploySpec;
 use mangosteen_core::{MnError, MnResult};
 
 use crate::assess::{Assessor, DeploymentRequest, Evaluated};
@@ -127,6 +128,11 @@ pub struct Scheduler {
     local_ports: std::sync::Mutex<(u16, u16)>,
     /// 已被外部占用的端口（来自台账），分配时跳过
     reserved: std::sync::Mutex<Vec<u16>>,
+    /// 远端工作目录（`[cloud] remote_workdir`）。
+    ///
+    /// 模型/引擎路径拼接用；Orchestrator 构造时注入，
+    /// 默认与 CloudConfig 一致（/home/deploy/mangosteen）。
+    remote_workdir: std::sync::RwLock<String>,
 }
 
 impl Scheduler {
@@ -138,7 +144,25 @@ impl Scheduler {
             next_port_offset: std::sync::atomic::AtomicU32::new(0),
             local_ports: std::sync::Mutex::new((11_435, 11_999)),
             reserved: std::sync::Mutex::new(Vec::new()),
+            remote_workdir: std::sync::RwLock::new(
+                "/home/deploy/mangosteen".to_string(),
+            ),
         }
+    }
+
+    /// 设置远端工作目录（编排层构造时调用）。
+    pub fn set_remote_workdir(&self, dir: String) {
+        if let Ok(mut w) = self.remote_workdir.write() {
+            *w = dir;
+        }
+    }
+
+    /// 远端工作目录快照。
+    pub fn remote_workdir(&self) -> String {
+        self.remote_workdir
+            .read()
+            .map(|w| w.clone())
+            .unwrap_or_else(|_| "/home/deploy/mangosteen".to_string())
     }
 
     /// 端口区间起点（测试与内部读用）。
@@ -353,21 +377,6 @@ impl Scheduler {
         let kv = evaluated.assessment.kv_cache;
         let batch = evaluated.assessment.batch_size;
 
-        // 云端所需显存 = 同一套估算（推理引擎唯一性原则）
-        let required_vram = self
-            .assessor
-            .cloud_vram_requirement(&evaluated.spec, ctx, kv, batch);
-
-        let _constraints = SelectionConstraints {
-            min_vram_bytes: required_vram,
-            min_memory_bytes: evaluated.assessment.requirement.total_bytes(),
-            min_disk_bytes: evaluated.spec.file_size_bytes.saturating_mul(2),
-            max_price_per_hour: req.max_price_per_hour.or(self.config.max_price_per_hour),
-            allowed_providers: Vec::new(),
-            allowed_regions: Vec::new(),
-            require_stock: self.config.require_stock,
-        };
-
         // ---- 模板驱动：下载什么、怎么启动，全部由配置模板正文决定 ----
         //
         // 这里曾经是按模型名硬编码特判（`is_qwen38`）：固定仓库、固定文件名、
@@ -382,32 +391,118 @@ impl Scheduler {
             None => crate::template_plan::legacy_spec(evaluated, req)?,
         };
 
+        // 引擎解析：模板 `engine:` 字段 > 全局默认（llama.cpp）。
+        //
+        // 这样 Strata 等多引擎模型在模板里声明 `engine: strata` 即可
+        // 走独立引擎，而既有 llama.cpp 模型不写 engine 字段时保持原行为。
+        let plan_engine = deploy_spec.parsed_engine().unwrap_or_default();
+
+        // 资源估算：按引擎能力分叉。
+        //
+        // llama.cpp 走权重+KV 全量公式；Strata 是 MoE 三级存储引擎，
+        // 显存只需专家热缓存（12–24GB），主体在内存与磁盘，
+        // 用全量公式会算出 125B 百 GB 显存而误拒部署。
+        let (required_vram, required_memory, required_disk) = if deploy_spec
+            .engine
+            .as_deref()
+            == Some("strata")
+        {
+            let vram = 24u64 << 30; // 24GB 显存上限（专家缓存 + KV + dense）
+            let mem = (64u64) << 30; // 64GB 内存（专家权重主体驻内存）
+            let disk = evaluated
+                .spec
+                .file_size_bytes
+                .saturating_mul(2)
+                .max(80u64 << 30); // 至少 80GB 磁盘（GGUF 双分片 + Strata 缓存）
+            (vram, mem, disk)
+        } else {
+            let vram = self
+                .assessor
+                .cloud_vram_requirement(&evaluated.spec, ctx, kv, batch);
+            let mem = evaluated.assessment.requirement.total_bytes();
+            let disk = evaluated.spec.file_size_bytes.saturating_mul(2);
+            (vram, mem, disk)
+        };
+
+        let _constraints = SelectionConstraints {
+            min_vram_bytes: required_vram,
+            min_memory_bytes: required_memory,
+            min_disk_bytes: required_disk,
+            max_price_per_hour: req
+                .max_price_per_hour
+                .or_else(|| template_price_cap(&deploy_spec))
+                .or(self.config.max_price_per_hour),
+            allowed_providers: Vec::new(),
+            allowed_regions: Vec::new(),
+            require_stock: self.config.require_stock,
+        };
+
+        // 远端模型根目录：跟随 [cloud] remote_workdir（构造时注入），
+        // 不再写死 /home/deploy/mangosteen。
+        //
+        // Strata 引擎自管模型存储（supports_model_path=false）：
+        // 预下载文件放在 models/<family>/<quant>/ 子目录（与 Strata 内部布局一致），
+        // 而非直接放在 models/ 下（避免 Strata 启动时找不到已下载文件而重复下载）。
+        // llama.cpp 引擎（supports_model_path=true）仍用 models/ 平铺。
+        let models_dir = if plan_engine
+            .capabilities()
+            .supports_model_path
+        {
+            format!("{}/models", self.remote_workdir().trim_end_matches('/'))
+        } else {
+            // Strata: models/<family>/<quant>/
+            // 从 deploy_spec.extra_args 提取 family 和 model_quant
+            let family = deploy_spec
+                .extra_args
+                .iter()
+                .position(|a| a == "--family")
+                .and_then(|i| deploy_spec.extra_args.get(i + 1))
+                .map(|s| s.to_lowercase())
+                .unwrap_or_else(|| "qwen".to_string());
+            let quant = deploy_spec
+                .extra_args
+                .iter()
+                .position(|a| a == "--model")
+                .and_then(|i| deploy_spec.extra_args.get(i + 1))
+                .map(|s| s.to_lowercase())
+                .unwrap_or_else(|| "default".to_string());
+            format!(
+                "{}/models/{}/{}",
+                self.remote_workdir().trim_end_matches('/'),
+                family,
+                quant
+            )
+        };
         let remote_file = deploy_spec.model_file.clone();
         let mmproj_file = deploy_spec
             .mmproj
             .as_ref()
-            .map(|f| format!("/home/deploy/mangosteen/models/{f}"));
+            .map(|f| format!("{models_dir}/{f}"));
         let draft_file = deploy_spec
             .draft_model
             .as_ref()
-            .map(|f| format!("/home/deploy/mangosteen/models/{f}"));
+            .map(|f| format!("{models_dir}/{f}"));
         // 主模型下载地址同样来自模板（仓库 + 文件名），不再写死厂商路径
         let template_download_url = Some(deploy_spec.download_url.clone());
+
+        // 端口按引擎能力表：llama.cpp 用 8080（LLAMA_CPP_PORT），
+        // Strata 同样 8080 但语义不同；未来 vLLM(8000)/SGLang(30000)
+        // 自动取各自 default_port。隧道必须转发到服务真正监听的端口。
+        let engine_port = plan_engine.capabilities().default_port;
 
         // 引擎参数：与本地同一套语义，仅端口/绑定不同
         let engine = LocalPlan::from_assessment(
             &evaluated.spec,
-            format!("/home/deploy/mangosteen/models/{remote_file}"),
+            format!("{models_dir}/{remote_file}"),
             &evaluated.assessment,
-            // 云端跑的是 llama.cpp，端口用 `LLAMA_CPP_PORT`（8080）。
-            // 隧道必须转发到服务真正监听的端口，否则隧道建好了也连不上。
-            mangosteen_device::remote::LLAMA_CPP_PORT,
+            engine_port,
         );
 
         // 云端跑 GPU：层数必须全量卸载，否则会用 CPU 算——那不是用户要的。
         // `from_assessment` 是按**本地**硬件算的（本机无 GPU 时 gpu_layers=0），
         // 直接搬过来会让云端推理慢几十倍。
         let mut engine = engine;
+        engine.engine = plan_engine;
         engine.gpu_layers = deploy_spec.gpu_layers;
         engine.mmproj_path = mmproj_file.clone();
         engine.draft_model_path = draft_file.clone();
@@ -418,6 +513,9 @@ impl Scheduler {
         engine.kv_cache_type_v = crate::template_plan::parse_kv_cache(&deploy_spec.cache_v);
         engine.flash_attention = deploy_spec.flash_attn;
         engine.extra_args = deploy_spec.extra_args.clone();
+        // 任务级 API Key 同步写入 engine，供探活（Strata /v1/models）携带 Bearer
+        let api_key = crate::orchestrator::generate_api_key_pub();
+        engine.api_key = Some(api_key.clone());
 
         let _ = reason;
         Ok(CloudPlan {
@@ -426,23 +524,19 @@ impl Scheduler {
             gpu_count: 1,
             vram_bytes_per_gpu: required_vram,
             cpu_cores: 8,
-            memory_bytes: evaluated.assessment.requirement.total_bytes().max(8 << 30),
-            disk_bytes: evaluated
-                .spec
-                .file_size_bytes
-                .saturating_mul(2)
-                .max(50 << 30),
+            memory_bytes: required_memory.max(8 << 30),
+            disk_bytes: required_disk.max(50 << 30),
             image: "ubuntu22.04-cuda12".to_string(),
             // 下载目标必须与引擎读取路径**完全一致**。此前这里独立按模型名
             // 推导（qwen2.5-0.5b → qwen2.5-0.5b.gguf），而下发给 llama-server
             // 的是模板文件名，于是「下了一份、启动找另一份」。
-            model_path: format!("/home/deploy/mangosteen/models/{remote_file}"),
-            engine_port: mangosteen_device::remote::LLAMA_CPP_PORT,
+            model_path: format!("{models_dir}/{remote_file}"),
+            engine_port,
             mmproj_path: mmproj_file,
             draft_model_path: draft_file,
             // 任务级 API Key（safety 分支，改动点 2）：部署计划生成即定钥，
             // 随台账持久化；启动时写远端密钥文件、网关转发时附 Bearer 头。
-            api_key: Some(crate::orchestrator::generate_api_key_pub()),
+            api_key: Some(api_key),
             // TLS（P1 传输加密）：引导链生成自签证书后启动时探测写入；
             // 计划构造时为 false，部署流程随后按实际状态回填。
             tls: false,
@@ -452,13 +546,18 @@ impl Scheduler {
                 .iter()
                 .map(|a| mangosteen_core::plan::AuxiliaryDownload {
                     url: a.url.clone(),
-                    path: format!("/home/deploy/mangosteen/models/{}", a.file_name),
+                    path: format!("{models_dir}/{}", a.file_name),
                     bytes: None,
+                    sha256: a.sha256.clone(),
+                    required: a.required,
                 })
                 .collect(),
             local_port: self.allocate_local_port(),
             engine,
-            max_price_per_hour: req.max_price_per_hour.or(self.config.max_price_per_hour),
+            max_price_per_hour: req
+                .max_price_per_hour
+                .or_else(|| template_price_cap(&deploy_spec))
+                .or(self.config.max_price_per_hour),
             // 主链路：**远端自己下载**。设备选云端时，下载就该发生在云端——
             // 不要求本地先下一份再传上去。地址由模板决定（仓库 + 文件名），
             // 保证「下到哪里」与「从哪下」始终一致。
@@ -470,21 +569,28 @@ impl Scheduler {
             // 安全加固（2026-11-21）：自定义模板未配置 sha256 时告警，
             // 提示用户该下载无供应链校验（内置模板已全量覆盖）。
             download_sha256: {
-                let sha = req
-                    .model_download
-                    .as_ref()
-                    .and_then(|d| d.expected_sha256.clone())
+                let sha = deploy_spec
+                    .sha256
+                    .clone()
+                    .or_else(|| {
+                        req.model_download
+                            .as_ref()
+                            .and_then(|d| d.expected_sha256.clone())
+                    })
                     .or_else(|| {
                         let fname = req
                             .model_download
                             .as_ref()
                             .map(|d| d.url.rsplit('/').next().unwrap_or("").to_lowercase())
                             .unwrap_or_default();
-                        builtin_sha256(&fname)
+                        mangosteen_core::template::builtin_file_sha256(
+                            req.model_id.as_deref().unwrap_or(""),
+                            &fname,
+                        )
                     });
                 if sha.is_none() {
                     eprintln!(
-                        "[cloud] ⚠ 模型下载无 SHA256 校验（自定义模板未配置且非内置白名单），\
+                        "[cloud] ⚠ 模型下载无 SHA256 校验（模板未配置 sha256 且非内置白名单），\
                          供应链防投毒缺失。建议在模板中添加 sha256 字段"
                     );
                 }
@@ -611,6 +717,23 @@ pub(crate) fn model_file_name(model: &str) -> String {
         })
         .collect();
     format!("{}.gguf", slug.trim_matches('-'))
+}
+
+/// 模板声明的价格上限（`max_price_per_hour` 字段，元/小时）。
+///
+/// 商用水平验证要求：Strata 这类 MoE 模型先用 ≤2 元/时 的 GPU 节点
+/// （RTX 3090/4090 竞价实例）跑通链路，再考虑放开价格上限。
+/// `None` = 未声明，沿用全局默认（scheduler.max_price_per_hour）。
+fn template_price_cap(spec: &ModelDeploySpec) -> Option<f64> {
+    // 商用水平验证：Strata 部署 ≤2 元/小时（用户指定 V100S / 2 元以下节点）
+    if spec.engine.as_deref() == Some("strata") {
+        return Some(2.0);
+    }
+    // ModelDeploySpec 目前不携带价格字段（schema 层未解析）；
+    // 预留接口——未来模板可加 `max_price_per_hour: 2.0`，
+    // 由 schema 解析进 extra_args 或新增字段，这里统一收口。
+    let _ = spec;
+    None
 }
 
 #[cfg(test)]
@@ -1047,6 +1170,7 @@ mod tests {
                 draft_model_path: None,
                 auxiliary_downloads: Vec::new(),
                 extra_args: Vec::new(),
+                api_key: None,
             },
             max_price_per_hour: None,
             download_sha256: None,
@@ -1216,55 +1340,93 @@ mod tests {
         assert_eq!(ComputeTarget::parse("gpu"), None);
         assert_eq!(ComputeTarget::parse(""), None);
     }
+
+    /* ---- 任务 1：SHA256 供应链校验 ---- */
+
+    /// template_price_cap 对 Strata 引擎返回 2.0（≤2 元/时 GPU 验证）。
+    #[test]
+    fn template_price_cap_strata_returns_2() {
+        use mangosteen_core::template::ModelDeploySpec;
+        let spec = ModelDeploySpec {
+            template_name: "default".into(),
+            engine: Some("strata".into()),
+            sha256: None,
+            alias: None,
+            model_file: "m.gguf".into(),
+            download_url: "https://h/m.gguf".into(),
+            aux_files: vec![],
+            context: 65536,
+            gpu_layers: 99,
+            batch: 2048,
+            ubatch: 512,
+            cache_k: "q8_0".into(),
+            cache_v: "q8_0".into(),
+            flash_attn: true,
+            mmproj: None,
+            draft_model: None,
+            draft_gpu_layers: None,
+            draft_n_max: None,
+            extra_args: vec![],
+        };
+        assert_eq!(
+            template_price_cap(&spec),
+            Some(2.0),
+            "Strata 部署价格上限必须是 2.0 元/小时"
+        );
+    }
+
+    /// template_price_cap 对非 Strata 引擎返回 None（沿用全局默认）。
+    #[test]
+    fn template_price_cap_non_strata_returns_none() {
+        use mangosteen_core::template::ModelDeploySpec;
+        let spec = ModelDeploySpec {
+            template_name: "default".into(),
+            engine: None, // llama.cpp 默认
+            sha256: None,
+            alias: None,
+            model_file: "m.gguf".into(),
+            download_url: "https://h/m.gguf".into(),
+            aux_files: vec![],
+            context: 8192,
+            gpu_layers: 99,
+            batch: 512,
+            ubatch: 128,
+            cache_k: "q4_0".into(),
+            cache_v: "q4_0".into(),
+            flash_attn: true,
+            mmproj: None,
+            draft_model: None,
+            draft_gpu_layers: None,
+            draft_n_max: None,
+            extra_args: vec![],
+        };
+        assert_eq!(template_price_cap(&spec), None, "非 Strata 引擎不限制价格");
+    }
+
+    /// download_sha256 优先取 deploy_spec.sha256（模板声明），
+    /// 其次取 req.model_download.expected_sha256，最后取 builtin_file_sha256 内置表。
+    #[test]
+    fn download_sha256_priority_template_first() {
+        // 这个测试验证 build_cloud_plan 的 sha256 优先级逻辑：
+        // deploy_spec.sha256 > req.model_download.expected_sha256 > builtin_sha256
+        // 由于 build_cloud_plan 是 pub(crate)，这里通过模板解析验证
+        // sha256 字段能正确流入 ModelDeploySpec。
+        use mangosteen_core::template::resolve;
+        const STRATA_WITH_SHA: &str = r#"template: default
+model_id: qwen3.8-flash-next-125b-iq2xs
+engine: strata
+source: https://hf-mirror.com/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
+framework: strata
+binary: strata
+model: IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf
+sha256: abc123def456
+family: qwen
+model_quant: IQ2_XS
+context: 65536"#;
+        let spec = resolve("qwen3.8-flash-next-125b-iq2xs", STRATA_WITH_SHA).unwrap();
+        assert_eq!(spec.sha256.as_deref(), Some("abc123def456"));
+    }
 }
 
 
-/// 内置模型 SHA256 白名单（P0-1，2026-11-19，来源 ModelScope 官方 API）。
-///
-/// 按下载 URL 的文件名小写匹配。新增模型时在此登记（或部署请求携带
-/// `expected_sha256` 显式指定）。
-///
-/// P0-1 白名单（2026-11-19，用户裁决）：仅登记用户实际使用的模板文件。
-/// 哈希来源：hf-mirror / ModelScope 官方 API 的 `lfs.oid`（即文件
-/// SHA256），当日实时校验。
-/// - qwen2.5-0.5b · default：Qwen/Qwen2.5-0.5B-Instruct-GGUF
-/// - qwen3.8-27b · default：unsloth/Qwen3.8-27B-GGUF（主模型 + mmproj + MTP）
-/// - qwen3.8-27b · Uncensored：JonathanColetti/Qwen3.8-27B-Uncensored-GGUF
-fn builtin_sha256(url_filename_lower: &str) -> Option<String> {
-    let table: &[(&str, &str)] = &[
-        // qwen2.5-0.5b · default（491MB）
-        (
-            "qwen2.5-0.5b-instruct-q4_k_m.gguf",
-            "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
-        ),
-        // qwen3.8-27b · default（unsloth UD Q4_K_M，16.6GB）
-        (
-            "qwen3.8-27b-ud-q4_k_m.gguf",
-            "1bce504dfecd84153666928a41d8a66706f0158d3a317bc5196b72819d7dc529",
-        ),
-        // qwen3.8-27b · default 辅助：多模态投影（931MB）
-        (
-            "mmproj-bf16.gguf",
-            "83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53",
-        ),
-        // qwen3.8-27b · default 辅助：MTP draft（1.37GB）
-        (
-            "mtp-qwen3.8-27b-q4_0.gguf",
-            "50d9ce5a6da381bbcfb31061cf73df94a90e6faf8efeddee379a9cb8f1501c6e",
-        ),
-        // qwen3.8-27b · Uncensored（16.8GB）
-        (
-            "qwen3.8-27b-uncensored-q4_k_m.gguf",
-            "4c5e2db039e9325ac7724c8846c71356a24ad1cdfa28002d73ecb6be645f9675",
-        ),
-        // qwen3.8-27b · Uncensored 辅助：多模态投影（928MB）
-        (
-            "mmproj-qwen3.8-27b-uncensored-f16.gguf",
-            "5ac423f8a29059dc24e51bc6a43e9380dcd57a9347f28b62591e0b3f60b7081c",
-        ),
-    ];
-    table
-        .iter()
-        .find(|(name, _)| url_filename_lower.contains(name))
-        .map(|(_, sha)| sha.to_string())
-}
+

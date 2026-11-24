@@ -113,7 +113,7 @@ impl Orchestrator {
                     // 自定义节点路径
                     let workdir = self.config().cloud.remote_workdir.clone();
                     let port = cloud_plan.engine_port;
-                    let running = mangosteen_device::remote::llama_server_running_on_port(
+                    let running = mangosteen_device::llama_cpp::llama_server_running_on_port(
                         &target, &workdir, port,
                     )
                     .unwrap_or(false);
@@ -131,6 +131,7 @@ impl Orchestrator {
                             &target,
                             &workdir,
                             &launch_config,
+                            cloud_plan.engine.engine,
                         ) {
                             errors.push(format!("{id}：启动推理进程失败：{e}"));
                             continue;
@@ -339,10 +340,10 @@ impl Orchestrator {
                         if p.is_empty() { None } else { Some(p.to_string()) }
                     };
                     let stop_res = match model_name.as_deref() {
-                        Some(m) => mangosteen_device::remote::stop_llama_server_by_model(
+                        Some(m) => mangosteen_device::llama_cpp::stop_llama_server_by_model(
                             &target, &workdir, m,
                         ),
-                        None => mangosteen_device::remote::stop_llama_server_on_port(
+                        None => mangosteen_device::llama_cpp::stop_llama_server_on_port(
                             &target, &workdir, Some(port),
                         ),
                     };
@@ -354,7 +355,7 @@ impl Orchestrator {
                         // 否则一次网络抖动会把已经成功的卸载误报成失败，
                         // 而 UI 也随之弹出多余的错误窗口。
                         let still_running =
-                            mangosteen_device::remote::llama_server_running_on_port(
+                            mangosteen_device::llama_cpp::llama_server_running_on_port(
                                 &target, &workdir, port,
                             )
                             .unwrap_or(false);
@@ -370,7 +371,7 @@ impl Orchestrator {
                     }
                     // 二次校验同样只作辅助证据：它的 SSH 错误不能推翻
                     // 主操作的成功结论（详见 stop_service_on_self_hosted）。
-                    match mangosteen_device::remote::llama_server_running_on_port(
+                    match mangosteen_device::llama_cpp::llama_server_running_on_port(
                         &target, &workdir, port,
                     ) {
                         Ok(true) => {
@@ -412,7 +413,7 @@ impl Orchestrator {
                                     .service_target(provider, instance_id)
                                     .ok()
                                     .map(|wt| {
-                                        mangosteen_device::remote::llama_server_running_on_port(
+                                        mangosteen_device::llama_cpp::llama_server_running_on_port(
                                             &wt,
                                             &self.config().cloud.remote_workdir,
                                             port,
@@ -441,7 +442,7 @@ impl Orchestrator {
                                     eprintln!("[unload] 端口空闲确认跳过（无法获取 SSH 目标）");
                                     break;
                                 };
-                                match mangosteen_device::remote::llama_server_running_on_port(
+                                match mangosteen_device::llama_cpp::llama_server_running_on_port(
                                     &wt,
                                     &self.config().cloud.remote_workdir,
                                     port,
@@ -973,7 +974,7 @@ impl Orchestrator {
                             );
                         } else {
                             let wd = self.config().cloud.remote_workdir.clone();
-                            if let Err(e) = mangosteen_device::remote::shred_encrypted_models(
+                            if let Err(e) = mangosteen_device::llama_cpp::shred_encrypted_models(
                                 &target, &wd,
                             ) {
                                 eprintln!("[cloud] ⚠ 部署 {} 静态数据销毁失败（{e}）", id);
@@ -1231,7 +1232,7 @@ impl Orchestrator {
                             );
                         } else {
                             let wd = self.config().cloud.remote_workdir.clone();
-                            if let Err(e) = mangosteen_device::remote::shred_encrypted_models(
+                            if let Err(e) = mangosteen_device::llama_cpp::shred_encrypted_models(
                                 &target, &wd,
                             ) {
                                 warnings.push(format!("静态数据销毁（密文/密钥）：{e}"));
@@ -1311,10 +1312,10 @@ impl Orchestrator {
                 Some(target) => {
                     let workdir = self.config().cloud.remote_workdir.clone();
                     let stop_res = match model_name.as_deref() {
-                        Some(m) => mangosteen_device::remote::stop_llama_server_by_model(
+                        Some(m) => mangosteen_device::llama_cpp::stop_llama_server_by_model(
                             &target, &workdir, m,
                         ),
-                        None => mangosteen_device::remote::stop_llama_server_on_port(
+                        None => mangosteen_device::llama_cpp::stop_llama_server_on_port(
                             &target, &workdir, Some(port),
                         ),
                     };
@@ -1334,7 +1335,7 @@ impl Orchestrator {
                     // `?` 直接往外抛——于是「明明停成功了却报失败」，用户重试
                     // 也无法消除。校验是**辅助证据**，它的网络错误不能推翻
                     // 主操作的成功结论，只能降级成一条警告。
-                    match mangosteen_device::remote::llama_server_running_on_port(
+                    match mangosteen_device::llama_cpp::llama_server_running_on_port(
                         &target, &workdir, port,
                     ) {
                         Ok(true) => {
@@ -1374,7 +1375,7 @@ impl Orchestrator {
                 } else {
                     let wd = self.config().cloud.remote_workdir.clone();
                     if let Err(e) =
-                        mangosteen_device::remote::shred_encrypted_models(&target, &wd)
+                        mangosteen_device::llama_cpp::shred_encrypted_models(&target, &wd)
                     {
                         warnings.push(format!("静态数据销毁（密文/密钥）：{e}"));
                     } else {
@@ -1577,6 +1578,7 @@ impl Orchestrator {
                         &target,
                         &workdir,
                         &launch_config,
+                        cloud_plan.engine.engine,
                     ) {
                         mark_failed(&self.state, &e);
                         return Err(e);
@@ -1946,12 +1948,12 @@ impl Orchestrator {
                     let workdir = self.config().cloud.remote_workdir.clone();
                     match model_name.as_deref() {
                         Some(m) => {
-                            let _ = mangosteen_device::remote::stop_llama_server_by_model(
+                            let _ = mangosteen_device::llama_cpp::stop_llama_server_by_model(
                                 &target, &workdir, m,
                             );
                         }
                         None => {
-                            let _ = mangosteen_device::remote::stop_llama_server_on_port(
+                            let _ = mangosteen_device::llama_cpp::stop_llama_server_on_port(
                                 &target, &workdir, Some(port),
                             );
                         }

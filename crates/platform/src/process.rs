@@ -447,6 +447,47 @@ pub fn probe_http_ok(host: &str, port: u16, path: &str, per_op: Duration) -> boo
     }
 }
 
+/// 带 Bearer Token 的 HTTP 探活（用于需要鉴权的推理服务，如 Strata）。
+///
+/// 与 `probe_http_ok` 语义相同，但请求头携带 `Authorization: Bearer <token>`。
+/// `token` 为空时退化为无鉴权探测（等价于 `probe_http_ok`）。
+pub fn probe_http_ok_with_auth(
+    host: &str,
+    port: u16,
+    path: &str,
+    token: &str,
+    per_op: Duration,
+) -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let addr = format!("{host}:{port}");
+    let Ok(sock) = addr.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&sock, per_op) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(per_op));
+    let _ = stream.set_write_timeout(Some(per_op));
+    let auth_header = if token.trim().is_empty() {
+        String::new()
+    } else {
+        format!("Authorization: Bearer {}\r\n", token.trim())
+    };
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\n{auth_header}Connection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 128];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).contains(" 200 "),
+        _ => false,
+    }
+}
+
 /// 轮询 HTTP 端点直到成功或超时。
 ///
 /// 用于等待 llama-server 的 `/health` 就绪。**不依赖 HTTP 客户端库**：
@@ -1025,6 +1066,64 @@ mod tests {
 
         let elapsed = wait_http_ready("127.0.0.1", port, "/health", Duration::from_secs(5));
         assert!(elapsed.is_ok(), "should detect readiness: {elapsed:?}");
+        drop(handle);
+    }
+
+    /* ---- 任务 3：带 Bearer Token 的探活 ---- */
+
+    /// probe_http_ok_with_auth 对不可达地址返回 false（不 panic）。
+    #[test]
+    fn probe_with_auth_returns_false_for_unreachable() {
+        let ok = probe_http_ok_with_auth(
+            "127.0.0.1",
+            1, // 端口 1 几乎不可能有服务监听
+            "/v1/models",
+            "test-token",
+            Duration::from_millis(200),
+        );
+        assert!(!ok, "不可达地址应返回 false");
+    }
+
+    /// probe_http_ok_with_auth 空 token 时等价于 probe_http_ok（无鉴权）。
+    #[test]
+    fn probe_with_auth_empty_token_same_as_plain() {
+        let with_empty = probe_http_ok_with_auth(
+            "127.0.0.1",
+            1,
+            "/v1/models",
+            "", // 空 token
+            Duration::from_millis(200),
+        );
+        let plain = probe_http_ok("127.0.0.1", 1, "/v1/models", Duration::from_millis(200));
+        assert_eq!(with_empty, plain, "空 token 应与无鉴权探活行为一致");
+    }
+
+    /// probe_http_ok_with_auth 对真实运行的 HTTP 服务（带 200 响应）返回 true。
+    /// 用本地 mock server 验证请求头格式正确（含 Authorization）。
+    #[test]
+    fn probe_with_auth_sends_bearer_header() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let handle = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = s.read(&mut buf);
+            // 回 200 OK
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+        });
+
+        let ok = probe_http_ok_with_auth(
+            "127.0.0.1",
+            port,
+            "/v1/models",
+            "sk-test-123",
+            Duration::from_secs(2),
+        );
+        assert!(ok, "带正确 token 探活应返回 true");
         drop(handle);
     }
 }

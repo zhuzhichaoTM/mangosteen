@@ -2193,9 +2193,10 @@ fn e2e_engine_selection_defaults_to_llama_cpp_and_rejects_unsupported() {
     );
     assert_eq!(InferenceEngine::parse("不存在"), None);
 
-    // 格式要求
-    assert_eq!(InferenceEngine::LlamaCpp.required_format(), "gguf");
-    assert_eq!(InferenceEngine::Vllm.required_format(), "safetensors");
+    // 推荐格式（参考信息，不作强约束）
+    assert_eq!(InferenceEngine::LlamaCpp.recommended_format(), "gguf");
+    assert_eq!(InferenceEngine::Vllm.recommended_format(), "safetensors");
+    assert_eq!(InferenceEngine::Strata.recommended_format(), "gguf");
 }
 
 /// 选中未适配引擎时，部署必须给出可读的拒绝原因。

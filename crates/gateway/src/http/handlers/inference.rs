@@ -403,10 +403,24 @@ pub(crate) fn rebuild_snapshot(
         snapshot.insert(
             model_id.clone(),
             BackendTarget {
+                // TLS/host 一律走 EnginePlugin 多态方法（2026-11-23 用户裁决：
+                // 「tls 认证调用推理引擎提供的方法，支持就激活，不支持就忽略」）。
                 // 证书 CN=llama-server（引导链自签），tls 时 URL host 必须
-                // 与之匹配才能过 curl hostname 校验（upstream/relay 已加
-                // --resolve llama-server:port:127.0.0.1 映射回环）。
-                host: if record.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false) {
+                // 与之匹配才能过 curl hostname 校验；不支持 TLS 的引擎
+                //（Strata）插件返回 false → 回落 127.0.0.1 + http。
+                host: if record
+                    .plan
+                    .cloud
+                    .as_ref()
+                    .map(|c| c.tls)
+                    .unwrap_or(false)
+                    && !mangosteen_device::plugin::plugin_for(
+                        record.plan.cloud.as_ref().map(|c| c.engine.engine)
+                            .unwrap_or_default(),
+                    )
+                    .map(|p| p.tls_enabled(true))
+                    .unwrap_or(true)
+                {
                     "llama-server".to_string()
                 } else {
                     "127.0.0.1".to_string()
@@ -415,7 +429,18 @@ pub(crate) fn rebuild_snapshot(
                 model_id,
                 origin_label: record.plan.origin.label(),
                 api_key: record.plan.cloud.as_ref().and_then(|c| c.api_key.clone()),
-                tls: record.plan.cloud.as_ref().map(|c| c.tls).unwrap_or(false),
+                // tls：走插件多态方法（引擎不支持 TLS 时插件返回 false，
+                // 2026-11-23 用户裁决「不支持则忽略」）。
+                tls: record
+                    .plan
+                    .cloud
+                    .as_ref()
+                    .map(|c| {
+                        mangosteen_device::plugin::plugin_for(c.engine.engine)
+                            .map(|p| p.tls_enabled(c.tls))
+                            .unwrap_or(c.tls)
+                    })
+                    .unwrap_or(false),
                 tls_cert_path: record
                     .plan
                     .origin

@@ -176,6 +176,7 @@ impl GatewayBuilder {
                 llama_server_url: self.config.cloud.llama_server_url.clone(),
                 github_proxy: self.config.cloud.github_proxy.clone(),
                 llama_server_sha256: self.config.cloud.llama_server_sha256.clone(),
+                engine_urls: self.config.cloud.engine_urls(),
                 ..Default::default()
             },
         ));

@@ -243,6 +243,48 @@ pub fn run_checks(args: &Args) -> Vec<Check> {
             });
         }
 
+        // 推理引擎二进制（本地探测，云端节点由 ensure_engine 在部署时安装）
+        let engine = cfg.local.engine;
+        let binary = engine.binary_name();
+        let found = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .any(|dir| std::path::Path::new(dir).join(binary).exists());
+        // 显式路径配置优先
+        let explicit = cfg
+            .local
+            .engine_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        if explicit || found {
+            out.push(Check {
+                name: "推理引擎".into(),
+                status: Status::Ok,
+                detail: format!(
+                    "{}（{}）{}",
+                    engine.display_name(),
+                    binary,
+                    if explicit {
+                        format!("，路径 {}", cfg.local.engine_path.as_ref().unwrap().display())
+                    } else {
+                        "（PATH 中）".to_string()
+                    }
+                ),
+                hint: None,
+            });
+        } else {
+            out.push(Check {
+                name: "推理引擎".into(),
+                status: Status::Warn,
+                detail: format!("{} 未在本地 PATH 中找到（{}）", engine.display_name(), binary),
+                hint: Some(format!(
+                    "云端部署时由 mangosteen 自动安装；本地推理请先安装 {} 或在配置 local.engine_path 指定路径",
+                    engine.display_name()
+                )),
+            });
+        }
+
         // 云服务商
         let (registered, skipped) = mangosteen_gateway::probe_providers(cfg);
         if registered.is_empty() && cfg.providers.is_empty() {
@@ -376,6 +418,28 @@ mod tests {
         // 不应再出现本地部署相关的检查项
         assert!(!checks.iter().any(|c| c.name == "本地优先策略"), "本地优先策略检查应已移除");
         assert!(!checks.iter().any(|c| c.name.contains("模型库")), "模型库相关检查应已移除");
+        // 任务 9：推理引擎二进制检查必须存在
+        assert!(
+            checks.iter().any(|c| c.name == "推理引擎"),
+            "doctor 必须包含推理引擎二进制检查项：{:?}",
+            checks.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// 任务 9：doctor 的推理引擎检查项在配置加载失败时不应 panic。
+    #[test]
+    fn doctor_engine_check_does_not_panic_on_missing_config() {
+        // 用不存在的配置路径触发加载失败，doctor 应优雅处理
+        let a = crate::cli::parse_args(&[
+            "doctor".to_string(),
+            "--config".to_string(),
+            "/nonexistent/path/config.toml".to_string(),
+        ])
+        .unwrap();
+        let checks = run_checks(&a);
+        // 配置加载失败时，推理引擎检查可能缺失（因为 cfg 为 None），
+        // 但 doctor 不应 panic
+        let _ = checks;
     }
 
     #[test]

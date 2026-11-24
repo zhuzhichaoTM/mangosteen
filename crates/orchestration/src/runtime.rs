@@ -13,7 +13,7 @@ use mangosteen_core::config::{Config, SchedulerConfig};
 use mangosteen_core::plan::ComputeOrigin;
 use mangosteen_core::policy::SelectionConstraints;
 use mangosteen_core::{MnError, MnResult};
-use mangosteen_device::engine::LlamaCppEngine;
+use mangosteen_device::llama_cpp::LlamaCppEngine;
 use mangosteen_provider::orchestrator::CloudOrchestrator;
 use mangosteen_provider::TunnelManager;
 
@@ -157,6 +157,8 @@ impl Orchestrator {
         let scheduler =
             Scheduler::new(assessor.clone_for_scheduler(), config.scheduler.clone());
         scheduler.set_port_range(config.local.port_range_start, config.local.port_range_end)?;
+        // 远端工作目录注入（模型/引擎路径拼接跟随 [cloud] remote_workdir）
+        scheduler.set_remote_workdir(config.cloud.remote_workdir.clone());
         // 网关自身端口也要预留：默认 11516 落在引擎区间 11435-11999 内，
         // 分配器虽然有 `is_port_bindable` 兜底，但显式预留能避免依赖
         // 「网关已开始监听」这个时序前提。
@@ -212,11 +214,11 @@ impl Orchestrator {
             scheduler: std::sync::RwLock::new(scheduler),
             // 注册表在此构造：内置插件清单只在 device crate 里维护一份，
             // 编排层不关心有哪些引擎、各自怎么启动。本地 llama-server
-            // 启动路径已撤销（本地推理交由 Ollama 承担），编排层只保留
-            // 插件化的 launch_config 能力供云端远端拉起使用。
+            // 启动路径已撤销，编排层只保留插件化的 launch_config 能力
+            // 供云端远端拉起使用。Ollama 已移除（用户裁决 2026-11-23）。
             engines_registry: mangosteen_device::EngineRegistry::with_builtin(
                 local_engine,
-                mangosteen_device::OllamaEngine::new(),
+                mangosteen_device::StrataEngine::new(),
             ),
             cloud: std::sync::Mutex::new(cloud),
             device_tunnels: std::sync::Mutex::new(device_tunnels),

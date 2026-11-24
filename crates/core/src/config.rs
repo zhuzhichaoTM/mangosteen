@@ -237,6 +237,64 @@ pub struct CloudConfig {
     ///   （生产环境长期不用、多租户共享、等保审计）。
     #[serde(default = "default_keep_ciphertext")]
     pub stop_keep_ciphertext: bool,
+    /// Strata 引擎安装脚本 URL（`[cloud] strata_install_url`）。
+    ///
+    /// 为空 = 要求镜像/节点预装 strata（`strata` 在 PATH 或
+    /// `{workdir}/bin/strata` 可执行）。配置后节点缺引擎时由
+    /// device 层插件自动下载安装——引擎版本演进不改 mangosteen。
+    ///
+    /// 默认官方地址；国内节点可换镜像（如 `https://ghfast.top/https://github.com/...`）。
+    #[serde(default = "default_strata_install_url")]
+    pub strata_install_url: String,
+    /// Strata 发布目录（`[cloud] strata_feed`），传给官方安装器的
+    /// `STRATA_FEED`（默认官方 GitHub Releases）。国内节点可填镜像代理，
+    /// 如 `https://ghfast.top/https://github.com/Niko1221/Strata/releases/latest/download`。
+    #[serde(default)]
+    pub strata_feed: String,
+}
+
+fn default_strata_install_url() -> String {
+    "https://github.com/Niko1221/Strata/releases/latest/download/install.sh".to_string()
+}
+
+impl CloudConfig {
+    /// 引擎安装/下载地址（key = `InferenceEngine::id()`）。
+    ///
+    /// llama.cpp 复用既有 `llama_server_url`；Strata 空值回落官方安装脚本
+    /// （自动安装）；其它引擎返回 None = 要求节点/镜像预装。
+    pub fn engine_install_url(
+        &self,
+        engine: crate::config::InferenceEngine,
+    ) -> Option<String> {
+        match engine {
+            crate::config::InferenceEngine::LlamaCpp => Some(self.llama_server_url.clone())
+                .filter(|u| !u.trim().is_empty()),
+            crate::config::InferenceEngine::Strata => {
+                let configured = self.strata_install_url.trim();
+                if configured.is_empty() {
+                    Some(default_strata_install_url())
+                } else {
+                    Some(configured.to_string())
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// 引擎二进制下载地址表（key = `InferenceEngine::id()`）。
+    ///
+    /// 供 provider 的 `OrchestratorConfig` 构造。新增引擎：
+    /// 在此登记一条（key 用 `id()`，value 从对应配置字段取）。
+    pub fn engine_urls(&self) -> std::collections::BTreeMap<String, String> {
+        use crate::config::InferenceEngine;
+        let mut m = std::collections::BTreeMap::new();
+        for e in InferenceEngine::all() {
+            if let Some(url) = self.engine_install_url(*e) {
+                m.insert(e.id().to_string(), url);
+            }
+        }
+        m
+    }
 }
 
 fn default_bind_host() -> String {
@@ -277,6 +335,8 @@ impl Default for CloudConfig {
             bind_host: default_bind_host(),
             api_key: None,
             stop_keep_ciphertext: default_keep_ciphertext(),
+            strata_install_url: default_strata_install_url(),
+            strata_feed: String::new(),
         }
     }
 }
@@ -467,7 +527,11 @@ fn default_max_fallbacks() -> u32 {
     2
 }
 fn default_launch_timeout() -> u64 {
-    120
+    // 600s → 1800s（2026-11-22）：Strata 加载 68-83GB MoE 模型需要
+    // 「校验文件完整性（几分钟）+ 专家热缓存到显存 + 初始化」，
+    // 600s 对慢盘/大加载不够。llama.cpp 启动快（<30s），1800s 超时不会
+    // 造成问题（失败时进程立即退出，不会等满超时）。
+    1800
 }
 fn default_provision_timeout() -> u64 {
     600
@@ -568,6 +632,9 @@ pub enum InferenceEngine {
     LlamaCpp,
     /// Ollama 服务（适配中）
     Ollama,
+    /// Strata（Niko1221/Strata）：MoE 三级存储推理运行时，
+    /// 12–24 GB 显存跑 125B 级 MoE；GGUF 格式，OpenAI 兼容 API。
+    Strata,
     /// vLLM（未验证）
     Vllm,
     /// SGLang（未验证）
@@ -582,6 +649,7 @@ impl InferenceEngine {
         &[
             Self::LlamaCpp,
             Self::Ollama,
+            Self::Strata,
             Self::Vllm,
             Self::Sglang,
             Self::TensorrtLlm,
@@ -593,6 +661,7 @@ impl InferenceEngine {
         match self {
             Self::LlamaCpp => "llama_cpp",
             Self::Ollama => "ollama",
+            Self::Strata => "strata",
             Self::Vllm => "vllm",
             Self::Sglang => "sglang",
             Self::TensorrtLlm => "tensorrt_llm",
@@ -604,6 +673,7 @@ impl InferenceEngine {
         match self {
             Self::LlamaCpp => "llama.cpp",
             Self::Ollama => "Ollama",
+            Self::Strata => "Strata",
             Self::Vllm => "vLLM",
             Self::Sglang => "SGLang",
             Self::TensorrtLlm => "TensorRT-LLM",
@@ -615,6 +685,7 @@ impl InferenceEngine {
         match s.trim().to_ascii_lowercase().as_str() {
             "llama_cpp" | "llamacpp" | "llama.cpp" => Some(Self::LlamaCpp),
             "ollama" => Some(Self::Ollama),
+            "strata" => Some(Self::Strata),
             "vllm" => Some(Self::Vllm),
             "sglang" => Some(Self::Sglang),
             "tensorrt_llm" | "tensorrt" | "trt" => Some(Self::TensorrtLlm),
@@ -628,9 +699,10 @@ impl InferenceEngine {
     ///
     /// - `LlamaCpp`：完整实现（拉起 llama-server 进程）
     /// - `Ollama`：复用已运行的守护进程（不拉进程，没在跑就报错）
+    /// - `Strata`：完整实现（远端拉起 strata launch 服务，OpenAI 兼容）
     /// - 其余：未适配，选中后部署会明确拒绝
     pub fn is_supported(self) -> bool {
-        matches!(self, Self::LlamaCpp | Self::Ollama)
+        matches!(self, Self::LlamaCpp | Self::Ollama | Self::Strata)
     }
 
     /// 是否复用外部常驻服务（而非本进程拉起）。
@@ -638,10 +710,14 @@ impl InferenceEngine {
         matches!(self, Self::Ollama)
     }
 
-    /// 该引擎要求的模型格式（用于下载/部署时的提示）。
-    pub fn required_format(self) -> &'static str {
+    /// 该引擎推荐的模型格式（供下载/部署时参考）。
+    ///
+    /// **不再作为强约束**：GGUF 由 llama.cpp / Strata 消费，
+    /// vLLM / SGLang / TensorRT-LLM 消费 safetensors。实际能否部署
+    /// 由模板 schema 与引擎插件判定，不由本枚举硬编码。
+    pub fn recommended_format(self) -> &'static str {
         match self {
-            Self::LlamaCpp | Self::Ollama => "gguf",
+            Self::LlamaCpp | Self::Ollama | Self::Strata => "gguf",
             Self::Vllm | Self::Sglang | Self::TensorrtLlm => "safetensors",
         }
     }
@@ -651,11 +727,123 @@ impl InferenceEngine {
         match self {
             Self::LlamaCpp => "llama-server",
             Self::Ollama => "ollama",
+            Self::Strata => "strata",
             Self::Vllm => "vllm",
             Self::Sglang => "sglang",
             Self::TensorrtLlm => "trtllm-serve",
         }
     }
+
+    /// 引擎能力表（形态差异的单一收敛点）。
+    ///
+    /// 新增引擎 = 枚举变体 + 这里一行能力 + device 层一个插件实现。
+    /// 下游（provider / orchestration / gateway）只读能力表，不写引擎分支。
+    pub fn capabilities(self) -> EngineCapabilities {
+        match self {
+            Self::LlamaCpp => EngineCapabilities {
+                health_path: "/health",
+                default_port: 8080,
+                supports_tls: true,
+                api_key_mode: ApiKeyMode::File,
+                model_path_flags: &["--model", "-m", "--mmproj", "--model-draft"],
+                pid_name: "llama-server",
+                supports_model_path: true,
+            },
+            Self::Ollama => EngineCapabilities {
+                health_path: "/",
+                default_port: 11434,
+                supports_tls: false,
+                api_key_mode: ApiKeyMode::None,
+                model_path_flags: &[],
+                pid_name: "ollama",
+                supports_model_path: false,
+            },
+            Self::Strata => EngineCapabilities {
+                // Strata 自带 OpenAI 兼容 API，健康检查用 /v1/models（带 Bearer 时 200）
+                health_path: "/v1/models",
+                default_port: 8080,
+                // Strata 不识别 --ssl-* 参数；传输加密由 SSH 隧道承担
+                supports_tls: false,
+                // 密钥经 API_KEY 环境变量注入（不进 argv、不进日志）
+                api_key_mode: ApiKeyMode::Env,
+                model_path_flags: &["--model"],
+                pid_name: "strata",
+                supports_model_path: false,
+            },
+            Self::Vllm => EngineCapabilities {
+                health_path: "/health",
+                default_port: 8000,
+                supports_tls: true,
+                api_key_mode: ApiKeyMode::File,
+                model_path_flags: &["--model"],
+                pid_name: "vllm",
+                supports_model_path: true,
+            },
+            Self::Sglang => EngineCapabilities {
+                health_path: "/health",
+                default_port: 30000,
+                supports_tls: true,
+                api_key_mode: ApiKeyMode::File,
+                model_path_flags: &["--model-path"],
+                pid_name: "sglang",
+                supports_model_path: true,
+            },
+            Self::TensorrtLlm => EngineCapabilities {
+                health_path: "/health",
+                default_port: 8000,
+                supports_tls: true,
+                api_key_mode: ApiKeyMode::File,
+                model_path_flags: &["--model"],
+                pid_name: "trtllm-serve",
+                supports_model_path: true,
+            },
+        }
+    }
+}
+
+/// 引擎密钥注入方式。
+///
+/// 不同推理框架对 API Key 的接受形态不同：llama.cpp 走
+/// `--api-key-file`（文件），Strata 走 `API_KEY` 环境变量。
+/// 差异收敛在这里，由 device 层插件按能力实现。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyMode {
+    /// 写远端 600 权限文件 + 启动参数引用（llama.cpp / vLLM / SGLang）
+    File,
+    /// 进程环境变量注入（Strata）
+    Env,
+    /// 引擎不提供鉴权（Ollama）
+    None,
+}
+
+/// 引擎形态能力（单一收敛点）。
+///
+/// ## 为什么集中成一张表
+///
+/// 引擎差异曾散落在 provider / device / lifecycle 各处：`llama-server`
+/// 二进制路径、pid 文件命名、`/health` 路径、`--ssl-*` 参数、
+/// `--api-key-file` 机制全部是硬编码分支。新增一个引擎就要在
+/// 七八个文件里各改一遍，漏一处就表现为「部署成功但探活失败」。
+/// 能力表把这些差异显式化，下游只按能力分发。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineCapabilities {
+    /// 健康检查路径（探活与就绪判定用）。
+    pub health_path: &'static str,
+    /// 默认监听端口（分配器起始段）。
+    pub default_port: u16,
+    /// 是否支持启动参数级 TLS（`--ssl-*` 族）。false 时依赖 SSH 隧道加密。
+    pub supports_tls: bool,
+    /// API Key 注入方式。
+    pub api_key_mode: ApiKeyMode,
+    /// 启动参数中「模型路径」类参数的旗标（`.enc` 解密识别用）。
+    pub model_path_flags: &'static [&'static str],
+    /// 远端进程/pid 命名锚点。
+    pub pid_name: &'static str,
+    /// 引擎是否接受「模型文件路径」作为启动输入。
+    /// false 表示引擎自管模型存储（如 Ollama 的 name:tag、Strata 的
+    /// family/model 名），远端下载的 GGUF 路径不参与启动参数。
+    pub supports_model_path: bool,
 }
 
 /// 本地部署默认参数。

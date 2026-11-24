@@ -118,6 +118,12 @@ pub struct LocalPlan {
     /// `--mtmd-batch-max-tokens`、`--parallel` 等 llama.cpp 参数。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
+    /// 本次部署的 API Key（任务级定钥，随台账持久化）。
+    ///
+    /// `Some` 时探活请求携带 `Authorization: Bearer <key>`（用于 Strata 等
+    /// 需要鉴权的推理服务）；`None` 时无鉴权探活。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl LocalPlan {
@@ -164,6 +170,7 @@ impl LocalPlan {
             draft_model_path: None,
             auxiliary_downloads: Vec::new(),
             extra_args: Vec::new(),
+            api_key: None,
         }
     }
 
@@ -181,6 +188,14 @@ pub struct AuxiliaryDownload {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// SHA256 校验值（2026-11-23 用户裁决：每个模型的每个下载文件都登记哈希）。
+    /// None = 未知（跳过校验，仅告警）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// 是否为主模型必需分片（2026-11-23 修复：分片下载失败不应被跳过）。
+    /// true = 必需（失败阻断部署）；false = 可选（失败跳过不阻断）。
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// 云端实例规格请求（已归一化，不含厂商差异字段）。

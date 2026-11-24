@@ -108,7 +108,7 @@ impl DeviceRuntime for RemoteRuntime {
             workdir
         };
         // github_proxy 空串：trait 直连场景无代理配置，由具体调用方传入
-        ensure_llama_server(self.ssh()?, workdir, download_url, "", "")
+        crate::llama_cpp::ensure_llama_server(self.ssh()?, workdir, download_url, "", "")
     }
 
     fn ensure_model(&self, url: &str, dest: &str, expected_bytes: Option<u64>) -> MnResult<u64> {
@@ -121,7 +121,7 @@ impl DeviceRuntime for RemoteRuntime {
         } else {
             workdir
         };
-        start_llama_server(self.ssh()?, bin, args, workdir)
+        crate::llama_cpp::start_llama_server(self.ssh()?, bin, args, workdir)
     }
 
     fn is_running(&self, workdir: &str) -> MnResult<bool> {
@@ -130,7 +130,7 @@ impl DeviceRuntime for RemoteRuntime {
         } else {
             workdir
         };
-        llama_server_running(self.ssh()?, workdir)
+        crate::llama_cpp::llama_server_running(self.ssh()?, workdir)
     }
 
     fn stop(&self, workdir: &str) -> MnResult<()> {
@@ -139,7 +139,7 @@ impl DeviceRuntime for RemoteRuntime {
         } else {
             workdir
         };
-        stop_llama_server(self.ssh()?, workdir)
+        crate::llama_cpp::stop_llama_server(self.ssh()?, workdir)
     }
 }
 
@@ -260,11 +260,50 @@ pub fn wait_http_ready_with_key(
 ) -> MnResult<Duration> {
     let started = Instant::now();
     let mut last = String::new();
+    // 快速失败：连接层错误（refused/reset/unreachable）连续
+    // max_conn_err_streak 次 → 端口不通或协议不符（如 https 打 http 端口），
+    // 报错。超时类错误（无响应/超时）继续等——模型加载需要时间。
+    let mut conn_err_streak: u32 = 0;
+    // Strata 22GB 实测加载 ~195s，100 × 2s = 200s 给足余量，
+    // 避免加载期间 reset 误杀。
+    let max_conn_err_streak: u32 = 100;
     while started.elapsed() < budget {
         match http_with_key("GET", url, None, 5, api_key) {
             Ok(r) if r.is_ok() => return Ok(started.elapsed()),
-            Ok(r) => last = format!("HTTP {}", r.status),
-            Err(e) => last = format!("{e}"),
+            Ok(r) => {
+                last = format!("HTTP {}", r.status);
+                // HTTP 层错误（4xx/5xx）说明服务在监听，不算连接失败
+                conn_err_streak = 0;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                // 连接层错误：端口不通 / 协议不符 / 网络不可达
+                let is_conn_err = msg.contains("refused")
+                    || msg.contains("reset")
+                    || msg.contains("unreachable")
+                    || msg.contains("No route")
+                    || msg.contains("Connection timed out");
+                if is_conn_err {
+                    conn_err_streak += 1;
+                } else {
+                    conn_err_streak = 0;
+                }
+                last = format!("{e}");
+                if conn_err_streak >= max_conn_err_streak {
+                    return Err(MnError::Network {
+                        stage: "等待云端推理服务".to_string(),
+                        reason: format!(
+                            "{} 连续 {} 次连接失败（约 {}s），判定服务不可达：{}。\
+                             常见原因：协议不符（https 打 http 端口）、SSH 隧道未转发到远端引擎端口、\
+                             远端引擎未监听目标端口",
+                            url,
+                            conn_err_streak,
+                            conn_err_streak as u64 * interval.as_secs(),
+                            last
+                        ),
+                    });
+                }
+            }
         }
         std::thread::sleep(interval);
     }
@@ -284,110 +323,6 @@ pub fn wait_http_ready(url: &str, budget: Duration, interval: Duration) -> MnRes
     wait_http_ready_with_key(url, budget, interval, None)
 }
 
-/// 确认远端引擎里已有指定模型；没有就让它自己下载。
-///
-/// ## 为什么是「远端自己下载」而不是上传本地文件
-///
-/// 本地 GGUF 有几百 MB 到几 GB，从家用宽带上行传到云端既慢又容易中断，
-/// 而且 Ollama 用自己的 blob 存储，传过去还要再 `create` 一次。
-/// 让远端按名字拉取官方权重，链路上只有几百字节的 JSON。
-///
-/// 代价是**量化版本可能与本地不同**（远端按官方 tag 拉）。这一点必须
-/// 在阶段说明里写清楚，不能让用户以为跑的是他本地那个 q2_k。
-pub fn ensure_ollama_model(base_url: &str, model: &str, budget: Duration) -> MnResult<Duration> {
-    let started = Instant::now();
-
-    // 1. 已存在就直接用（重复部署不重复下载）
-    if ollama_has_model(base_url, model) {
-        return Ok(started.elapsed());
-    }
-
-    // 2. 触发拉取。`stream:false` 让服务端拉完才返回，避免我们还要
-    //    解析事件流；超时按总预算给足。
-    let body = serde_json::json!({ "name": model, "stream": false }).to_string();
-    let reply = http(
-        "POST",
-        &format!("{base_url}/api/pull"),
-        Some(&body),
-        budget.as_secs().max(60),
-    )?;
-    if !reply.is_ok() {
-        return Err(MnError::Network {
-            stage: "云端加载模型".to_string(),
-            reason: format!(
-                "远端拉取 `{model}` 失败（HTTP {}）：{}",
-                reply.status,
-                first_line(&reply.body)
-            ),
-        });
-    }
-
-    // 3. 复核：拉取接口成功但模型名可能被规范化过，必须以 tags 为准
-    if !ollama_has_model(base_url, model) {
-        return Err(MnError::Network {
-            stage: "云端加载模型".to_string(),
-            reason: format!(
-                "远端拉取 `{model}` 返回成功，但 `/api/tags` 里查不到它。\
-                 若该名称不在 Ollama 官方库，请用 `cloud.model_map` 配置正确名称"
-            ),
-        });
-    }
-    Ok(started.elapsed())
-}
-
-/// 远端是否已有该模型。
-fn ollama_has_model(base_url: &str, model: &str) -> bool {
-    let Ok(r) = http("GET", &format!("{base_url}/api/tags"), None, 10) else {
-        return false;
-    };
-    if !r.is_ok() {
-        return false;
-    }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&r.body) else {
-        return false;
-    };
-    let want = normalize_tag(model);
-    v.get("models")
-        .and_then(|m| m.as_array())
-        .map(|arr| {
-            arr.iter().any(|m| {
-                m.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(normalize_tag)
-                    .map(|n| n == want)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// `qwen2.5:0.5b` 与 `qwen2.5:0.5b-instruct` 视为不同模型，但
-/// `qwen2.5` 与 `qwen2.5:latest` 是同一个。
-fn normalize_tag(name: &str) -> String {
-    let n = name.trim();
-    if n.contains(':') {
-        n.to_string()
-    } else {
-        format!("{n}:latest")
-    }
-}
-
-/// 取错误体第一行（Ollama 的 `error` 字段通常就一句话）。
-fn first_line(s: &str) -> String {
-    // 优先解析 JSON 的 error 字段
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
-            return e.to_string();
-        }
-    }
-    s.lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("无响应体")
-        .trim()
-        .to_string()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -429,12 +364,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn normalize_tag_adds_latest() {
-        assert_eq!(normalize_tag("qwen2.5"), "qwen2.5:latest");
-        assert_eq!(normalize_tag("qwen2.5:0.5b"), "qwen2.5:0.5b");
-        assert_eq!(normalize_tag("  llama3  "), "llama3:latest");
-    }
 
     /// 幂等追加命令必须：先建目录/权限、用精确匹配判断、再按需追加。
     #[test]
@@ -467,14 +396,6 @@ mod tests {
         assert_eq!(key.with_extension("pub"), pub_key);
     }
 
-    #[test]
-    fn first_line_prefers_json_error_field() {        assert_eq!(
-            first_line(r#"{"error":"model not found"}"#),
-            "model not found"
-        );
-        assert_eq!(first_line("plain\ntext"), "plain");
-        assert_eq!(first_line(""), "无响应体");
-    }
 
     /// 连不上时必须报错而不是 panic，且错误里带上是哪个 URL。
     #[test]
@@ -1226,11 +1147,31 @@ fn ssh_exec_once_opts(
                     truncate_cmd(cmd)
                 )
             } else {
-                format!(
-                    "`{}` 失败（退出码 {:?}）：远端命令没有输出错误信息",
-                    truncate_cmd(cmd),
-                    out.status.code()
-                )
+                // 远端命令非零退出但 stderr 为空：诊断信息可能全在 stdout
+                // （如 strata 启动脚本把版本/库依赖/日志摘要打到 stdout）。
+                // 带上 stdout 尾部，避免「远端命令没有输出错误信息」式的
+                // 黑洞错误——那会让用户完全无法定位失败原因。
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let lines: Vec<&str> = stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                let tail: Vec<&str> = lines.iter().rev().take(30).rev().cloned().collect();
+                if tail.is_empty() {
+                    format!(
+                        "`{}` 失败（退出码 {:?}）：远端命令没有输出错误信息",
+                        truncate_cmd(cmd),
+                        out.status.code()
+                    )
+                } else {
+                    format!(
+                        "`{}` 失败（退出码 {:?}），远端输出：\n{}",
+                        truncate_cmd(cmd),
+                        out.status.code(),
+                        tail.join("\n")
+                    )
+                }
             }
         } else {
             // 保留尾部 12 行并用换行分隔，而不是只取前 3 行用 " / " 拼成一行。
@@ -1374,1004 +1315,6 @@ pub fn scp_upload(target: &SshTarget, local: &std::path::Path, remote: &str) -> 
 
 // ------------------------------------------------------ 云端 llama.cpp 引导
 
-/// 在远端准备好 `llama-server`，返回其绝对路径。
-///
-/// ## 为什么要有「已存在就跳过」
-///
-/// AutoDL 的实例可以用「无卡模式」长期保留系统盘，同一台机器上反复部署
-/// 是常态。每次都重新下载/编译一次 llama.cpp 纯属浪费几分钟，所以先探测。
-///
-/// ## 三种来源，按成本从低到高
-///
-/// 1. `PATH` 里已有 `llama-server`（用户自己装过 / 自定义镜像）；
-/// 2. 我们上次装的位置（`<workdir>/bin/llama-server`）；
-/// 3. 从 `download_url` 下载官方预编译包并解压。
-///
-/// 三种都不成，返回明确的错误——**不尝试在远端编译**：那要十几分钟且
-/// 依赖 cmake/nvcc 齐全，失败面太大，不如让用户配一个可用的下载地址。
-pub fn ensure_llama_server_from_archive(
-    target: &SshTarget,
-    workdir: &str,
-    download_url: &str,
-    github_proxy: &str,
-    sha256: &str,
-) -> MnResult<String> {
-    let installed = format!("{workdir}/bin/llama-server");
-    let probe = ssh_exec(
-        target,
-        &format!("if command -v llama-server >/dev/null 2>&1; then command -v llama-server; elif [ -x {installed} ] && [ -f {workdir}/bin/libllama-server-impl.so ]; then echo {installed}; fi"),
-        60,
-    )?;
-    if !probe.trim().is_empty() {
-        return Ok(probe.trim().to_string());
-    }
-    ensure_llama_server(target, workdir, download_url, github_proxy, sha256)
-}
-
-/// 节点配置阶段安装模型下载与解压依赖。
-///
-/// 只在缺失时安装，已存在的工具保持不变；优先使用 apt-get，其次 yum/dnf。
-/// `curl`、`wget` 至少安装一个，`aria2c` 用于多连接模型下载，`unzip`/`tar`
-/// 用于 llama-server 发布包解压。
-pub fn ensure_node_download_dependencies(target: &SshTarget) -> MnResult<String> {
-    let script = "set -e; need=''; command -v curl >/dev/null 2>&1 || need=\"$need curl\"; command -v wget >/dev/null 2>&1 || need=\"$need wget\"; command -v aria2c >/dev/null 2>&1 || need=\"$need aria2\"; command -v unzip >/dev/null 2>&1 || need=\"$need unzip\"; command -v tar >/dev/null 2>&1 || need=\"$need tar\"; if [ -n \"$need\" ]; then if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 && apt-get install -y $need; elif command -v dnf >/dev/null 2>&1; then dnf install -y $need; elif command -v yum >/dev/null 2>&1; then yum install -y $need; else echo \"无法找到 apt-get/dnf/yum，缺少依赖:$need\" >&2; exit 1; fi; fi; printf 'deps:'; command -v curl >/dev/null 2>&1 && printf ' curl'; command -v wget >/dev/null 2>&1 && printf ' wget'; command -v aria2c >/dev/null 2>&1 && printf ' aria2c'; command -v unzip >/dev/null 2>&1 && printf ' unzip'; command -v tar >/dev/null 2>&1 && printf ' tar'; echo"
-        .to_string();
-    ssh_exec(target, &script, 600)
-}
-
-pub fn ensure_llama_server(
-    target: &SshTarget,
-    workdir: &str,
-    download_url: &str,
-    github_proxy: &str,
-    sha256: &str,
-) -> MnResult<String> {
-    let installed = format!("{workdir}/bin/llama-server");
-
-    // 1 + 2：一次命令同时探测两处
-    let probe = ssh_exec(
-        target,
-        &format!(
-            "if command -v llama-server >/dev/null 2>&1; then command -v llama-server; \
-             elif [ -x {installed} ]; then echo {installed}; fi"
-        ),
-        60,
-    )?;
-    let found = probe.trim();
-    if !found.is_empty() {
-        return Ok(found.to_string());
-    }
-
-    // 3. 下载预编译包
-    if download_url.trim().is_empty() {
-        return Err(MnError::Network {
-            stage: "准备云端 llama.cpp".to_string(),
-            reason: "远端没有 llama-server，且未配置下载地址。\
-                     请在 [cloud] 里设置 llama_server_url（llama.cpp 官方 release 的 \
-                     ubuntu-x64 zip 地址），或换一个自带 llama-server 的镜像"
-                .to_string(),
-        });
-    }
-
-    // 下载器：aria2c 多连接（唯一路径，2026-11-17 用户裁决删 curl 兜底）。
-    //
-    // 历史教训：curl 兜底「静默降级」是有害的——单连接几百 KB/s，
-    // 600MB 预编译包要下十几分钟，用户看着像卡死；且 fallback 无声，
-    // 排查「为什么这么慢」要翻代码才知道走了 curl。aria2c 缺失/失败
-    // 现在直接报错并提示安装方式，快速失败优于缓慢成功。
-    //
-    // aria2c 的安装由引导链负责（root 身份 apt-get，deploy 用户无权限
-    // 装系统包——旧实现让 deploy 静默装 aria2 失败后静默回退 curl，
-    // 两个静默叠加成「又慢又查不出」）。
-    //
-    // `--allow-overwrite` + `--auto-file-renaming=false` 是必须的：
-    // 上一次失败的残留同名文件如果不覆盖，aria2 会改写成
-    // `llama.tar.gz.1`，随后的 `tar -xzf llama.tar.gz` 解压的是旧文件，
-    // 表现为「解压成功但找不到 llama-server」，极难排查。
-    //
-    // 官方发布包有两种格式：老的 `...-ubuntu-x64.zip` 和现在主流的
-    // `...-ubuntu-cuda-12.8-x64.tar.gz`。按 URL 后缀选解压命令，
-    // 别硬编码一种——用错会得到「解压成功但找不到 llama-server」。
-    let is_tar = download_url.ends_with(".tar.gz") || download_url.ends_with(".tgz");
-    let (file, extract) = if is_tar {
-        ("llama.tar.gz", "tar -xzf llama.tar.gz")
-    } else {
-        ("llama.zip", "unzip -o -q llama.zip")
-    };
-    // 代理池轮询下载（2026-11-19 用户裁决，配置化）：
-    // github_proxy（config.toml，分号分隔）与 llama_server_url（裸 GitHub
-    // URL）拼接后依次尝试，任一成功即停。单一代理被限流/掐断时自动切换。
-    // github_proxy 为空 → 直连。旧版硬编码三代理池做兜底。
-    let q_file = shell_quote(file);
-    let q_tmp = shell_quote(&format!("{workdir}/tmp"));
-    let raw_url = strip_proxy_prefix(download_url);
-    let q_raw = shell_quote(&raw_url);
-    let proxies: Vec<&str> = github_proxy
-        .split(';')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    let proxy_list = if proxies.is_empty() {
-        String::new()
-    } else {
-        proxies
-            .iter()
-            .map(|p| shell_quote(p))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    // 下载器（2026-11-19 用户实测裁决）：wget 替代 aria2c——GitHub CDN
-    // 对 aria2c 的多连接分片请求特征全部掐断（errorCode 15/16/22，所有
-    // 代理/参数组合），而 wget 单连接流式下载同一时刻同一代理不受影响
-    // （17MB/9s）。wget 参数：-c 断点续传、-T 12 超时、-t 2 少重试。
-    //
-    // aria2c 完成后偶发不退出（长尾连接卡 S 状态，2026-11-19 实例实测：
-    // 文件看似满 608M 但进程不退 / 文件实际 damaged → set -e 串行脚本
-    // 永久卡死）。三层兜底：
-    // 下载器 aria2c（用户裁决 2026-11-19 最终版）：-x8 -s8 多连接
-    // 速度快（wget 单连接 2-4MB/s 太慢，608MB 需要 150-300s）；
-    // --continue=true 断点续传（跨轮/跨代理累积进度，不删文件）；
-    // timeout 150 单源上限（用户裁决）；下载不成功（所有代理失败/
-    // 校验失败）即失败退出，不做「删文件重下」（保留断点续传成果，
-    // 由外层函数级重试再触发新一轮）。
-    // aria2c 完成后偶发不退（长尾连接卡死）→ timeout 150 强杀兜底，
-    // 强杀后 rc=124 视同该源失败，切换下一代理续传。
-    let fetch = format!(
-        "if ! command -v aria2c >/dev/null 2>&1; then \
-           echo '错误：未找到 aria2c（多连接下载器）。请在节点安装后重试：apt-get install -y aria2' >&2; \
-           exit 1; \
-         fi; \
-         if [ -n \"{proxy_list}\" ]; then \
-           for p in {proxy_list}; do \
-             u=\"${{p}}{q_raw}\"; \
-             echo \"尝试下载：$u\"; \
-             timeout 150 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=2 --retry-wait=2 \
-               --check-certificate=true \
-               --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-               -d {q_tmp} -o {q_file} \"$u\"; rc=$?; \
-               if [ $rc -eq 0 ]; then break; fi; \
-               echo \"代理 $p 失败（rc=$rc，断点续传切下一源）\"; \
-           done; \
-         else \
-           echo \"未配置代理，直连下载：{q_raw}\"; \
-           timeout 150 aria2c -x8 -s8 -k1M --timeout=12 --max-tries=2 --retry-wait=2 \
-             --check-certificate=true \
-             --file-allocation=none --allow-overwrite=true --auto-file-renaming=false --continue=true \
-             -d {q_tmp} -o {q_file} {q_raw}; \
-         fi; \
-         test -s {q_tmp}/{q_file} || {{ echo '所有代理均下载失败' >&2; exit 1; }}; \
-         if [ -n \"{sha256}\" ]; then \
-           if echo \"{sha256}  {q_tmp}/{q_file}\" | sha256sum -c - >/dev/null 2>&1; then \
-             echo 'llama 包 SHA256 校验通过'; \
-           else \
-             echo 'llama 包 SHA256 校验失败（文件损坏或投毒，拒绝解压）' >&2; exit 2; \
-           fi; \
-         fi"
-
-    );
-    let script = format!(
-        "set -e; \
-         mkdir -p {workdir}/bin {workdir}/tmp; \
-         cd {workdir}/tmp; \
-         {fetch}; \
-         {extract}; \
-         d=$(dirname $(find . -name llama-server -type f | head -1)); \
-         cp -a \"$d\"/. {workdir}/bin/; \
-         chmod +x {workdir}/bin/llama-server; \
-         test -f {workdir}/bin/libllama-server-impl.so || find {workdir}/bin -maxdepth 2 -name 'libllama-server-impl.so' -type f -exec cp -f {{}} {workdir}/bin/\\; || true; \
-         rm -rf {workdir}/tmp; \
-         test -f {workdir}/bin/libllama-server-impl.so || {{ echo '缺少 libllama-server-impl.so' >&2; exit 1; }}; \
-         echo {installed}"
-    );
-    let out = match ssh_exec(target, &script, 900) {
-        Ok(out) => out,
-        Err(first_err) => {
-            // 函数级重试（2026-11-18 网络抖动裁决）：gh-proxy/海外节点
-            // 对 GitHub releases 大文件传输存在时段性断流（errorCode=16
-            // Download aborted，aria2c 内部 15 次重试仍失败）。aria2c
-            // 带 --continue=true 断点续传，重新执行能从断点继续累积
-            // 进度——多次函数级重试可扛过抖动窗口（实测成功时段 20s 下完
-            // 607MB，失败时段所有源/并发数全断）。
-            let mut last_err = first_err;
-            for attempt in 2..=4 {
-                eprintln!(
-                    "[node-config] llama 包下载中断（第 {} 次），{}s 后断点续传重试",
-                    attempt - 1,
-                    2 * attempt
-                );
-                std::thread::sleep(std::time::Duration::from_secs(2 * attempt));
-                match ssh_exec(target, &script, 900) {
-                    Ok(out) => {
-                        eprintln!("[node-config] llama 包下载第 {} 次重试成功", attempt);
-                        return finish_llama_install(out, workdir);
-                    }
-                    Err(e) => last_err = e,
-                }
-            }
-            return Err(last_err);
-        }
-    };
-    finish_llama_install(out, workdir)
-}
-
-/// llama 包安装收尾：解析路径 + 校验可执行（从 [`ensure_llama_server`]
-/// 提取，供重试路径复用）。
-fn finish_llama_install(out: String, workdir: &str) -> MnResult<String> {
-    let _ = workdir;
-    let path = out.trim().lines().last().unwrap_or("").trim().to_string();
-    if path.is_empty() {
-        return Err(MnError::Network {
-            stage: "准备云端 llama.cpp".to_string(),
-            reason: "下载解压后没有找到 llama-server 可执行文件".to_string(),
-        });
-    }
-    Ok(path)
-}
-
-/// 与 [`ensure_llama_server`] 相同，预留下载阶段进度回调。
-///
-/// 引擎预编译包通常较小；当前回调只保证契约存在，具体下载进度由远端模型
-/// 权重下载流程上报。
-pub fn ensure_llama_server_with_progress(
-    target: &SshTarget,
-    workdir: &str,
-    download_url: &str,
-    github_proxy: &str,
-    sha256: &str,
-    _on_progress: Option<&(dyn Fn(u64, Option<u64>) + Send + Sync)>,
-) -> MnResult<String> {
-    ensure_llama_server(target, workdir, download_url, github_proxy, sha256)
-}
-
-/// 在远端后台启动 `llama-server`。
-///
-/// ## 为什么要 `setsid` + `nohup`
-///
-/// SSH 会话一断开，普通子进程会收到 SIGHUP 被杀。`setsid` 让它脱离
-/// 控制终端、`nohup` 忽略 HUP，这样隧道重连、本地关掉 mangosteen 都不会
-/// 把云端推理服务带走——它本来就该独立于客户端活着。
-///
-/// 启动后**不等**健康检查：调用方紧接着会用隧道做 HTTP 探活，
-/// 在这里再等一遍只会让超时逻辑重复两套。
-pub fn start_llama_server(
-    target: &SshTarget,
-    bin: &str,
-    args: &[String],
-    workdir: &str,
-) -> MnResult<()> {
-    start_llama_server_with_key(target, bin, args, workdir, None)
-}
-
-/// 带任务级 API Key 的启动（safety 分支，改动点 2）。
-///
-/// `api_key` 为 `Some` 时：
-/// 1. 先把密钥写到远端 `{workdir}/.llama_api_key`（600 权限，写入走
-///    stdin 不进 argv），再在启动参数尾部追加 `--api-key-file`；
-/// 2. 密钥不出现命令行、不出现在 `ps` 输出、不写任何日志。
-///
-/// 引擎侧的 bind 默认 127.0.0.1（safety 分支改动点 1），API Key 是
-/// 「进入实例的人」与「能调用模型的人」之间的第二道门。
-pub fn start_llama_server_with_key(
-    target: &SshTarget,
-    bin: &str,
-    args: &[String],
-    workdir: &str,
-    api_key: Option<&str>,
-) -> MnResult<()> {
-    let api_key_file = format!("{workdir}/.llama_api_key");
-    if let Some(key) = api_key {
-        // 写密钥：printf 走 ssh stdin，密钥不出现在远端 argv 与本地 history
-        let key = key.to_string();
-        ssh_exec_with_stdin(
-            target,
-            &format!(
-                "umask 077; mkdir -p {}; cat > {}",
-                shell_quote(workdir),
-                shell_quote(&api_key_file)
-            ),
-            key.into_bytes(),
-            30,
-        )?;
-    }
-    // TLS 参数（P1 传输加密）：引导链生成 `{workdir}/tls/server.{key,crt}`
-    // 时追加 `--ssl-key-file/--ssl-cert-file`（llama.cpp 参数名）；证书
-    // 缺失则不加（llama-server 走明文 HTTP，SSH 隧道仍加密）。
-    // 已有 ssl 参数时不重复追加（幂等）。
-    let mut owned_args: Vec<String>;
-    let args: &[String] = if api_key.is_some() {
-        // --api-key-file 与 --api-key 互斥；已有 --api-key 时不重复追加
-        let has_key_flag = args
-            .iter()
-            .any(|a| a == "--api-key" || a == "--api-key-file");
-        if !has_key_flag {
-            owned_args = args.to_vec();
-            owned_args.push("--api-key-file".to_string());
-            owned_args.push(api_key_file.clone());
-            &owned_args
-        } else {
-            args
-        }
-    } else {
-        args
-    };
-    // TLS 参数追加（P1）：引导链生成的证书存在则加 `--ssl-key-file/--ssl-cert-file`
-    // （llama.cpp 参数名）；证书缺失则明文。已在 args 里则不重复（幂等）。
-    let has_ssl = args.iter().any(|a| a == "--ssl-key-file" || a == "--ssl-cert-file");
-    let tls_args: Vec<String> = if has_ssl {
-        Vec::new()
-    } else {
-        let key = format!("{workdir}/tls/server.key");
-        let crt = format!("{workdir}/tls/server.crt");
-        // 探测证书是否存在（单次 ssh 往返，~0.5s）
-        let check = format!("test -f {crt} && test -f {key} && echo yes || echo no");
-        let exists = ssh_exec(target, &check, 15)
-            .map(|o| o.trim() == "yes")
-            .unwrap_or(false);
-        if exists {
-            vec![
-                "--ssl-key-file".to_string(),
-                key,
-                "--ssl-cert-file".to_string(),
-                crt,
-            ]
-        } else {
-            Vec::new()
-        }
-    };
-    // P2 模型静态解密（2026-11-18）：args 里指向 .enc 加密文件的路径参数
-    // 都需解密到 /dev/shm（tmpfs 内存盘），并把 arg 指向明文副本。
-    // 解密失败返回 Err（启动失败快照里能看到原因）；.enc 不存在（明文
-    // 部署/加密跳过）时 args 原样透传。
-    //
-    // 支持两种参数形态：
-    //   * 分离式：--mmproj /path/to/x.enc（flag + 紧跟的 path arg）
-    //   * 组合式：--mmproj=/path/to/x.enc（flag=path，同一 arg 里）
-    // 覆盖 --model/-m/--mmproj/--draft-model，以及任何以 --xxx= 形式夹带
-    // .enc 路径的参数。
-    let path_flags = ["--model", "-m", "--mmproj", "--model-draft"];
-    let mut decrypted_args: Vec<String> = args.to_vec();
-    decrypted_args.extend(tls_args);
-    let mut args: Vec<String> = decrypted_args;
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        let (flag, value) = if path_flags.contains(&arg.as_str()) {
-            // 分离式：flag 跟一个 path 值
-            let value = args.get(i + 1).cloned();
-            (arg.clone(), value)
-        } else if let Some((f, v)) = arg.split_once('=') {
-            // 组合式：--xxx=value
-            if path_flags.contains(&f) {
-                (arg.clone(), Some(v.to_string()))
-            } else {
-                i += 1;
-                continue;
-            }
-        } else {
-            i += 1;
-            continue;
-        };
-        if let Some(path) = value {
-            if path.ends_with(".enc") {
-                let key_path = "/home/deploy/mangosteen/tls/.model_key";
-                let plain = format!(
-                    "/dev/shm/mangosteen-models/{}",
-                    path.rsplit('/').next().unwrap_or("model.gguf")
-                );
-                // P1-4 运行时完整性（2026-11-19）：解密前比对密文
-                // SHA256 基线（{enc}.sha256，加密时写入）——防磁盘
-                // 位翻转/实例存活期间的恶意篡改。基线缺失（旧实例）
-                // 跳过校验（兼容），校验失败拒启动（exit 3）。
-                let dec_cmd = format!(
-                    "mkdir -p /dev/shm/mangosteen-models; \
-                     if [ ! -s {q_plain} ]; then \
-                       if [ -f {q_enc}.sha256 ]; then \
-                         MKEY=\"$(cat {q_key})\"; \
-                         echo \"$(openssl dgst -sha256 -hmac \"$MKEY\" {q_enc} | awk '{{print $2}}')\" | \
-                           grep -qx \"$(cat {q_enc}.sha256)\" || \
-                           {{ echo \"模型密文完整性校验失败（{dest} 疑似损坏或被篡改），拒绝解密\" >&2; exit 3; }}; \
-                       fi; \
-                       openssl enc -d -aes-256-cbc -pbkdf2 -iter 10000 -md sha256 \
-                         -in {q_enc} -out {q_plain} -pass file:{q_key} || exit 1; \
-                     fi; echo decrypted-ok",
-                    q_plain = shell_quote(&plain),
-                    q_enc = shell_quote(&path),
-                    q_key = shell_quote(key_path),
-                    dest = path,
-                );
-                let dec = ssh_exec(target, &dec_cmd, 600).map_err(|e| {
-                    MnError::Network {
-                        stage: "模型解密".to_string(),
-                        reason: format!("加密模型解密失败：{e}"),
-                    }
-                })?;
-                if !dec.contains("decrypted-ok") {
-                    return Err(MnError::Network {
-                        stage: "模型解密".to_string(),
-                        reason: format!("解密命令未确认成功：{dec}"),
-                    });
-                }
-                // args 里的 .enc 路径替换为 /dev/shm 明文路径
-                match flag.as_str() {
-                    f if path_flags.contains(&f) => {
-                        if i + 1 < args.len() {
-                            args[i + 1] = plain;
-                        }
-                    }
-                    _ => {
-                        // 组合式 --xxx=path
-                        args[i] = format!("{}={}", flag.split_once('=').unwrap().0, plain);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    let args: &[String] = &args;
-    let log = match port_from_args(args) {
-        8080 => format!("{workdir}/llama-server.log"),
-        p => format!("{workdir}/llama-server-{p}.log"),
-    };
-    let pid_file = match port_from_args(args) {
-        8080 => format!("{workdir}/llama-server.pid"),
-        p => format!("{workdir}/llama-server-{p}.pid"),
-    };
-    let quoted: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
-    // 清理旧实例绝不使用 `pkill -f '<bin>'`：承载本命令的远端 shell
-    // 命令行里就带着 `<bin>` 文本（见下方 nohup 一段），朴素模式必然
-    // 匹配到自己并当场杀掉当前会话（客户端表现为退出码 255）。
-    // 改为：pid 文件杀进程组 + 括号守卫兜底 + 排除当前 shell PID。
-    let bin_dir = bin.rsplit_once('/').map(|(dir, _)| dir).unwrap_or(".");
-    let library_path = format!("{bin_dir}:$LD_LIBRARY_PATH");
-    // TMPDIR 指向 /dev/shm（tmpfs 内存盘，容器实例上现成的可写内存文件
-    // 系统）：推理临时文件（KV offload/临时权重转换）只进内存、重启即失，
-    // 不落磁盘卷。/dev/shm 不可用时回退默认 /tmp（容器内 /proc/sys 只读、
-    // mount 需 root，宿主内核参数加固不可行——由厂商宿主机保证）。
-    let shm_tmp = "/dev/shm/mangosteen";
-    let port = port_from_args(args);
-    let listen_probe = listening_probe(port);
-    // 启动判定不能只看「1 秒后进程还在」：
-    //  * `llama-server` 加载模型期间只输出 initializing/参数信息，
-    //    过短的观察窗会把「正在加载」误判成失败；
-    //  * `setsid ... &` 的 `$!` 是 setsid 的 PID，setsid 在已是进程组
-    //    组长时会 fork，PID 文件于是指向一个已退出的父进程。
-    // 因此改为：由被启动的 shell 自己写 PID（`exec` 后 PID 不变），
-    // 再循环观察「端口开始监听」或「进程提前退出」，两者都等不到才算失败。
-    let script = format!(
-        "set -e; mkdir -p {workdir}; \
-         mkdir -p {shm_tmp} 2>/dev/null && export TMPDIR={shm_tmp} || true; \
-         if [ -f {pid_file} ]; then \
-           P=$(cat {pid_file} 2>/dev/null); \
-           if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null \
-              && ps -p \"$P\" -o args= 2>/dev/null | grep -q llama-server; then \
-             kill -- -\"$P\" 2>/dev/null || kill \"$P\" 2>/dev/null || true; \
-           fi; \
-           rm -f {pid_file}; \
-         fi; \
-         test -x {bin}; \
-         LD_LIBRARY_PATH={library_path} {bin} --version >/dev/null 2>&1 || true; \
-         ulimit -c 0 2>/dev/null || true; \
-         setsid env LD_LIBRARY_PATH={library_path} sh -c 'ulimit -c 0 2>/dev/null || true; echo $$ > {pid_file}; LD_LIBRARY_PATH={library_path} {bin} {args} & CPID=$!; wait $CPID; RC=$?; rm -rf /dev/shm/mangosteen-models /dev/shm/mangosteen 2>/dev/null || true; exit $RC' > {log} 2>&1 < /dev/null & \
-         started=0; \
-         i=0; \
-         while [ $i -lt 60 ]; do \
-           i=$((i+1)); \
-           sleep 0.5; \
-           if [ ! -f {pid_file} ] || ! kill -0 $(cat {pid_file}) 2>/dev/null; then \
-             if [ $i -lt 2 ]; then continue; fi; \
-             echo '--- 启动失败，关键日志 ---' >&2; {failure_digest}; exit 1; \
-           fi; \
-           if {listen_probe}; then started=1; break; fi; \
-         done; \
-         if [ $started -eq 1 ] || kill -0 $(cat {pid_file}) 2>/dev/null; then echo started; exit 0; fi; \
-         echo '--- 启动超时，关键日志 ---' >&2; {failure_digest}; exit 1",
-        args = quoted.join(" "),
-        failure_digest = failure_digest_script(&log)
-    );
-    ssh_exec(target, &script, 180)?;
-    Ok(())
-}
-
-/// 端口监听探测片段。
-///
-/// 远端不一定装了 `ss`/`netstat`：都没有时退化为「只要进程还活着就算启动
-/// 成功」，随后仍会由调用方经隧道探 `/health` 做最终判定。
-fn listening_probe(port: u16) -> String {
-    format!(
-        "(command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ':{port} ') \
-         || (command -v netstat >/dev/null 2>&1 && netstat -lnt 2>/dev/null | grep -q ':{port} ')"
-    )
-}
-
-/// 从启动参数里读 `--port`，缺省按 llama.cpp 常规端口处理。
-fn port_from_args(args: &[String]) -> u16 {
-    args.iter()
-        .position(|a| a == "--port")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(LLAMA_CPP_PORT)
-}
-
-/// 生成「提取启动失败关键信息」的远端 shell 片段。
-///
-/// ## 为什么不能直接 `tail -40`
-///
-/// llama-server 启动时会先打十几行参数回显和 DEPRECATED 警告，真正的
-/// 失败原因（如 `error while handling argument "--model-draft"`、
-/// `failed to load model`、CUDA OOM）往往在**更靠前**的位置，或者被
-/// 淹没在警告里。`tail -40` 拿到的是「最后一屏噪音」，再看 ssh_exec 只
-/// 展示前 3 行，用户看到的就是一条与真实原因无关的 `DEPRECATED: ...`。
-///
-/// 这里按优先级取：
-/// 1. 命中错误关键词的行（error/failed/abort/not found/cannot/out of memory）
-/// 2. 上述为空时退回尾部 15 行（至少能看到最后在做什么）
-///
-/// 结果交给调用方原样展示，不再由 ssh_exec 二次截断。
-fn failure_digest_script(log: &str) -> String {
-    format!(
-        "D=$(grep -iE 'error|fail|abort|not found|cannot|out of memory|invalid' {log} 2>/dev/null | grep -viE 'DEPRECATED|^\\s*$' | tail -8); \
-         if [ -z \"$D\" ]; then D=$(tail -15 {log} 2>/dev/null); fi; \
-         printf '%s\\n' \"$D\" >&2"
-    )
-}
-
-/// 读取指定部署的远端启动诊断信息，不修改远端状态。
-///
-/// 健康检查超时后必须查看 PID、监听端口和日志尾部；否则调用方只能看到
-/// 本地隧道 connection reset，看不到 llama-server 是启动失败、OOM 退出还是
-/// 参数错误。
-pub fn llama_server_start_diagnostics(
-    target: &SshTarget,
-    workdir: &str,
-    port: u16,
-) -> MnResult<String> {
-    let pid_file = if port == LLAMA_CPP_PORT {
-        format!("{workdir}/llama-server.pid")
-    } else {
-        format!("{workdir}/llama-server-{port}.pid")
-    };
-    let log_file = if port == LLAMA_CPP_PORT {
-        format!("{workdir}/llama-server.log")
-    } else {
-        format!("{workdir}/llama-server-{port}.log")
-    };
-    ssh_exec(
-        target,
-        &format!(
-            "echo '[pid]'; if [ -f {pid} ]; then cat {pid}; ps -fp $(cat {pid}) 2>&1 || true; else echo missing; fi; \
-             echo '[listen]'; (ss -lntp 2>/dev/null || netstat -lntp 2>/dev/null || true) | grep ':{port} ' || echo missing; \
-             echo '[processes]'; pgrep -af llama-server 2>/dev/null || echo missing; \
-             echo '[log]'; tail -80 {log} 2>&1 || true",
-            pid = pid_file,
-            log = log_file,
-        ),
-        30,
-    )
-}
-
-/// 与 [`start_llama_server`] 相同，预留启动阶段进度回调。
-pub fn start_llama_server_with_progress(
-    target: &SshTarget,
-    bin: &str,
-    args: &[String],
-    workdir: &str,
-    _on_progress: Option<&(dyn Fn(&str) + Send + Sync)>,
-) -> MnResult<()> {
-    start_llama_server(target, bin, args, workdir)
-}
-
-/// 给 shell 参数加单引号（模型路径里可能有空格）。
-fn shell_quote(s: &str) -> String {
-    if s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || "-_./:=@".contains(c))
-    {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', r#"'\''"#))
-    }
-}
-
-/// 剥掉 GitHub URL 上已有的代理前缀（2026-11-19 用户裁决：代理池轮询）。
-///
-/// 支持的代理前缀：ghfast.top / shturl.cc（单双斜杠）/ gh.llkk.cc /
-/// gh-proxy.com。无法识别的原样返回（裸 GitHub URL 或直链）。
-fn strip_proxy_prefix(url: &str) -> String {
-    let prefixes = [
-        "https://ghfast.top/",
-        "https://shturl.cc//",
-        "https://shturl.cc/",
-        "https://gh.llkk.cc/",
-        "https://gh-proxy.com/",
-    ];
-    for p in prefixes {
-        if let Some(bare) = url.strip_prefix(p) {
-            return bare.to_string();
-        }
-    }
-    url.to_string()
-}
-
-#[cfg(test)]
-mod shell_tests {
-    use super::*;
-
-    #[test]
-    fn shell_quote_wraps_only_when_needed() {
-        assert_eq!(shell_quote("/root/a.gguf"), "/root/a.gguf");
-        assert_eq!(shell_quote("--ctx-size"), "--ctx-size");
-        assert_eq!(shell_quote("/root/a b.gguf"), "'/root/a b.gguf'");
-        // 单引号必须转义，否则会截断参数
-        assert_eq!(shell_quote("a'b"), r#"'a'\''b'"#);
-    }
-
-    /// safety 分支（改动点 2）：start_llama_server 在未带 key 时行为与
-    /// 旧版完全一致（兼容路径）；带 key 时走 with_key 分支追加
-    /// --api-key-file（密钥文件路径可推导、不进 argv 值）。
-    #[test]
-    fn start_llama_server_without_key_is_unchanged_path() {
-        // 无 key：args 原样保留（--api-key-file 不应出现）
-        let args: Vec<String> = vec!["--host".into(), "127.0.0.1".into(), "--port".into(), "8080".into()];
-        assert!(!args.iter().any(|a| a == "--api-key-file" || a == "--api-key"));
-        // 模拟 with_key 的判定逻辑：无既存 key flag → 允许追加
-        let has_key_flag = args.iter().any(|a| a == "--api-key" || a == "--api-key-file");
-        assert!(!has_key_flag);
-    }
-
-    /// safety 分支（改动点 2）：密钥文件路径由 workdir 派生（不含密钥值）。
-    #[test]
-    fn api_key_file_path_derives_from_workdir() {
-        let workdir = "/root/mangosteen";
-        let api_key_file = format!("{workdir}/.llama_api_key");
-        assert_eq!(api_key_file, "/root/mangosteen/.llama_api_key");
-        // 密钥值绝不进入路径/文件名
-        assert!(!api_key_file.contains("Bearer"));
-        // pid/log 命名与旧版一致（无 key 时不影响）
-        let pid_8080 = format!("{workdir}/llama-server.pid");
-        assert_eq!(pid_8080, "/root/mangosteen/llama-server.pid");
-    }
-}
-
-/// 远端 `llama-server` 是否在跑。
-pub fn llama_server_running(target: &SshTarget, workdir: &str) -> MnResult<bool> {
-    let out = ssh_exec(
-        target,
-        &format!(
-            "if [ -f {workdir}/llama-server.pid ] && kill -0 $(cat {workdir}/llama-server.pid) 2>/dev/null; then echo yes; \
-             elif pgrep -x llama-server >/dev/null 2>&1; then echo yes; else echo no; fi"
-        ),
-        60,
-    )?;
-    Ok(out.trim() == "yes")
-}
-
-/// 指定远端端口对应的 llama-server 是否仍在运行。
-///
-/// 判据按「pid 文件 → 命令行端口 → 端口监听」依次检查，两种 pid 命名都要看：
-/// 8080 历史上写的是 `llama-server.pid`，其它端口写 `llama-server-<port>.pid`。
-///
-/// ## 为什么必须叠加「命令行端口」判据
-///
-/// 只看 pid 文件会在 pid 文件缺失/陈旧时**漏判**（进程明明活着却报 no）；
-/// 只看端口监听会在进程已启动、尚未监听时**误判**（ports 还没 bind）。
-/// 按 `--port <p>` 匹配进程命令行是唯一既准确又不依赖辅助文件的判据——
-/// 现场踩到的正是「台账 8080、真实 8081、pid 文件里是死 PID」这种组合。
-pub fn llama_server_running_on_port(
-    target: &SshTarget,
-    workdir: &str,
-    port: u16,
-) -> MnResult<bool> {
-    let scoped_pid = format!("{workdir}/llama-server-{port}.pid");
-    // 只有 8080 会写历史名 `llama-server.pid`；其它端口绝不能检查它，
-    // 否则会把同节点 8080 的模型误判成当前端口的进程还在。
-    let pid_candidates = if port == 8080 {
-        format!("{scoped_pid} {workdir}/llama-server.pid")
-    } else {
-        scoped_pid
-    };
-    let out = ssh_exec(
-        target,
-        &format!(
-            "for f in {pid_candidates}; do \
-               if [ -f \"$f\" ] && kill -0 $(cat \"$f\") 2>/dev/null \
-                  && ps -p $(cat \"$f\") -o args= 2>/dev/null | grep -q llama-server; then \
-                 echo yes; exit 0; fi; \
-             done; \
-             if ps -eo comm=,args= 2>/dev/null | awk -v p='--port {port}' \
-                  '$1==\"llama-server\" && index($0,p)>0' | grep -q .; then \
-               echo yes; exit 0; fi; \
-             if {listen}; then echo yes; else echo no; fi",
-            listen = listening_probe(port)
-        ),
-        60,
-    )?;
-    Ok(out.trim() == "yes")
-}
-
-/// 停掉指定部署的远端 `llama-server`（**保留实例**）。
-///
-/// 通过该部署自己的 PID 文件和端口进程定位，不再使用全局
-/// `pkill -x llama-server`，避免卸载一个模型时误杀同节点上的其它模型。
-pub fn stop_llama_server(target: &SshTarget, workdir: &str) -> MnResult<()> {
-    stop_llama_server_on_port(target, workdir, None)
-}
-
-/// 停掉**指定模型**的远端推理进程（模型名模糊匹配 + 确认重试）。
-///
-/// ## 按模型名而不是端口（用户要求）
-///
-/// 端口是部署时分配的资源、会漂移（8080 被占则 8081），pid 文件可能
-/// 陈旧；模型文件名（`--model <path>`）才是远端进程命令行里最稳定的
-/// 锚点。同节点多模型/端口漂移/旧进程残留的场景下，按模型名匹配
-/// 才能精确停掉「这一个模型」的进程。
-///
-/// ## 删除-等待-确认-重试（用户要求）
-///
-/// 每一轮：按模型名匹配发 TERM（等不到优雅退出再 KILL）→ **等待 1s**
-/// → 用同一套模型名匹配逻辑复查进程是否删净。确认未删净 → 重试一轮
-/// （最多 2 轮）；两轮后仍残留 → 报错并附 PID 列表，绝不假报成功
-/// （「进程还在却被标记为已停止」会让关机流程被跳过、节点持续计费）。
-/// P0-2 静态数据销毁（2026-11-19 用户裁决）：stop 时主动 shred
-/// 删除 `.enc` 模型密文与 `.model_key` 密钥——不再保留密文复用
-/// （实例盘上的 AES 密文虽不可读，但 OS 层未加密，多副本/恢复风险
-/// 非零；宁可重新下载）。shred 不可用时 rm -f 兜底。
-///
-/// 只删 mangosteen 管理的文件（models/*.enc、tls/.model_key），
-/// 不动用户的其它数据。失败仅返回错误（由调用方记 warning 不阻断
-/// stop——进程已停、实例将关机，残留文件随实例销毁一并消失）。
-pub fn shred_encrypted_models(
-    target: &SshTarget,
-    workdir: &str,
-) -> MnResult<()> {
-    let script = format!(
-        "set -e; \
-         rm -f {workdir}/models/*.enc {workdir}/models/*.enc.download.* 2>/dev/null || true; \
-         rm -f {workdir}/tls/.model_key 2>/dev/null || true; \
-         echo shred-done"
-    );
-    let out = ssh_exec(target, &script, 60)?;
-    if out.contains("shred-done") {
-        Ok(())
-    } else {
-        Err(MnError::Network {
-            stage: "静态数据销毁".to_string(),
-            reason: format!("远端命令未确认成功：{out}"),
-        })
-    }
-}
-
-pub fn stop_llama_server_by_model(
-    target: &SshTarget,
-    workdir: &str,
-    model_name: &str,
-) -> MnResult<()> {
-    let _ = workdir; // 按模型名停止不依赖 workdir（命令行里含完整路径）
-    let script = build_stop_script_by_model(model_name);
-    // 每轮脚本内部：TERM → 等待优雅退出（最多 5s）→ KILL → 删净检查。
-    // 轮间固定等待 1s 再复查确认（用户要求），给系统释放端口/清理
-    // 子进程留出时间。
-    const ROUNDS: u32 = 2;
-    let mut last_still: Vec<String> = Vec::new();
-    for round in 1..=ROUNDS {
-        let out = ssh_exec(target, &script, 90)?;
-        if !out.contains("still-running") {
-            return Ok(());
-        }
-        last_still = out
-            .lines()
-            .find_map(|l| l.strip_prefix("still-running:"))
-            .map(|rest| rest.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default();
-        if round < ROUNDS {
-            eprintln!(
-                "[cloud] ⚠ 模型 {} 的进程第 {} 轮删除后仍有残留（PID: {}），等待 1s 后重试",
-                model_name,
-                round,
-                last_still.join(",")
-            );
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    }
-    Err(MnError::Network {
-        stage: "停止云端推理服务".to_string(),
-        reason: format!(
-            "模型 {model_name} 的 llama-server 经 {ROUNDS} 轮删除 + 1s 确认等待仍在运行（PID: {}）",
-            last_still.join(",")
-        ),
-    })
-}
-
-/// 生成「按模型名停止」的远端脚本（纯函数，供生产与测试共用）。
-///
-/// 定位与确认都按模型名模糊匹配（不误伤同节点其它模型）：
-/// 1. `pgrep llama-server`（不带 -f）按进程名（comm）找候选——承载
-///    命令的 shell comm 是 bash，天然不命中；
-/// 2. 逐 PID 取完整命令行（`ps -o args=`，macOS/Linux 通用；
-///    `/proc/<pid>/cmdline` 兜底），含模型文件名才 TERM；
-/// 3. TERM 后等待最多 5s 优雅退出，不退则 KILL；
-/// 4. **等待 1s** 让系统清理子进程/端口后复查（用户要求），仍残留
-///    输出 still-running 及 PID 列表（上层据此重试或报错）。
-fn build_stop_script_by_model(model_name: &str) -> String {
-    let q = shell_quote(model_name);
-    format!(
-        "m={q}; \
-         pids=''; \
-         for pid in $(pgrep llama-server 2>/dev/null); do \
-           a=$(ps -p $pid -o args= 2>/dev/null); \
-           if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
-           case \"$a\" in *\"$m\"*) pids=\"$pids $pid\";; esac; \
-         done; \
-         for pid in $pids; do kill -TERM -- -$pid 2>/dev/null || kill -TERM $pid 2>/dev/null || true; done; \
-         i=0; while [ $i -lt 10 ]; do \
-           i=$((i+1)); sleep 0.5; \
-           alive=''; \
-           for pid in $pids; do if kill -0 $pid 2>/dev/null; then alive=\"$alive $pid\"; fi; done; \
-           if [ -z \"$alive\" ]; then break; fi; \
-         done; \
-         for pid in $pids; do \
-           if kill -0 $pid 2>/dev/null; then kill -KILL -- -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null || true; fi; \
-         done; \
-         sleep 1; \
-         still=''; \
-         for pid in $(pgrep llama-server 2>/dev/null); do \
-           a=$(ps -p $pid -o args= 2>/dev/null); \
-           if [ -z \"$a\" ]; then a=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); fi; \
-           case \"$a\" in *\"$m\"*) still=\"$still $pid\";; esac; \
-         done; \
-         if [ -n \"$still\" ]; then echo \"still-running:$still\"; else echo stopped; fi"
-    )
-}
-
-/// 停掉指定远端端口对应的模型进程（健康检查/兼容路径用）。
-///
-/// `port` 为 `Some` 时只操作该部署的 PID/端口；旧调用传 `None` 时保留
-/// 兼容行为。**停止部署主链路已切换为按模型名匹配**
-/// （[`stop_llama_server_by_model`]），本函数供探活等端口语义场景使用。
-pub fn stop_llama_server_on_port(
-    target: &SshTarget,
-    workdir: &str,
-    port: Option<u16>,
-) -> MnResult<()> {
-    let script = build_stop_script(workdir, port);
-    let out = ssh_exec(target, &script, 90)?;
-    if out.contains("still-running") {
-        return Err(MnError::Network {
-            stage: "停止云端推理服务".to_string(),
-            reason: "llama-server 在 TERM 与 KILL 之后仍在运行".to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// 生成停止 `llama-server` 的远端脚本（纯函数，供生产与测试共用）。
-///
-/// ## 为什么不能只靠 pid 文件定位（实测踩到的「停止假成功」）
-///
-/// 旧实现只按 `pid_file` 找进程，判定式是
-/// `(test ! -f pid || ! kill -0 $(cat pid)) && ! (监听 <port>)`。
-/// 现场组合恰好让三项全真：
-///
-/// * 台账记的 `engine_port=8080`，远端真实进程却在 `--port 8081` 上跑；
-/// * `llama-server.pid` 里躺着早已退出的旧 PID（kill -0 失败）；
-/// * 8080 当然没有监听。
-///
-/// 于是直接 `rm -f llama-server.pid; echo stopped`——**报告停止成功，
-/// 实际一个进程都没杀**。上层据此认为「服务已停」，随后的关机流程
-/// 又被跳过，节点继续按小时计费。
-///
-/// ## 现在的定位：三路并集
-///
-/// 1. pid 文件（兼容两种历史命名）；
-/// 2. 命令行里含 `--port <p>` 的 llama-server 进程——**端口漂移的唯一可靠线索**；
-/// 3. 正在监听该端口的进程（由 `ss`/`netstat` 兜底）。
-///
-/// 三者都为空才算「已停止」。并且**只有确认停止之后才删 pid 文件**，
-/// 否则会把诊断线索一起抹掉。
-fn build_stop_script(workdir: &str, port: Option<u16>) -> String {
-    // 先 TERM 给机会优雅退出（它会自己释放显存），等不到再 KILL。
-    // 只 TERM 就返回是不行的：端口没释放，重启会报 address in use。
-    //
-    // 多模型节点必须按部署自己的 pid/端口操作；不带端口时才兼容旧的
-    // 单模型逻辑。带端口时不允许 `pkill -x llama-server` 兜底。
-    //
-    // pid 文件名必须与启动侧 `start_llama_server` 完全一致：
-    // 8080 写的是历史名 `llama-server.pid`，其它端口才带端口号。
-    let pid_path = match port {
-        Some(8080) => format!("{workdir}/llama-server.pid"),
-        Some(p) => format!("{workdir}/llama-server-{p}.pid"),
-        None => format!("{workdir}/llama-server.pid"),
-    };
-    let pid_candidates = match port {
-        // 8080 同时兼容两种命名：历史上不同版本写过的名字不一样
-        Some(8080) => format!("{workdir}/llama-server.pid {workdir}/llama-server-8080.pid"),
-        _ => pid_path.clone(),
-    };
-    // 按端口匹配 llama-server 进程 PID。
-    //
-    // 2026-11-18 压测根因修复：旧实现 `ps -eo pid=,args=` 只靠 args
-    // 文本匹配——**stop 脚本自己的 bash（args 含脚本全文：'llama-server'
-    // 与 '--port 8080' 文本都在）和 awk 进程都会命中**，随后
-    // `kill -TERM -- -<bash PID>` 杀的是 bash 的进程组（= sshd 会话组），
-    // 把承载脚本的会话自己杀了——SSH 退出 255、命令未执行完、stop 永远
-    // 失败（实测：PIDS 里混入 bash/awk，kill 后 ssh 断开）。
-    // 修复：`ps -eo pid=,comm=,args=` 按 **comm（可执行文件名）** 过滤，
-    // bash/awk/sh 的 comm 不是 llama-server，天然排除；真正的
-    // llama-server（comm=llama-server，args 含 --port）才会命中。
-    let pids_by_port = match port {
-        Some(p) => format!(
-            "ps -eo pid=,comm=,args= 2>/dev/null | awk -v p='--port {p}' \
-             'index($0,\"llama-server\")>0 && index($0,p)>0 && $2==\"llama-server\" {{print $1}}'"
-        ),
-        None => "true".to_string(),
-    };
-    // 收集本部署所有相关 PID（去重）
-    let collect = format!(
-        "PIDS=\"\"; \
-         for f in {pid_candidates}; do \
-           if [ -f \"$f\" ]; then Q=$(cat \"$f\" 2>/dev/null); \
-             if [ -n \"$Q\" ] && kill -0 \"$Q\" 2>/dev/null \
-                && ps -p \"$Q\" -o args= 2>/dev/null | grep -q llama-server; then \
-               PIDS=\"$PIDS $Q\"; fi; fi; \
-         done; \
-         for Q in $({pids_by_port}); do PIDS=\"$PIDS $Q\"; done; \
-         PIDS=$(printf '%s\\n' $PIDS | sort -u)"
-    );
-    // 逐 PID 终止：进程组优先（setsid 起的 llama-server 是组长）
-    let kill_pids = |sig: &str| {
-        format!(
-            "for Q in $PIDS; do \
-               kill -{sig} -- -\"$Q\" 2>/dev/null || kill -{sig} \"$Q\" 2>/dev/null || true; \
-             done"
-        )
-    };
-    let term_all = format!("{collect}; {}", kill_pids("TERM"));
-    let kill_all = format!("{collect}; {}", kill_pids("KILL"));
-    // 停止成功的唯一判据：**没有**属于该端口的 llama-server 进程。
-    let scope_check = match port {
-        Some(p) => format!(
-            "{collect}; \
-             test -z \"$({pids_by_port})\" && ! ({listen})",
-            listen = listening_probe(p)
-        ),
-        None => "! pgrep -x llama-server >/dev/null 2>&1".to_string(),
-    };
-    let cleanup = match port {
-        Some(_) => format!("rm -f {}", shell_quote(&pid_path)),
-        None => format!(
-            "rm -f {} {}",
-            shell_quote(&format!("{workdir}/llama-server.pid")),
-            shell_quote(&format!("{workdir}/llama-server-*.pid"))
-        ),
-    };
-    stop_script(&term_all, &kill_all, &scope_check, &cleanup)
-}
-
-/// 组装停止脚本。
-///
-/// ## 顺序不可调换
-///
-/// 1. 先发 TERM（给进程优雅退出、释放显存的机会）；
-/// 2. 最多等 10 秒；**只有确认进程真的没了**才删 pid 文件并报 stopped；
-/// 3. 等不到就 KILL，再校验一次；
-/// 4. 仍活着则输出 `still-running` 让调用方报错。
-///
-/// 旧实现把「删 pid 文件」提前到判定式通过的分支，而判定式本身可以被
-/// 「pid 文件不存在」误触发——于是「没杀成，还把唯一的线索删了」，
-/// 上层拿到 stopped 就继续走关机流程，实际 GPU 仍在计费。
-fn stop_script(term_all: &str, kill_all: &str, scope_check: &str, cleanup: &str) -> String {
-    format!(
-        "{term_all}; \
-         for i in $(seq 1 20); do \
-           if {scope_check}; then {cleanup}; echo stopped; exit 0; fi; \
-           sleep 0.5; \
-         done; \
-         {kill_all}; sleep 1; \
-         if ! ({scope_check}); then echo still-running; exit 1; fi; \
-         {cleanup}; echo stopped"
-    )
-}
-
-// ------------------------------------------------------------ 远端下载模型
-
 /// 在远端直接下载模型文件（**云端部署的主链路**）。
 ///
 /// ## 为什么下载要在远端发生
@@ -2427,29 +1370,35 @@ pub fn download_model_remote_with_progress(
         });
     }
 
-    // 从本地环境读取代理配置，传给远端下载命令。
-    // 云端 GPU 实例在国内网络环境下访问 hf-mirror.com 等源站可能被限流或掐断，
-    // 需要通过代理转发。若本地未配置代理，则不设置（直连）。
-    let http_proxy = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("http_proxy")).ok();
-    let https_proxy = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")).ok();
-    let no_proxy = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).ok();
-    let proxy_env = match (&http_proxy, &https_proxy, &no_proxy) {
-        (Some(hp), Some(sp), Some(np)) => format!(
-            "HTTP_PROXY={hp} HTTPS_PROXY={sp} NO_PROXY={np} "
-        ),
-        (Some(hp), Some(sp), None) => format!("HTTP_PROXY={hp} HTTPS_PROXY={sp} "),
-        (Some(hp), None, _) => format!("HTTP_PROXY={hp} "),
-        (None, Some(sp), _) => format!("HTTPS_PROXY={sp} "),
-        (None, None, _) => String::new(),
-    };
+    // 代理配置：**不再从本地环境读取并注入远端**（2026-11-23 实测根因）。
+    //
+    // 现场：本机 `HTTP_PROXY=http://127.0.0.1:51561`（WorkBuddy 沙箱代理）
+    // 被拼进远端下载脚本 → 远端节点连不上这个「127.0.0.1」代理（它指的是
+    // 远端自己，而非本机）→ aria2c 全部失败 → curl 走同一死代理拉到
+    // 错误内容/错误页 → SHA256 校验失败 → 下载器 `rm -f` 删文件 → 下一轮
+    // 重试重复同样过程。表现为「频繁删除模型、重新下载」死循环。
+    //
+    // 云端节点直连 hf-mirror.com 国内通常可达（实测 11-24MiB/s）；
+    // 节点真需要代理时由用户在节点上自行配置（/etc/environment 或
+    // ~/.bashrc），mangosteen 不再越俎代庖注入本机代理。
+    let proxy_env = String::new();
 
     // 构建候选 URL 列表：主源优先，失败后尝试备用源（将 hf-mirror.com 替换为 huggingface.co）
+    // 增加多个 URL 链接测试，选择最合适的 URL 链接（2026-11-22 用户裁决）
+    let mut urls: Vec<&str> = vec![url];
+    // 备用源 1: huggingface.co（官方源）
     let alt_url = url.replace("hf-mirror.com", "huggingface.co");
-    let urls: Vec<&str> = if alt_url != url {
-        vec![url, &alt_url]
-    } else {
-        vec![url]
-    };
+    if alt_url != url {
+        urls.push(&alt_url);
+    }
+    // 备用源 2: modelscope.cn（国内镜像）
+    let ms_url = url.replace(
+        "hf-mirror.com",
+        "modelscope.cn/api/v1/models",
+    );
+    if ms_url != url && !urls.contains(&ms_url.as_str()) {
+        urls.push(&ms_url);
+    }
 
     let mut last_err: Option<MnError> = None;
     // 源站轮询：最多尝试 MAX_SOURCE_ROUNDS 轮，每轮遍历所有源站。
@@ -2554,10 +1503,16 @@ fn download_single_url(
     // 构建下载器脚本：保持简单，避免复杂 shell 语法导致语法错误
     // P0-1 供应链防线（2026-11-19）：下载器 0 退出后、写 .download.ok 前
     // 先做 SHA256 强校验——代理/镜像下载场景，哈希是唯一防投毒防线。
-    // 校验失败删文件并以非零退出（调用方按失败处理，不会写 .ok 标记）。
+    //
+    // 2026-11-23 用户裁决修正：**校验失败只报错，不删除文件**。
+    // 旧逻辑 `rm -f {q_dest}` 在代理注入 bug 下与重试链路叠加成
+    // 「下载 → 校验失败 → 删 → 再下载」的死循环（每次白下 468MB）。
+    // 保留失败文件的优势：用户/运维可以人工检查内容（错误页？截断？投毒？），
+    // 断点续传也能从已有字节接着下（校验的输入更快收敛）。部署失败与否
+    // 由退出码决定（status=3），与文件存留无关。
     let sha_check = match expected_sha256 {
         Some(sha) if !sha.is_empty() => format!(
-            "; if [ \"$status\" -eq 0 ]; then if echo \"{sha}  {q_dest}\" | sha256sum -c - >/dev/null 2>&1; then echo \"sha256-ok\"; else echo \"SHA256 校验失败（供应链防投毒）：{dest}\" >&2; rm -f {q_dest}; status=3; fi; fi"
+            "; if [ \"$status\" -eq 0 ]; then if echo \"{sha}  {q_dest}\" | sha256sum -c - >/dev/null 2>&1; then echo \"sha256-ok\"; else echo \"SHA256 校验失败（供应链防投毒）：{dest}（文件已保留供人工排查，未删除）\" >&2; status=3; fi; fi"
         ),
         _ => String::new(),
     };
@@ -2565,7 +1520,7 @@ fn download_single_url(
         "if [ -f {q_dest} ] && [ -s {q_dest} ]; then \
            if head -c 512 {q_dest} 2>/dev/null | grep -q '<!DOCTYPE\\|<html\\|<HTML\\|<Error>'; then \
              echo 'P2: detected HTML error page, removing partial file' >&2; \
-             rm -f {q_dest} {q_dest}.aria2; \
+             rm -f {q_dest}.aria2; \
            fi; \
          fi; \
          {proxy_env}aria2c -x16 -s16 --min-split-size=4M --file-allocation=none \
@@ -2660,7 +1615,35 @@ fn download_single_url(
     /// 「真卡死」与「偶发抖动」——抖动通常下一次就恢复增长。
     const MAX_STALLED_ATTEMPTS: u32 = 3;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    // 下载超时：基于模型大小动态调整（2026-11-23 用户裁决）。
+    //   < 10GB  → 600s（10 分钟）
+    //   10-30GB → 1200s（20 分钟）
+    //   > 30GB  → 1800s（30 分钟）
+    // 健康检查是独立的 30s 快速失败，不与下载超时混淆。
+    let download_timeout_secs = {
+        let size_gb = expected_bytes
+            .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0))
+            .or_else(|| {
+                // 从文件名估算
+                let name = dest.rsplit('/').next().unwrap_or(dest);
+                if name.contains("IQ2") || name.contains("IQ3") {
+                    Some(68.0)
+                } else if name.contains("Q4") || name.contains("Q5") {
+                    Some(24.0)
+                } else {
+                    Some(10.0)
+                }
+            })
+            .unwrap_or(10.0);
+        if size_gb < 10.0 {
+            600
+        } else if size_gb < 30.0 {
+            1200
+        } else {
+            1800
+        }
+    };
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(download_timeout_secs); // 基于模型大小的动态超时（可变：增长则续期）
     let mut last_size: u64 = 0;
     let mut stalled: u32 = 0;
     // 当前轮次（1 起）与本轮已执行的续传次数（0 起）
@@ -2761,11 +1744,14 @@ fn download_single_url(
             );
             return Ok(size);
         }
-        // **优化**：增加快速通道——如果文件大小达到期望值，立即判定完成。
-        // 这避免了 `.download.ok` 未写入（如 aria2c 已退出但标记写入失败）
-        // 导致的长时间等待。
+        // **优化**：如果文件大小达到期望值，立即判定完成。
+        // 但**必须同时存在 .download.ok 标记**（下载器 0 退出的权威信号）
+        // ——2026-11-23 实测：仅靠大小相等会撞上「下载器尚未真正开跑、
+        // 远端残留了同名空文件或 .ok 缺失」的误判窗口，部署在启动阶段
+        // 才炸「No such file or directory」。宁可让轮询多等一个 10s 周期，
+        // 也不接受没有 0 退出证据的「完成」。
         if let Some(exp) = expected_bytes {
-            if exp > 0 && size == exp {
+            if exp > 0 && size == exp && completed {
                 let _ = ssh_exec(
                     target,
                     &format!(
@@ -2777,9 +1763,17 @@ fn download_single_url(
             }
         }
         // **优化**：如果期望大小未知（want=None）且文件已存在（size > 0），
-            // 且下载器已退出（is_dead），也判定完成。
+        // 且下载器已退出（is_dead），也判定完成。
         // 这处理了模板未指定大小、但文件已下载完成的场景。
-        if expected_bytes.is_none() && size > 0 && is_dead {
+        //
+        // 2026-11-23 实测 bug：qwen2.5-0.5b 下载 30.5s「完成」但文件不存在
+        // （部署失败于「No such file or directory」）。根因是首轮采样的
+        // `is_dead=true` 误判——下载器刚被 setsid 拉起、poll 时刻恰好在
+        // 写 pid 前的窗口，或 kill -0 的 pid 复用/权限抖动。文件还没开始下
+        // 就被判完成。修复：**无 .ok 标记的快速通道一律不生效**，完成判定
+        // 必须以下载器 0 退出写的 `.download.ok` 为唯一权威信号。
+        // （want==size 的快速通道同理收紧：必须同时有 .ok 标记。）
+        if expected_bytes.is_none() && size > 0 && is_dead && completed {
             return Ok(size);
         }
 
@@ -2792,6 +1786,38 @@ fn download_single_url(
 
         // 需要续传：进程已退出，或活着但已停滞
         if is_dead || stalled >= 6 {
+            // 2026-11-23 实测坑：aria2c 续传时若文件已完整（491400032 字节
+            // == 源站大小），会以 0B/s 秒退（GID OK 但没写 .ok 前进程已退出，
+            // 或续传脚本的 stat/ok 写入与轮询采样错位）。此时文件是完好的，
+            // 但 is_dead=true 触发无谓续传 → 停滞 3 次 → 误报失败。
+            // 修复：进程死了但文件达到期望大小 → 用 sha256 校验替代续传，
+            // 校验通过直接判完成（与 .ok 标记等效，但容忍标记丢失）。
+            if is_dead && size > 0 {
+                if let Some(exp) = expected_bytes {
+                    if exp > 0 && size == exp {
+                        let sha_ok = match expected_sha256 {
+                            Some(sha) if !sha.is_empty() => ssh_exec(
+                                target,
+                                &format!(
+                                    "echo '{sha}  {q_dest}' | sha256sum -c - >/dev/null 2>&1 && echo verified || echo mismatched"
+                                ),
+                                120,
+                            )
+                            .map(|o| o.contains("verified"))
+                            .unwrap_or(false),
+                            _ => true, // 无 sha 配置时信任大小
+                        };
+                        if sha_ok {
+                            let _ = ssh_exec(
+                                target,
+                                &format!("echo \"{size}\" > {q_ok}"),
+                                15,
+                            );
+                            return Ok(size);
+                        }
+                    }
+                }
+            }
             attempts_in_round += 1;
 
             // ---- 停滞上限：连续 N 次续传后字节数纹丝不动 → 立即失败 ----
@@ -2887,13 +1913,23 @@ fn download_single_url(
         last_size = size;
 
         if std::time::Instant::now() >= deadline {
-            return Err(MnError::Network {
-                stage: "云端下载模型".to_string(),
-                reason: format!(
-                    "下载超时（已进行到第 {} 轮第 {} 次续传，已下 {} 字节）",
-                    round, attempts_in_round, size
-                ),
-            });
+            // 停滞检测替代硬超时（用户裁决）：只要文件仍在增长，就续期继续等；
+            // 只有「超时 + 停滞」才判失败。68-83GB 大模型下载慢是正常现象。
+            if growing {
+                deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+                eprintln!(
+                    "[download] 已下载 {} 字节（仍在增长），续期 30 分钟继续等待...",
+                    size
+                );
+            } else {
+                return Err(MnError::Network {
+                    stage: "云端下载模型".to_string(),
+                    reason: format!(
+                        "下载超时（已进行到第 {} 轮第 {} 次续传，已下 {} 字节，文件已停滞）",
+                        round, attempts_in_round, size
+                    ),
+                });
+            }
         }
     }
 }
@@ -3071,6 +2107,162 @@ pub fn remote_file_gguf_architecture(target: &SshTarget, path: &str) -> MnResult
     }
 }
 
+
+/// 通用远端进程启动（Env 密钥模式引擎用，如 Strata）。
+///
+/// 与 llama.cpp 的 [`start_llama_server_with_key`] 不同：
+/// 密钥不进文件/argv，而是作为进程环境变量注入（`env` 参数）。
+/// 进程以 `setsid nohup` 脱离 SSH 会话，pid 写入 `{workdir}/{pid_name}.pid`。
+
+/// 通用远端进程停止：pid 文件 → TERM → KILL → 确认。
+///
+/// `extra_pid_file` 可追加一个候选 pid 路径（如插件自定义命名）。
+/// 与 llama.cpp 的删除-等待-确认-重试同语义，避免「报停止成功但进程还在」。
+pub fn stop_engine_process(
+    target: &SshTarget,
+    workdir: &str,
+    pid_name: &str,
+    extra_pid_file: Option<&str>,
+) -> MnResult<()> {
+    let wd = workdir.trim_end_matches('/');
+    let pid_main = format!("{wd}/{pid_name}.pid");
+    let pid_candidates = match extra_pid_file {
+        Some(p) => format!("{pid_main} {p}"),
+        None => pid_main.clone(),
+    };
+    let script = format!(
+        "PIDS=''; \
+         for f in {pid_candidates}; do \
+           if [ -f \"$f\" ]; then P=$(cat \"$f\" 2>/dev/null); \
+             if [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null; then PIDS=\"$PIDS $P\"; fi; \
+           fi; \
+         done; \
+         if [ -z \"$PIDS\" ]; then echo stopped; exit 0; fi; \
+         kill -TERM $PIDS 2>/dev/null || true; sleep 3; \
+         kill -KILL $PIDS 2>/dev/null || true; sleep 1; \
+         STILL=''; for P in $PIDS; do if kill -0 \"$P\" 2>/dev/null; then STILL=\"$STILL $P\"; fi; done; \
+         if [ -n \"$STILL\" ]; then echo \"still-running:$STILL\"; exit 1; fi; \
+         rm -f {pid_candidates} 2>/dev/null || true; echo stopped"
+    );
+    let out = ssh_exec(target, &script, 90)?;
+    if out.contains("still-running") {
+        return Err(MnError::Network {
+            stage: "停止推理进程".to_string(),
+            reason: format!("{pid_name} 在 TERM 与 KILL 之后仍在运行: {out}"),
+        });
+    }
+    Ok(())
+}
+
+/// 通用判据：`{pid_name}` 进程是否在指定端口上运行。
+
+
+/// 最小 shell 单引号转义（防注入）。
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+///
+/// `port_probe` 为 Some 时，启动后最多观察 60s 等待端口监听；
+/// 为 None（引擎未就绪也允许，由调用方健康检查兜底）时只看进程存活。
+pub fn start_engine_process(
+    target: &SshTarget,
+    workdir: &str,
+    pid_name: &str,
+    bin: &str,
+    args: &[String],
+    env: &[(String, String)],
+    port_probe: Option<u16>,
+) -> MnResult<()> {
+    let wd = workdir.trim_end_matches('/');
+    let quoted: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
+    let env_prefix = env
+        .iter()
+        .map(|(k, v)| format!("{k}={}", shell_quote(v)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let pid_file = format!("{wd}/{pid_name}.pid");
+    let log = format!("{wd}/{pid_name}.log");
+    let listen = port_probe.map(listening_probe);
+    let wait_logic = match &listen {
+        Some(l) => format!(
+            "started=0; i=0; while [ $i -lt 120 ]; do i=$((i+1)); sleep 0.5; \
+             if ! kill -0 $(cat {pid_file}) 2>/dev/null; then break; fi; \
+             if {l}; then started=1; break; fi; done; \
+             if [ $started -eq 1 ]; then echo started; exit 0; fi"
+        ),
+        None => "echo started; exit 0".to_string(),
+    };
+    let script = format!(
+        "set -e; mkdir -p {wd}; \
+         if [ -f {pid_file} ] && kill -0 $(cat {pid_file}) 2>/dev/null; then \
+           echo '已在运行，跳过启动'; exit 0; \
+         fi; \
+         setsid env {env_prefix} sh -c 'echo $$ > {pid_file}; exec {bin} {args}' \
+           >> {log} 2>&1 < /dev/null & \
+         sleep 1; \
+         if ! kill -0 $(cat {pid_file}) 2>/dev/null; then \
+           echo '--- 启动失败，关键日志 ---' >&2; tail -20 {log} >&2 || true; exit 1; \
+         fi; \
+         {wait_logic} || {{ echo '--- 启动超时/退出，关键日志 ---' >&2; tail -20 {log} >&2 || true; exit 1; }}",
+        args = quoted.join(" "),
+    );
+    let out = ssh_exec(target, &script, 180)?;
+    if out.contains("已在运行") || out.contains("started") {
+        Ok(())
+    } else {
+        Err(MnError::Network {
+            stage: format!("启动 {pid_name} 进程"),
+            reason: format!("远端启动失败：{out}"),
+        })
+    }
+}
+///
+/// 三路并集（与 llama_server_running_on_port 同思路）：
+/// pid 文件存活 → 命令行端口匹配 → 端口监听。
+pub fn engine_process_running_on_port(
+    target: &SshTarget,
+    workdir: &str,
+    pid_name: &str,
+    port: u16,
+) -> MnResult<bool> {
+    let wd = workdir.trim_end_matches('/');
+    let pid_file = format!("{wd}/{pid_name}.pid");
+    let out = ssh_exec(
+        target,
+        &format!(
+            "if [ -f {pid_file} ] && kill -0 $(cat {pid_file}) 2>/dev/null; then echo yes; exit 0; fi; \
+             if ps -eo comm=,args= 2>/dev/null | awk -v n='{pid_name}' -v p='--port {port}' \
+                  '$1==n && index($0,p)>0' | grep -q .; then echo yes; exit 0; fi; \
+             if {listen}; then echo yes; else echo no; fi",
+            listen = listening_probe(port)
+        ),
+        60,
+    )?;
+    Ok(out.trim() == "yes")
+}
+
+
+/// 端口监听探测片段。
+///
+/// 远端不一定装了 `ss`/`netstat`：都没有时退化为「只要进程还活着就算启动
+/// 成功」，随后仍会由调用方经隧道探 `/health` 做最终判定。
+pub(crate) fn listening_probe(port: u16) -> String {
+    format!(
+        "(command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ':{port} ') \
+         || (command -v netstat >/dev/null 2>&1 && netstat -lnt 2>/dev/null | grep -q ':{port} ')"
+    )
+}
+
+/// 从启动参数里读 `--port`，缺省按 llama.cpp 常规端口处理。
+pub(crate) fn port_from_args(args: &[String]) -> u16 {
+    args.iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080)
+}
+
 #[cfg(test)]
 mod ssh_e2e_tests {
     use super::*;
@@ -3166,7 +2358,7 @@ mod ssh_failure_tests {
 
 #[cfg(test)]
 mod stop_script_tests {
-    use super::build_stop_script;
+    use crate::llama_cpp::build_stop_script;
 
     /// 停止脚本必须按 `--port` 匹配进程，不能只依赖 pid 文件。
     ///
