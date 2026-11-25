@@ -126,6 +126,34 @@ pub trait EnginePlugin: std::fmt::Debug + Send + Sync {
         crate::remote::stop_engine_process(target, workdir, caps.pid_name, None)
     }
 
+    /// 按模型名停止远端进程（共享实例场景，不误伤同节点其它模型）。
+    ///
+    /// 默认实现退化为 [`Self::stop`]（引擎无法按模型名区分时全量停止，
+    /// 由上层端口占用检查保证不误伤）；能按模型名精确停止的引擎
+    /// （如 llama.cpp 的 `--model <path>` 锚点）覆写此方法。
+    fn stop_by_model(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        model_name: &str,
+    ) -> MnResult<()> {
+        let _ = model_name;
+        self.stop(target, workdir)
+    }
+
+    /// 停止指定端口上的引擎进程（端口是共享实例的最终落点）。
+    ///
+    /// 默认实现退化为 [`Self::stop`]；按端口精确停止的引擎覆写。
+    fn stop_on_port(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        port: u16,
+    ) -> MnResult<()> {
+        let _ = port;
+        self.stop(target, workdir)
+    }
+
     /// 指定端口上的引擎进程是否仍在运行。
     fn is_running(
         &self,
@@ -280,6 +308,24 @@ impl EnginePlugin for LlamaCppEngine {
 
     fn stop(&self, target: &crate::remote::SshTarget, workdir: &str) -> MnResult<()> {
         crate::llama_cpp::stop_llama_server(target, workdir)
+    }
+
+    fn stop_by_model(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        model_name: &str,
+    ) -> MnResult<()> {
+        crate::llama_cpp::stop_llama_server_by_model(target, workdir, model_name)
+    }
+
+    fn stop_on_port(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        port: u16,
+    ) -> MnResult<()> {
+        crate::llama_cpp::stop_llama_server_on_port(target, workdir, Some(port))
     }
 
     fn is_running(

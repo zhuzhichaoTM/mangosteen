@@ -783,6 +783,19 @@ impl CloudOrchestrator {
         instance_id: &str,
         model_name: &str,
     ) -> MnResult<()> {
+        self.stop_service_with_engine(provider, instance_id, model_name, None)
+    }
+
+    /// 带引擎参数的停止（2026-11-25 修复）：Strata 引擎走
+    /// `strata launch --stop`（官方优雅停止），llama.cpp 走进程名匹配。
+    /// `engine=None` 时保持旧行为（llama.cpp 路径，向后兼容）。
+    pub fn stop_service_with_engine(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        model_name: &str,
+        engine: Option<mangosteen_core::config::InferenceEngine>,
+    ) -> MnResult<()> {
         // 快速通道：实例未运行 → 无进程可停（避免对已关机实例做
         // 无谓的 SSH 连接重试，用户实测会假死）
         if let Ok(driver) = self.registry.get(provider) {
@@ -799,14 +812,22 @@ impl CloudOrchestrator {
             }
         }
         let target = self.service_target(provider, instance_id)?;
-        let result = mangosteen_device::llama_cpp::stop_llama_server_by_model(
-            &target,
-            &self.config.remote_workdir,
-            model_name,
-        );
+        // 多态分发（2026-11-25 用户裁决）：按引擎标识查插件，调用插件
+        // 的 stop_by_model——不再在编排层写 match 分支，llama.cpp 的
+        // 模型名匹配已下沉到 LlamaCppEngine::stop_by_model。
+        // engine=None（旧台账/未知引擎）回落 LlamaCpp 插件（历史行为）。
+        let engine = engine.unwrap_or(mangosteen_core::config::InferenceEngine::LlamaCpp);
+        let result = match mangosteen_device::plugin_for(engine) {
+            Some(p) => p.stop_by_model(&target, &self.config.remote_workdir, model_name),
+            None => mangosteen_device::llama_cpp::stop_llama_server_by_model(
+                &target,
+                &self.config.remote_workdir,
+                model_name,
+            ),
+        };
         match &result {
             Ok(()) => eprintln!(
-                "[cloud] ✓ 实例 {} 模型 {} 的 llama-server 已停止（不影响同节点其它模型）",
+                "[cloud] ✓ 实例 {} 模型 {} 的推理进程已停止（不影响同节点其它模型）",
                 instance_id,
                 model_name
             ),
@@ -827,6 +848,18 @@ impl CloudOrchestrator {
         instance_id: &str,
         engine_port: u16,
     ) -> MnResult<()> {
+        self.stop_service_on_port_with_engine(provider, instance_id, engine_port, None)
+    }
+
+    /// 带引擎参数的端口停止（2026-11-25 修复）：Strata 走
+    /// `strata launch --stop`；llama.cpp 走端口+进程名匹配。
+    pub fn stop_service_on_port_with_engine(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        engine_port: u16,
+        engine: Option<mangosteen_core::config::InferenceEngine>,
+    ) -> MnResult<()> {
         // 快速通道：实例未运行 → 无进程可停（同 stop_service）
         if let Ok(driver) = self.registry.get(provider) {
             match driver.describe(instance_id) {
@@ -835,11 +868,16 @@ impl CloudOrchestrator {
             }
         }
         let target = self.service_target(provider, instance_id)?;
-        mangosteen_device::llama_cpp::stop_llama_server_on_port(
-            &target,
-            &self.config.remote_workdir,
-            Some(engine_port),
-        )
+        // 多态分发（2026-11-25）：按引擎标识查插件，调用 stop_on_port。
+        let engine = engine.unwrap_or(mangosteen_core::config::InferenceEngine::LlamaCpp);
+        match mangosteen_device::plugin_for(engine) {
+            Some(p) => p.stop_on_port(&target, &self.config.remote_workdir, engine_port),
+            None => mangosteen_device::llama_cpp::stop_llama_server_on_port(
+                &target,
+                &self.config.remote_workdir,
+                Some(engine_port),
+            ),
+        }
     }
 
     /// 检查远端**引擎端口集合**的占用情况（stop 关闭实例的判据）。

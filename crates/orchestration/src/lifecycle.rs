@@ -402,7 +402,9 @@ impl Orchestrator {
                                 .as_ref()
                                 .map(|c| c.engine_port)
                                 .unwrap_or(8080);
-                            if let Err(e) = o.stop_service_on_port(provider, instance_id, port) {
+                            let engine = record.plan.cloud.as_ref()
+                                .map(|c| c.engine.engine);
+                            if let Err(e) = o.stop_service_on_port_with_engine(provider, instance_id, port, engine) {
                                 // 停止命令失败不等于进程还在：SSH 抖动可能发生在
                                 // 「已发出 kill、确认命令未返回」的半程（与上方
                                 // 自建设备路径同一判据）。进程确实不在了就继续
@@ -706,7 +708,9 @@ impl Orchestrator {
                     .as_ref()
                     .map(|c| c.engine_port)
                     .unwrap_or(8080);
-                if let Err(e) = o.stop_service_on_port(provider, instance_id, engine_port) {
+                let engine = rec.plan.cloud.as_ref()
+                    .map(|c| c.engine.engine);
+                if let Err(e) = o.stop_service_on_port_with_engine(provider, instance_id, engine_port, engine) {
                     return Err(MnError::Network {
                         stage: "删除节点并停止实例".to_string(),
                         reason: format!("实例 {instance_id} 可能仍在计费：{e}"),
@@ -790,6 +794,7 @@ impl Orchestrator {
         provider: &str,
         instance_id: &str,
         model_name: Option<&str>,
+        engine: Option<mangosteen_core::config::InferenceEngine>,
         warnings: &mut Vec<String>,
     ) {
         let Some(model) = model_name else {
@@ -797,7 +802,7 @@ impl Orchestrator {
             return;
         };
         if let Some(o) = self.cloud().as_ref() {
-            if let Err(e) = o.stop_service(provider, instance_id, model) {
+            if let Err(e) = o.stop_service_with_engine(provider, instance_id, model, engine) {
                 warnings.push(format!("停止推理进程：{e}"));
             }
         }
@@ -919,10 +924,13 @@ impl Orchestrator {
                             instance_id
                         );
                         // 端口被占：只停本部署进程的模型，实例保留
+                        let engine = record.plan.cloud.as_ref()
+                            .map(|c| c.engine.engine);
                         self.stop_shared_instance_service(
                             &provider,
                             instance_id,
                             model_name.as_deref(),
+                            engine,
                             &mut warnings,
                         );
                         let mut note = format!(
@@ -1167,9 +1175,12 @@ impl Orchestrator {
                     let mut ws = warnings;
                     // 只按模型名停本部署进程；台账缺模型路径时不盲停
                     // （绝不无差别杀全部 llama-server，误伤同节点其它模型）
+                    // 引擎感知（2026-11-25）：Strata 走 strata launch --stop
+                    let engine = record.plan.cloud.as_ref()
+                        .map(|c| c.engine.engine);
                     match model_name.as_deref() {
                         Some(m) => {
-                            if let Err(e) = o.stop_service(&provider, instance_id, m) {
+                            if let Err(e) = o.stop_service_with_engine(&provider, instance_id, m, engine) {
                                 ws.push(format!("停止推理进程：{e}"));
                             }
                         }
@@ -1207,10 +1218,12 @@ impl Orchestrator {
 
                 // 1) 先停推理进程（按模型名精确停，失败不致命——它可能
                 //    本来就没跑）。台账缺模型路径时不盲停：绝不无差别杀
-                //    全部 llama-server。
+                //    全部 llama-server。引擎感知（2026-11-25）：多态分发。
+                let engine = record.plan.cloud.as_ref()
+                    .map(|c| c.engine.engine);
                 match model_name.as_deref() {
                     Some(m) => {
-                        if let Err(e) = o.stop_service(&provider, instance_id, m) {
+                        if let Err(e) = o.stop_service_with_engine(&provider, instance_id, m, engine) {
                             warnings.push(format!("停止推理进程：{e}"));
                         }
                     }
@@ -1945,18 +1958,32 @@ impl Orchestrator {
                 };
                 if let Some(target) = self.device_target_for(cloud) {
                     // 自定义节点：直接 SSH 停进程（按模型名，缺则端口兜底）
+                    // 引擎感知（2026-11-25）：多态分发到引擎插件
                     let workdir = self.config().cloud.remote_workdir.clone();
-                    match model_name.as_deref() {
-                        Some(m) => {
-                            let _ = mangosteen_device::llama_cpp::stop_llama_server_by_model(
-                                &target, &workdir, m,
-                            );
-                        }
-                        None => {
-                            let _ = mangosteen_device::llama_cpp::stop_llama_server_on_port(
-                                &target, &workdir, Some(port),
-                            );
-                        }
+                    let engine = rec.plan.cloud.as_ref()
+                        .map(|c| c.engine.engine)
+                        .unwrap_or(mangosteen_core::config::InferenceEngine::LlamaCpp);
+                    match mangosteen_device::plugin_for(engine) {
+                        Some(p) => match model_name.as_deref() {
+                            Some(m) => {
+                                let _ = p.stop_by_model(&target, &workdir, m);
+                            }
+                            None => {
+                                let _ = p.stop_on_port(&target, &workdir, port);
+                            }
+                        },
+                        None => match model_name.as_deref() {
+                            Some(m) => {
+                                let _ = mangosteen_device::llama_cpp::stop_llama_server_by_model(
+                                    &target, &workdir, m,
+                                );
+                            }
+                            None => {
+                                let _ = mangosteen_device::llama_cpp::stop_llama_server_on_port(
+                                    &target, &workdir, Some(port),
+                                );
+                            }
+                        },
                     }
                     remote_targets.push(target);
                 } else {

@@ -20,10 +20,19 @@ BUILD_DIR="${BUILD_DIR:-$SRC_DIR/build-cuda}"
 REPO_URL="${REPO_URL:-https://github.com/ggml-org/llama.cpp.git}"
 REPO_MIRROR="${REPO_MIRROR:-https://ghproxy.net/https://github.com/ggml-org/llama.cpp.git}"
 CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-}"
-# CUDA 13 rejects CMake's literal `all-major` and cannot compile deprecated
-# Pascal sm_61. This explicit list covers the maintained NVIDIA generations;
-# override it for a CUDA 11 toolkit if Pascal/P40 support is required.
-CUDA_ALL_ARCHES="${CUDA_ALL_ARCHES:-70;75;80;86;89;90}"
+# 自动探测 nvcc 支持的全部虚拟架构（compute_XX），一次构建覆盖全系 NVIDIA GPU。
+# 若探测失败（老版本 nvcc 不支持 --list-gpu-arch），回退到已知兼容列表。
+detect_all_arches() {
+  local nvcc_bin
+  nvcc_bin="$(command -v nvcc)"
+  "$nvcc_bin" --list-gpu-arch 2>/dev/null \
+    | sed -n 's/^compute_\([0-9][0-9]*\)$/\1/p' \
+    | paste -sd';' - || true
+}
+CUDA_ALL_ARCHES="${CUDA_ALL_ARCHES:-$(detect_all_arches)}"
+if [ -z "$CUDA_ALL_ARCHES" ]; then
+  CUDA_ALL_ARCHES="70;75;80;86;89;90"
+fi
 JOBS="${JOBS:-$(nproc 2>/dev/null || printf 4)}"
 
 info() { printf '[INFO] %s\n' "$*"; }
@@ -58,10 +67,17 @@ fi
 # Set CUDA_ARCHITECTURES explicitly for a portable fat binary.
 if [ -z "$CUDA_ARCHITECTURES" ]; then
   CUDA_ARCHITECTURES="$CUDA_ALL_ARCHES"
-  info "未探测到 compute capability，使用兼容架构列表：$CUDA_ARCHITECTURES"
+  info "未探测到 compute capability，使用工具链全架构：$CUDA_ARCHITECTURES"
 else
   info "CUDA architectures: $CUDA_ARCHITECTURES"
 fi
+
+# 追加最高架构的 PTX（-virtual），使二进制可在未来新 GPU 上 JIT 运行。
+HIGHEST_ARCH="$(printf '%s' "$CUDA_ARCHITECTURES" | tr ';' '\n' | sort -n | tail -1)"
+if [ -n "$HIGHEST_ARCH" ]; then
+  CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES};${HIGHEST_ARCH}-virtual"
+fi
+info "最终架构列表（含 PTX 前向兼容）：$CUDA_ARCHITECTURES"
 
 if [ ! -d "$SRC_DIR/.git" ]; then
   mkdir -p "$(dirname "$SRC_DIR")"
@@ -99,6 +115,14 @@ find "$BUILD_DIR" -type f \( -name 'libggml-cuda.so*' -o -name 'libggml.so*' -o 
   -exec cp -f {} "$OUT_DIR"/ \; 2>/dev/null || true
 
 ok "llama-server: $OUT_DIR/llama-server"
+
+# 验证产物实际包含的 GPU 架构（SASS + PTX），确保全系覆盖。
+if command -v cuobjdump >/dev/null 2>&1; then
+  info '产物架构清单（cuobjdump）：'
+  cuobjdump --list-elf "$OUT_DIR/llama-server" 2>/dev/null | grep -o 'sm_[0-9]*' | sort -u | tr '\n' ' '; echo
+  cuobjdump --list-ptx "$OUT_DIR/llama-server" 2>/dev/null | grep -o 'compute_[0-9]*' | sort -u | tr '\n' ' '; echo
+fi
+
 "$OUT_DIR/llama-server" --version || true
 cat <<EOF
 
@@ -108,8 +132,9 @@ cat <<EOF
     --n-gpu-layers 99 --host 0.0.0.0 --port 8080
 
 注意：
-- P40 是 compute capability 6.1，通常需要 CUDA 11.x；CUDA 12+ 可能不再支持 sm_61。
-- “所有 NVIDIA 卡”不能由一个固定二进制无条件保证；本脚本默认覆盖
-  sm_70/75/80/86/89/90。P40(sm_61) 需要 CUDA 11.x，使用：
+- 本脚本默认自动探测 nvcc 支持的全部架构（compute_XX），并附加最高架构的
+  PTX 前向兼容，一次构建覆盖全系 NVIDIA GPU（以工具链支持为准）。
+- P40 是 compute capability 6.1（sm_61），CUDA 12+ 已移除支持，需要 CUDA 11.x：
   CUDA_ALL_ARCHES=61 CUDA_ARCHITECTURES=61 bash build-cuda-llama.sh
+- 老 nvcc 不支持 --list-gpu-arch 时回退到 sm_70;75;80;86;89;90。
 EOF
