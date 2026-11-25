@@ -5,9 +5,9 @@ pub const TEMPLATE: &str = r#"template: default
 model_id: qwen3.8-flash-next-125b-iq2xs
 engine: strata
 source: https://hf-mirror.com/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF
-model: IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf, IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00002-of-00002.gguf
+model: qwen/iq2_xs/IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf, qwen/iq2_xs/IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00002-of-00002.gguf
 auxiliary_models:
-  - mmproj-Qwen3.8-Flash-Next-BF16.gguf (视觉编码器，可选)
+  - qwen/iq2_xs/mmproj-Qwen3.8-Flash-Next-BF16.gguf (视觉编码器，可选)
 family: qwen
 model_quant: iq2_xs
 context: 65536

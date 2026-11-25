@@ -12,7 +12,6 @@ family: qwen36
 model_quant: ud-q4_k_xl
 context: 65536
 kv: int8
-mtp: on
 vision: on
 parallel: 1
 alias: qwen3.6-35b-a3b

@@ -89,11 +89,10 @@ impl StrataEngine {
         let mut args: Vec<String> = Vec::new();
         // 模板透传的引擎专属参数（family / model / quant / context 等）
         args.extend(plan.extra_args.iter().cloned());
-        // 网络参数：Strata 默认监听 127.0.0.1:8080（OpenAI 兼容），
-        // 与 mangosteen 隧道转发目标一致，不传 --host/--port（strata launch
-        // 不支持这两个 flag，实测报 '--host' is not a strata launch option）。
-        // 若未来需要自定义 host/port，用 `--set host=... --set port=...`。
-        let _ = (bind_host, port); // 保留签名，值由默认覆盖
+        // Strata 支持 --port N（2026-11-25 用户确认）：追加 --port
+        let _ = bind_host;
+        args.push("--port".to_string());
+        args.push(port.to_string());
         args
     }
 }
@@ -223,7 +222,14 @@ impl EnginePlugin for StrataEngine {
             launch.args.join(" ")
         );
         let wd = workdir.trim_end_matches('/');
+        // Strata 支持 --port N（2026-11-25 用户确认）：从 args 中提取 --port 值
+        let port = launch.args.iter()
+            .position(|a| a == "--port")
+            .and_then(|i| launch.args.get(i + 1))
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(8080);
         let args = &launch.args;
+        let _ = port; // port 已在 strata_args 中追加到 args
         // 不用 shell_quote：它是给 ssh 转义的，会把 "--vision" 转成 "'--vision'"，
         // Strata CLI 会把引号当参数的一部分，导致解析错误。
         // Strata 参数都是标准 flag + 值，不需要 shell 转义，直接 join 即可。
@@ -286,7 +292,7 @@ impl EnginePlugin for StrataEngine {
              LOG={log}\n\
              PID={pid}\n\
              # 幂等：已在 8080 提供服务则跳过\n\
-             if curl -fsS --max-time 3 http://127.0.0.1:8080/v1/models >/dev/null 2>&1; then\n\
+             if curl -fsS --max-time 3 http://127.0.0.1:{port}/v1/models >/dev/null 2>&1; then\n\
                echo 'strata 已在运行，跳过启动'\n\
                exit 0\n\
              fi\n\
@@ -303,7 +309,7 @@ impl EnginePlugin for StrataEngine {
              echo '=== strata 二进制信息 ==='\n\
              \"$BIN\" --version 2>&1 | head -3\n\
              echo '=== 启动 strata ... ==='\n\
-             setsid nohup env {env_prefix} \"$BIN\" {args_str} >> \"$LOG\" 2>&1 < /dev/null &\n\
+             setsid nohup env TMPDIR=/dev/shm {env_prefix} \"$BIN\" {args_str} >> \"$LOG\" 2>&1 < /dev/null &\n\
              echo $! > \"$PID\"\n\
              sleep 5\n\
              echo started\n"
@@ -423,6 +429,23 @@ impl EnginePlugin for StrataEngine {
             .parent()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| model_path.to_string());
+
+        // 某些模型的 GGUF 文件在量化子目录下（如 IQ2_XS/），需要上溯到父目录。
+        // 用 SSH 检查远端目录是否有 GGUF 文件（本地 std::fs 无法访问远端）。
+        // 但为了简单起见，如果目录名是全大写+数字+下划线（量化级别），上溯一级。
+        let dir_name = std::path::Path::new(&dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let is_quant_dir = dir_name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') && !dir_name.is_empty();
+        let dir = if is_quant_dir {
+            std::path::Path::new(&dir)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(dir)
+        } else {
+            dir
+        };
 
         // 移除 --family/--model（无论 --model-path 是否已存在）
         let mut out: Vec<String> = Vec::with_capacity(args.len());

@@ -1156,20 +1156,36 @@ impl Orchestrator {
         // 监听端口，再建立隧道——隧道建立即通，无空闲窗口。
         {
             let caps = cloud_plan.engine.engine.capabilities();
-            // TLS 感知（2026-11-24 修复）：llama-server 启用 TLS 时监听 HTTPS，
-            // HTTP 探针会失败。按 tls 标记选择 http/https + -k（跳过自签证书校验）。
-            let tls_on = cloud_plan.tls;
-            let scheme = if tls_on { "https" } else { "http" };
-            let insecure = if tls_on { "-k " } else { "" };
+            // 端口监听检测（2026-11-25 用户裁决）：Strata 启动成功后 /v1/models
+            // 可能短暂不可达，改为检测端口是否监听（更可靠）。
+            let engine_port = cloud_plan.engine_port;
             let ready_probe = format!(
-                "curl -fsS {insecure}--max-time 3 {scheme}://127.0.0.1:{}{} >/dev/null 2>&1 && echo ready || echo not_ready",
-                cloud_plan.engine_port,
-                caps.health_path
+                "ss -tlnp 2>/dev/null | grep -q ':{engine_port} ' && echo ready || echo not_ready"
             );
+            // 部署去重（2026-11-25 用户要求）：启动前检查端口是否已监听，
+            // 已监听则跳过启动（模型可能已部署）。
+            let model_name = cloud_plan.model_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&cloud_plan.model_path);
+            let _ = model_name; // 模型名用于日志（可选）
+            let dedup_probe = format!(
+                "ss -tlnp 2>/dev/null | grep -q ':{engine_port} ' && echo already_running || echo not_running"
+            );
+            let mut already_running = false;
+            if let Ok(out) = mangosteen_device::remote::ssh_exec(&ssh, &dedup_probe, 15) {
+                if out.trim() == "already_running" {
+                    eprintln!("[ready-poll] 端口 {engine_port} 已监听，跳过启动（模型可能已部署）");
+                    already_running = true;
+                }
+            }
             // 远端就绪预算：统一 3min 上限（2026-11-23 用户裁决，不做分档）。
-            let ready_budget = Duration::from_secs(240);
+            let ready_budget = Duration::from_secs(300);
             let probe_start = std::time::Instant::now();
             let mut attempt_num = 0u32;
+            if already_running {
+                perf.leave("远端引擎就绪（已运行）");
+            } else {
             loop {
                 attempt_num += 1;
                 if let Ok(out) = mangosteen_device::remote::ssh_exec(&ssh, &ready_probe, 30) {
@@ -1229,6 +1245,7 @@ impl Orchestrator {
                 }
                 std::thread::sleep(Duration::from_secs(5));
             }
+            } // end else (already_running)
         }
 
         // 经隧道确认端到端可用。少了这一步，台账会标 Ready 而对话直接 502。
