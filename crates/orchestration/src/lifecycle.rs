@@ -339,13 +339,23 @@ impl Orchestrator {
                         let p = c.model_path.rsplit('/').next().unwrap_or(&c.model_path);
                         if p.is_empty() { None } else { Some(p.to_string()) }
                     };
-                    let stop_res = match model_name.as_deref() {
-                        Some(m) => mangosteen_device::llama_cpp::stop_llama_server_by_model(
-                            &target, &workdir, m,
-                        ),
-                        None => mangosteen_device::llama_cpp::stop_llama_server_on_port(
-                            &target, &workdir, Some(port),
-                        ),
+                    // 引擎感知（2026-11-25）：多态分发到引擎插件
+                    let engine = record.plan.cloud.as_ref()
+                        .map(|c| c.engine.engine)
+                        .unwrap_or(mangosteen_core::config::InferenceEngine::LlamaCpp);
+                    let stop_res = match mangosteen_device::plugin_for(engine) {
+                        Some(p) => match model_name.as_deref() {
+                            Some(m) => p.stop_by_model(&target, &workdir, m),
+                            None => p.stop_on_port(&target, &workdir, port),
+                        },
+                        None => match model_name.as_deref() {
+                            Some(m) => mangosteen_device::llama_cpp::stop_llama_server_by_model(
+                                &target, &workdir, m,
+                            ),
+                            None => mangosteen_device::llama_cpp::stop_llama_server_on_port(
+                                &target, &workdir, Some(port),
+                            ),
+                        },
                     };
                     if let Err(e) = stop_res {
                         // 停止脚本失败不等于进程还在：SSH 抖动（连接层中断、
@@ -1324,13 +1334,23 @@ impl Orchestrator {
                 // 走自建设备（设置页登记的 SSH 目标）
                 Some(target) => {
                     let workdir = self.config().cloud.remote_workdir.clone();
-                    let stop_res = match model_name.as_deref() {
-                        Some(m) => mangosteen_device::llama_cpp::stop_llama_server_by_model(
-                            &target, &workdir, m,
-                        ),
-                        None => mangosteen_device::llama_cpp::stop_llama_server_on_port(
-                            &target, &workdir, Some(port),
-                        ),
+                    // 引擎感知（2026-11-25）：多态分发到引擎插件
+                    let engine = record.plan.cloud.as_ref()
+                        .map(|c| c.engine.engine)
+                        .unwrap_or(mangosteen_core::config::InferenceEngine::LlamaCpp);
+                    let stop_res = match mangosteen_device::plugin_for(engine) {
+                        Some(p) => match model_name.as_deref() {
+                            Some(m) => p.stop_by_model(&target, &workdir, m),
+                            None => p.stop_on_port(&target, &workdir, port),
+                        },
+                        None => match model_name.as_deref() {
+                            Some(m) => mangosteen_device::llama_cpp::stop_llama_server_by_model(
+                                &target, &workdir, m,
+                            ),
+                            None => mangosteen_device::llama_cpp::stop_llama_server_on_port(
+                                &target, &workdir, Some(port),
+                            ),
+                        },
                     };
                     stop_res.map_err(|e| MnError::Network {
                         stage: "停止推理进程".to_string(),
