@@ -851,7 +851,7 @@ impl Orchestrator {
         let node_ssh_port = instance.network.ssh_port.unwrap_or(22);
         perf.note(&format!("实例已 Running: {}:{} · {}", node_ip, node_ssh_port, instance.id));
         perf.leave("实例创建完成");
-        perf.enter("节点配置(依赖安装+llama-server下载)");
+        perf.enter("节点配置(依赖安装+引擎准备)");
         let instance = p
             .instance
             .clone()
@@ -925,9 +925,12 @@ impl Orchestrator {
         // `ProvisionedResources.ssh` 正是 `ensure_key_target` 的产物
         // （已验证 `identity_file` 可登录），这里用它就是「一次验证、处处复用」。
         let ssh = p.ssh.clone();
-        // 节点配置内部严格执行：依赖安装与验证 → llama-server 下载与可执行性验证。
+        // 节点配置内部严格执行：依赖安装与验证 → 引擎二进制准备与可执行性验证。
         // 只有整个函数成功返回，才允许推进到模型下载。
+        // 引擎准备走 EnginePlugin 多态（llama.cpp 下载发行包，Strata 官方
+        // 安装脚本，Ollama 返回 None），与具体引擎解耦（2026-11-25 优化1）。
         let cfg = self.config();
+        let engine_name = cloud_plan.engine.engine.display_name();
         mangosteen_provider::orchestrator::configure_node(
             &ssh,
             &p.workdir,
@@ -943,16 +946,16 @@ impl Orchestrator {
             crate::progress::DeployStage::Configuring,
             crate::progress::StageOutcome::Done,
             format!(
-                "节点配置完成：依赖已验证，llama-server 可执行程序已确认：{}:{}",
-                node_ip, node_ssh_port
+                "节点配置完成：依赖已验证，{} 引擎可执行程序已确认：{}:{}",
+                engine_name, node_ip, node_ssh_port
             ),
         );
         sink(
             crate::progress::DeployStage::Downloading,
             crate::progress::StageOutcome::Running,
             format!(
-                "llama-server 配置完成，立即进入模型下载：{}",
-                cloud_plan.model_path
+                "{} 引擎配置完成，立即进入模型下载：{}",
+                engine_name, cloud_plan.model_path
             ),
         );
         perf.enter("模型下载");
@@ -1079,10 +1082,11 @@ impl Orchestrator {
                         if free_vram < required.saturating_add(safety) {
                             let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                             let e = MnError::bad_request(format!(
-                                "远端 GPU 显存不足，禁止启动推理引擎：总显存 {:.2} GiB，当前空闲 {:.2} GiB，预计至少需要 {:.2} GiB（含 512 MiB 运行余量）。请更换显存更大的节点，或降低量化/上下文长度；本次未启动 llama-server。",
+                                "远端 GPU 显存不足，禁止启动推理引擎：总显存 {:.2} GiB，当前空闲 {:.2} GiB，预计至少需要 {:.2} GiB（含 512 MiB 运行余量）。请更换显存更大的节点，或降低量化/上下文长度；本次未启动 {}。",
                                 gib(total_vram),
                                 gib(free_vram),
-                                gib(required.saturating_add(safety))
+                                gib(required.saturating_add(safety)),
+                                cloud_plan.engine.engine.display_name()
                             ));
                             self.rollback_failed_cloud(&id, &ssh, &workdir, &plan.origin, &e);
                             return Err(e);
@@ -1335,29 +1339,15 @@ impl Orchestrator {
         );
         if let Err(e) = health_result {
             perf.leave("健康检查失败");
-            // 诊断信息：优先取引擎专属诊断（llama-server），其它引擎给通用摘要。
-            // 通过 capabilities.pid_name 判断是否有专属诊断，避免引擎字面量。
-            let caps = cloud_plan.engine.engine.capabilities();
-            let diagnostic = if caps.pid_name == "llama-server" {
-                mangosteen_device::llama_cpp::llama_server_start_diagnostics(
-                    &ssh,
-                    &workdir,
-                    cloud_plan.engine_port,
-                )
-                .unwrap_or_else(|diag_err| format!("远端诊断获取失败：{diag_err}"))
-            } else {
-                // 通用诊断：tail 引擎专属日志文件（strata.log / ollama.log 等）
-                let log_file = format!("{workdir}/{}.log", caps.pid_name);
-                let tail_out = mangosteen_device::remote::ssh_exec(
-                    &ssh,
-                    &format!("tail -30 {log_file} 2>/dev/null || echo '(日志文件不存在)'"),
-                    30,
-                )
-                .unwrap_or_else(|_| "(远端诊断失败)".to_string());
-                format!(
-                    "引擎 {} 未就绪（端口 {}），远端日志尾部：\n{}",
-                    caps.pid_name, cloud_plan.engine_port, tail_out
-                )
+            // 诊断信息（P1 修复，2026-11-25）：多态分发到引擎插件的
+            // start_diagnostics——llama.cpp 走 pid/日志/端口专属诊断，
+            // 其它引擎走默认实现（tail 引擎日志）。
+            let diagnostic = match mangosteen_device::plugin_for(cloud_plan.engine.engine) {
+                Some(p) => p
+                    .start_diagnostics(&ssh, &workdir, cloud_plan.engine_port)
+                    .unwrap_or_else(|diag_err| format!("远端诊断获取失败：{diag_err}")),
+                None => format!("引擎 {} 未就绪（端口 {}）", 
+                    cloud_plan.engine.engine.display_name(), cloud_plan.engine_port),
             };
             let e = MnError::Network {
                 stage: "等待云端推理服务".to_string(),
@@ -1454,22 +1444,31 @@ impl Orchestrator {
         //    或同机多模型的自建设备）上其它模型可能正在推理。停止判据
         //    按模型名（用户要求）：命令行 `--model <path>` 含本模型文件名
         //    才杀；台账缺模型路径时退回端口判据，绝不无差别全停。
+        //    引擎感知（P0 修复，2026-11-25）：多态分发到引擎插件。
+        let engine = own.as_ref()
+            .map(|c| c.engine.engine)
+            .unwrap_or(mangosteen_core::config::InferenceEngine::LlamaCpp);
         match own.as_ref().map(|c| {
             let p = c.model_path.rsplit('/').next().unwrap_or(&c.model_path);
             (c.engine_port, if p.is_empty() { None } else { Some(p.to_string()) })
         }) {
             Some((_port, Some(m))) => {
-                let _ = mangosteen_device::llama_cpp::stop_llama_server_by_model(
-                    ssh, workdir, &m,
-                );
+                match mangosteen_device::plugin_for(engine) {
+                    Some(p) => { let _ = p.stop_by_model(ssh, workdir, &m); }
+                    None => { let _ = mangosteen_device::llama_cpp::stop_llama_server_by_model(ssh, workdir, &m); }
+                }
             }
             Some((port, None)) => {
-                let _ = mangosteen_device::llama_cpp::stop_llama_server_on_port(
-                    ssh, workdir, Some(port),
-                );
+                match mangosteen_device::plugin_for(engine) {
+                    Some(p) => { let _ = p.stop_on_port(ssh, workdir, port); }
+                    None => { let _ = mangosteen_device::llama_cpp::stop_llama_server_on_port(ssh, workdir, Some(port)); }
+                }
             }
             None => {
-                let _ = mangosteen_device::llama_cpp::stop_llama_server(ssh, workdir);
+                match mangosteen_device::plugin_for(engine) {
+                    Some(p) => { let _ = p.stop(ssh, workdir); }
+                    None => { let _ = mangosteen_device::llama_cpp::stop_llama_server(ssh, workdir); }
+                }
             }
         }
 

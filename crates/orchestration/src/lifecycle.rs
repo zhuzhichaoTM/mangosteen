@@ -111,12 +111,17 @@ impl Orchestrator {
                 // 检查并启动推理进程（如果进程未运行）
                 if let Some(target) = self.device_target_for(&cloud_plan) {
                     // 自定义节点路径
+                    // 引擎感知探活（2026-11-25 P0 修复）：多态分发到引擎插件
                     let workdir = self.config().cloud.remote_workdir.clone();
                     let port = cloud_plan.engine_port;
-                    let running = mangosteen_device::llama_cpp::llama_server_running_on_port(
-                        &target, &workdir, port,
-                    )
-                    .unwrap_or(false);
+                    let engine = cloud_plan.engine.engine;
+                    let running = match mangosteen_device::plugin_for(engine) {
+                        Some(p) => p.is_running(&target, &workdir, port).unwrap_or(false),
+                        None => mangosteen_device::llama_cpp::llama_server_running_on_port(
+                            &target, &workdir, port,
+                        )
+                        .unwrap_or(false),
+                    };
 
                     if !running {
                         eprintln!("[restore] {id}：推理进程未运行，尝试启动");

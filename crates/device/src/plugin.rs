@@ -154,6 +154,30 @@ pub trait EnginePlugin: std::fmt::Debug + Send + Sync {
         self.stop(target, workdir)
     }
 
+    /// 启动失败时的引擎专属诊断（P1 修复，2026-11-25）。
+    ///
+    /// 默认实现返回通用摘要（tail 引擎日志）；有专属诊断的引擎
+    /// （如 llama.cpp 的 pid/日志/端口三件套）覆写此方法。
+    fn start_diagnostics(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        port: u16,
+    ) -> MnResult<String> {
+        let caps = self.capabilities();
+        let log_file = format!("{workdir}/{}.log", caps.pid_name);
+        let tail_out = crate::remote::ssh_exec(
+            target,
+            &format!("tail -30 {log_file} 2>/dev/null || echo '(日志文件不存在)'"),
+            30,
+        )
+        .unwrap_or_else(|_| "(远端诊断失败)".to_string());
+        Ok(format!(
+            "引擎 {} 未就绪（端口 {}），远端日志尾部：\n{}",
+            caps.pid_name, port, tail_out
+        ))
+    }
+
     /// 指定端口上的引擎进程是否仍在运行。
     fn is_running(
         &self,
@@ -326,6 +350,15 @@ impl EnginePlugin for LlamaCppEngine {
         port: u16,
     ) -> MnResult<()> {
         crate::llama_cpp::stop_llama_server_on_port(target, workdir, Some(port))
+    }
+
+    fn start_diagnostics(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        port: u16,
+    ) -> MnResult<String> {
+        crate::llama_cpp::llama_server_start_diagnostics(target, workdir, port)
     }
 
     fn is_running(

@@ -947,12 +947,28 @@ impl CloudOrchestrator {
         instance_id: &str,
         engine_port: u16,
     ) -> MnResult<bool> {
+        self.is_service_running_with_engine(provider, instance_id, engine_port, None)
+    }
+
+    /// 引擎感知探活（2026-11-25 P0 修复）：按引擎标识多态分发，
+    /// llama.cpp 探 llama-server 进程，Strata 探 strata 进程。
+    pub fn is_service_running_with_engine(
+        &self,
+        provider: &str,
+        instance_id: &str,
+        engine_port: u16,
+        engine: Option<mangosteen_core::config::InferenceEngine>,
+    ) -> MnResult<bool> {
         let target = self.service_target(provider, instance_id)?;
-        mangosteen_device::llama_cpp::llama_server_running_on_port(
-            &target,
-            &self.config.remote_workdir,
-            engine_port,
-        )
+        let engine = engine.unwrap_or(mangosteen_core::config::InferenceEngine::LlamaCpp);
+        match mangosteen_device::plugin_for(engine) {
+            Some(p) => p.is_running(&target, &self.config.remote_workdir, engine_port),
+            None => mangosteen_device::llama_cpp::llama_server_running_on_port(
+                &target,
+                &self.config.remote_workdir,
+                engine_port,
+            ),
+        }
     }
 
     /// **启动服务**：在已有实例上重新拉起 `llama-server`.
