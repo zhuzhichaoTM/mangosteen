@@ -1399,6 +1399,7 @@ fn deploy_key_target(instance: &Instance) -> Option<mangosteen_device::remote::S
 fn bootstrap_deploy_target(
     instance: &Instance,
     config: &OrchestratorConfig,
+    engine: Option<mangosteen_core::config::InferenceEngine>,
 ) -> MnResult<mangosteen_device::remote::SshTarget> {
     // 1. 幂等短路：已加固的实例直接返回 deploy 密钥 target。
     //    但不能只短路——存量实例可能缺 workdir 或 aria2（旧引导没装）：
@@ -1464,6 +1465,8 @@ fn bootstrap_deploy_target(
                 eprintln!("[cloud] ✓ 实例 {} 模型加密密钥已就绪（幂等补齐）", instance.id);
             }
         }
+        // aria2c 检查（2026-11-25 用户裁决）：所有模型统一使用 aria2c
+        // 提前预下载（Strata 后续直接使用），缺失警告保留。
         let aria_cmd = "command -v aria2c >/dev/null 2>&1 || echo aria2-missing";
         if let Ok(out) = mangosteen_device::remote::ssh_exec(&target, &aria_cmd, 15) {
             if out.trim() != "aria2c" {
@@ -1471,29 +1474,32 @@ fn bootstrap_deploy_target(
             }
         }
         // TLS 证书幂等生成（P1）：存量实例（引导早于证书逻辑）补齐；
-        // 新实例由 4d-2 生成，此处幂等可重入
-        let tls_cmd = format!(
-            "mkdir -p {workdir}/tls && \
-             if [ ! -f {workdir}/tls/server.crt ]; then \
-               openssl req -x509 -newkey rsa:2048 -keyout {workdir}/tls/server.key \
-                 -out {workdir}/tls/server.crt -days 3650 -nodes \
-                 -subj '/CN=llama-server' >/dev/null 2>&1 || true; \
-             fi; \
-             if [ -f {workdir}/tls/server.crt ]; then \
-               chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}/tls/server.key {workdir}/tls/server.crt 2>/dev/null || true; \
-               chmod 600 {workdir}/tls/server.key 2>/dev/null || true; \
-               echo tls-ready; \
-             fi"
-        );
-        match mangosteen_device::remote::ssh_exec(&target, &tls_cmd, 30) {
-            Ok(out) if out.contains("tls-ready") => {
-                eprintln!("[cloud] ✓ 实例 {} TLS 证书已就绪（llama-server 将启用 https）", instance.id);
+        // 新实例由 4d-2 生成，此处幂等可重入。
+        // 引擎能力判断（2026-11-25 用户裁决）：仅 supports_tls=true 的
+        // 引擎（llama.cpp）生成证书并打印就绪日志；Strata 等不支持的
+        // 引擎跳过生成与日志。engine=None（旧调用路径）按生成处理。
+        let supports_tls = engine
+            .map(|e| e.capabilities().supports_tls)
+            .unwrap_or(true);
+        if supports_tls {
+            let tls_cmd = format!(
+                "mkdir -p {workdir}/tls && \
+                 if [ ! -f {workdir}/tls/server.crt ]; then \
+                   openssl req -x509 -newkey rsa:2048 -keyout {workdir}/tls/server.key \
+                     -out {workdir}/tls/server.crt -days 3650 -nodes \
+                     -subj '/CN=llama-server' >/dev/null 2>&1 || true; \
+                 fi; \
+                 if [ -f {workdir}/tls/server.crt ]; then \
+                   chown {DEPLOY_USER}:{DEPLOY_USER} {workdir}/tls/server.key {workdir}/tls/server.crt 2>/dev/null || true; \
+                   chmod 600 {workdir}/tls/server.key 2>/dev/null || true; \
+                   echo tls-ready; \
+                 fi"
+            );
+            if let Ok(out) = mangosteen_device::remote::ssh_exec(&target, &tls_cmd, 30) {
+                if out.contains("tls-ready") {
+                    eprintln!("[cloud] ✓ 实例 {} TLS 证书已就绪", instance.id);
+                }
             }
-            Ok(_) => eprintln!(
-                "[cloud] ⚠ 实例 {} TLS 证书生成失败（openssl 缺失？），推理走明文 HTTP",
-                instance.id
-            ),
-            Err(e) => eprintln!("[cloud] ⚠ 实例 {} TLS 证书生成失败（{e}）", instance.id),
         }
         eprintln!("[cloud] ✓ 实例 {} deploy 密钥认证已就绪（跳过引导）", instance.id);
         return Ok(target);
@@ -2525,7 +2531,18 @@ fn ensure_key_target(
     // 密钥 target；新实例用 root 密码一次性引导（建 deploy + 装公钥 +
     // sshd 加固禁 root/禁密码）后返回 deploy 密钥 target。
     // 引导失败才降级回 root 密码 target（保底，sshd 未加固的老实例）。
-    match bootstrap_deploy_target(instance, config) {
+    ensure_key_target_with_engine(instance, config, None)
+}
+
+/// 引擎感知的 ensure_key_target（2026-11-25 用户裁决）：
+/// TLS 证书生成/日志按引擎 `supports_tls` 能力决定——
+/// llama.cpp（true）生成并打印；Strata（false）跳过生成与日志。
+fn ensure_key_target_with_engine(
+    instance: &Instance,
+    config: &OrchestratorConfig,
+    engine: Option<mangosteen_core::config::InferenceEngine>,
+) -> MnResult<mangosteen_device::remote::SshTarget> {
+    match bootstrap_deploy_target(instance, config, engine) {
         Ok(target) => Ok(target),
         Err(e) => {
             eprintln!(
@@ -2674,8 +2691,11 @@ impl CloudOrchestrator {
             // 开机后恢复登录凭证：统一重置为固定密码 "1qaz@WSX"
             restore_login_credential(driver, &mut instance, &self.config);
             // 先把本机公钥装进节点，隧道才走密钥认证（密码 askpass 极易失手）
+            // 引擎感知（2026-11-25）：TLS 生成按 supports_tls 能力决定
             let fixed_password = instance.network.ssh_password.clone();
-            let ssh = ensure_key_target(&instance, &self.config, fixed_password.as_deref())?;
+            let ssh = ensure_key_target_with_engine(
+                &instance, &self.config, Some(plan.engine.engine),
+            )?;
             confirm_remote_reachable(&ssh)?;
             let local_port = if local_port != 0 { local_port } else { 0 };
             let spec = tunnel_spec_for(&ssh, plan.engine_port, true, Some(local_port));
