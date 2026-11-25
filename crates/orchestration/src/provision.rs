@@ -1125,8 +1125,13 @@ impl Orchestrator {
             let tls_check = format!(
                 "test -f {workdir}/tls/server.crt && test -f {workdir}/tls/server.key && echo yes || echo no"
             );
+            // Strata 引擎不支持 TLS（start 不追加 --ssl-*，监听明文 HTTP），
+            // 即使节点存在证书也不能标 tls=true，否则 runprobe 走 HTTPS 探测
+            // 明文端口 → 永远 unactive（2026-11-25 修复）。
+            let strata_engine = cloud_plan.engine.engine
+                == mangosteen_core::config::InferenceEngine::Strata;
             if let Ok(out) = mangosteen_device::remote::ssh_exec(&ssh, &tls_check, 15) {
-                if out.trim() == "yes" {
+                if out.trim() == "yes" && !strata_engine {
                     cloud_plan.tls = true;
                     // 立即写回台账：runprobe 探活、网关 relay、恢复路径都从
                     // 台账读 tls 标记决定 http/https——不写回则下游全按明文
@@ -1156,11 +1161,12 @@ impl Orchestrator {
         // 监听端口，再建立隧道——隧道建立即通，无空闲窗口。
         {
             let caps = cloud_plan.engine.engine.capabilities();
-            // 端口监听检测（2026-11-25 用户裁决）：Strata 启动成功后 /v1/models
-            // 可能短暂不可达，改为检测端口是否监听（更可靠）。
+            // 2026-11-25 修复：端口监听检测（ss）改为 curl 探测。
+            // ss 输出格式因 OS 版本不同，grep 模式可能不匹配。
+            // Strata /v1/models 确认可用，改为 curl 探测（更可靠）。
             let engine_port = cloud_plan.engine_port;
             let ready_probe = format!(
-                "ss -tlnp 2>/dev/null | grep -q ':{engine_port} ' && echo ready || echo not_ready"
+                "curl -fsS --max-time 3 http://127.0.0.1:{engine_port}/v1/models >/dev/null 2>&1 && echo ready || echo not_ready"
             );
             // 部署去重（2026-11-25 用户要求）：启动前检查端口是否已监听，
             // 已监听则跳过启动（模型可能已部署）。
@@ -1168,9 +1174,8 @@ impl Orchestrator {
                 .rsplit('/')
                 .next()
                 .unwrap_or(&cloud_plan.model_path);
-            let _ = model_name; // 模型名用于日志（可选）
             let dedup_probe = format!(
-                "ss -tlnp 2>/dev/null | grep -q ':{engine_port} ' && echo already_running || echo not_running"
+                "curl -fsS --max-time 3 http://127.0.0.1:{engine_port}/v1/models 2>/dev/null | grep -q '{model_name}' && echo already_running || echo not_running"
             );
             let mut already_running = false;
             if let Ok(out) = mangosteen_device::remote::ssh_exec(&ssh, &dedup_probe, 15) {

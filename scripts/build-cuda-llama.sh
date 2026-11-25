@@ -14,8 +14,8 @@
 
 set -Eeuo pipefail
 
-SRC_DIR="${SRC_DIR:-/root/mangosteen/src/llama.cpp}"
-OUT_DIR="${OUT_DIR:-/root/mangosteen/bin}"
+SRC_DIR="${SRC_DIR:-/home/mangosteen/src/llama.cpp}"
+OUT_DIR="${OUT_DIR:-/home/mangosteen/bin}"
 BUILD_DIR="${BUILD_DIR:-$SRC_DIR/build-cuda}"
 REPO_URL="${REPO_URL:-https://github.com/ggml-org/llama.cpp.git}"
 REPO_MIRROR="${REPO_MIRROR:-https://ghproxy.net/https://github.com/ggml-org/llama.cpp.git}"
@@ -104,7 +104,7 @@ cat <<EOF
 
 完成。启动时建议：
   export LD_LIBRARY_PATH="$OUT_DIR:\${LD_LIBRARY_PATH:-}"
-  "$OUT_DIR/llama-server" -m /root/mangosteen/models/<model>.gguf \\
+  "$OUT_DIR/llama-server" -m /home/mangosteen/models/<model>.gguf \\
     --n-gpu-layers 99 --host 0.0.0.0 --port 8080
 
 注意：

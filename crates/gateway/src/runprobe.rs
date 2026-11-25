@@ -293,7 +293,7 @@ pub fn spawn_runtime_probe(
                     probe_https_ok(
                         "127.0.0.1",
                         t.port.unwrap(),
-                        "/health",
+                        "/v1/models",
                         PROBE_TIMEOUT,
                         t.tls_cert_path.as_deref(),
                     )
@@ -301,7 +301,7 @@ pub fn spawn_runtime_probe(
                     mangosteen_platform::process::probe_http_ok(
                         "127.0.0.1",
                         t.port.unwrap(),
-                        "/health",
+                        "/v1/models",
                         PROBE_TIMEOUT,
                     )
                 };
