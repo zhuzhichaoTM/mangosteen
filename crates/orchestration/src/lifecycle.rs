@@ -256,7 +256,30 @@ impl Orchestrator {
                 .establish_tunnel(&provider, instance_id, &cloud_plan)
                 .map(|_| ())
                 .map_err(|e| format!("建立 SSH 隧道失败：{e}"))
+        }?;
+
+        // 主动触发一次运行状态检测（2026-11-25 用户裁决）：
+        // 部署完成后 restore-tunnel 只建隧道不探活，runprobe 周期探测
+        // （5s）还没跑到时 UI 显示 unactive，用户误以为部署失败。
+        // 隧道刚建好立即探一次 /v1/models，结果写台账，
+        // UI 立刻显示 active——不再需要手动 restart。
+        if let Ok(Some(record)) = self.state.get(id) {
+            if record.status == DeploymentStatus::Ready {
+                if let Some(cloud_plan) = record.plan.cloud.as_ref() {
+                    let port = cloud_plan.local_port;
+                    let key = cloud_plan.api_key.as_deref();
+                    let active = mangosteen_platform::process::probe_http_ok_with_auth(
+                        "127.0.0.1",
+                        port,
+                        "/v1/models",
+                        key.unwrap_or(""),
+                        std::time::Duration::from_secs(3),
+                    );
+                    let _ = self.update_run_status(id, active);
+                }
+            }
         }
+        Ok(())
     }
 
     /// P1 实例回收漂移（2026-11-19）：runprobe 探测到实例被回收时，

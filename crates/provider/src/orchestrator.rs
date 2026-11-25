@@ -763,6 +763,12 @@ impl CloudOrchestrator {
         let inst = driver.describe(instance_id)?;
         // P0-1（2026-11-19）：不再覆盖固定密码——restore_login_credential
         // 已设随机密码到 inst.network.ssh_password（内存），沿用之。
+        // 优化（2026-11-25 用户裁决）：部署成功后只用 deploy 用户操作。
+        // deploy 密钥通道可用时直接返回（不触发 root 引导/幂等补齐的
+        // 噪音日志——stop/探活等操作不需要 aria2/TLS 补齐）。
+        if let Some(target) = deploy_key_target(&inst) {
+            return Ok(target);
+        }
         ensure_key_target(&inst, &self.config, None)
     }
 
