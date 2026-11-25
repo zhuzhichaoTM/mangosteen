@@ -48,6 +48,19 @@ const MAX_PAGES: u32 = 10;
 /// 定时关机的最小延迟（秒）。厂商限制：目标时间必须 ≥ 当前 + 300 秒。
 const MIN_STOP_DELAY_SECS: i64 = 300;
 
+/// 镜像按 GPU 型号选择（2026-11-25 用户裁决）。
+///
+/// 默认镜像 compshareImage-1t4xyz67cfmh（CUDA 13.2 环境，新卡）；
+/// P40/V100S 老卡用 compshareImage-1k99rzcvdg6j（旧 CUDA 环境）。
+/// `default_image_id` 为空时返回空串（由上层校验必填）。
+pub fn image_id_for_gpu(default_image_id: &str, gpu_type: &str) -> String {
+    if mangosteen_core::config::is_legacy_gpu(gpu_type) {
+        "compshareImage-1k99rzcvdg6j".to_string()
+    } else {
+        default_image_id.to_string()
+    }
+}
+
 /// 优云智算 GPU 实例驱动。
 pub struct CompshareDriver<T: Transport> {
     name: String,
@@ -742,7 +755,10 @@ impl<T: Transport> ProviderDriver for CompshareDriver<T> {
             gpu,
             cpu,
             memory_mb: CompshareConfig::memory_mb(memory_gb),
-            image_id: self.config.image_id.clone(),
+            // 镜像按 GPU 型号选择（2026-11-25 用户裁决）：
+            // 默认 compshareImage-1t4xyz67cfmh（CUDA 13.2 环境）；
+            // P40/V100S 老卡用 compshareImage-1k99rzcvdg6j。
+            image_id: image_id_for_gpu(&self.config.image_id, &gpu_type),
             machine_type: self.config.machine_type.clone(),
             cpu_platform: self.config.cpu_platform.clone(),
             charge_type: self.config.charge_type.clone(),

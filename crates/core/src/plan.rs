@@ -332,6 +332,18 @@ pub struct CloudPlan {
     pub reuse_provider: Option<String>,
 }
 
+impl CloudPlan {
+    /// 安装用 GPU 型号（2026-11-25）：返回 Some(归一化名) 供引擎包/镜像
+    /// 按型号选择（P40/V100S 回落旧包）；空值返回 None（用默认包）。
+    pub fn gpu_model_for_install(&self) -> Option<String> {
+        if self.gpu_model.trim().is_empty() {
+            None
+        } else {
+            Some(self.gpu_model.clone())
+        }
+    }
+}
+
 // 云端运行参数由引擎插件生成；CloudPlan 只保留节点配置数据。
 
 /// 一份完整的部署方案。网关的「唯一真相」。

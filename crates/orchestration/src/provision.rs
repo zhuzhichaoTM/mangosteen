@@ -713,11 +713,13 @@ impl Orchestrator {
             "正在配置目标节点的运行环境".to_string(),
         );
         let cfg = self.config();
+        // GPU 型号感知的引擎包选择（2026-11-25）：P40/V100S 回落旧版包
+        let gpu_model = cloud_plan.gpu_model_for_install();
         mangosteen_provider::orchestrator::configure_node(
             &ssh,
             &device.workdir,
             cloud_plan.engine.engine,
-            cfg.cloud.engine_install_url(cloud_plan.engine.engine).as_deref(),
+            cfg.cloud.engine_install_url_for_gpu(cloud_plan.engine.engine, gpu_model.as_deref()).as_deref(),
             &cfg.cloud.github_proxy,
         )?;
         // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署
@@ -931,11 +933,13 @@ impl Orchestrator {
         // 安装脚本，Ollama 返回 None），与具体引擎解耦（2026-11-25 优化1）。
         let cfg = self.config();
         let engine_name = cloud_plan.engine.engine.display_name();
+        // GPU 型号感知的引擎包选择（2026-11-25）：P40/V100S 回落旧版包
+        let gpu_model = cloud_plan.gpu_model_for_install();
         mangosteen_provider::orchestrator::configure_node(
             &ssh,
             &p.workdir,
             cloud_plan.engine.engine,
-            cfg.cloud.engine_install_url(cloud_plan.engine.engine).as_deref(),
+            cfg.cloud.engine_install_url_for_gpu(cloud_plan.engine.engine, gpu_model.as_deref()).as_deref(),
             &cfg.cloud.github_proxy,
         )?;
         // sshd 加固不在此处执行（2026-11-18 用户裁决）：调整到「模型部署

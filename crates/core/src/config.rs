@@ -266,9 +266,28 @@ impl CloudConfig {
         &self,
         engine: crate::config::InferenceEngine,
     ) -> Option<String> {
+        self.engine_install_url_for_gpu(engine, None)
+    }
+
+    /// 引擎安装/下载地址（GPU 型号感知，2026-11-25 用户裁决）。
+    ///
+    /// llama.cpp 默认 CUDA 13.2 全 NVIDIA 卡包；P40/V100S 老卡回落
+    /// `lllama-cpp-bin-linux-x86_64.tar.gz`（CUDA 13.2 包不兼容）。
+    /// `gpu_model=None`（旧调用路径）时按默认包处理。
+    pub fn engine_install_url_for_gpu(
+        &self,
+        engine: crate::config::InferenceEngine,
+        gpu_model: Option<&str>,
+    ) -> Option<String> {
         match engine {
-            crate::config::InferenceEngine::LlamaCpp => Some(self.llama_server_url.clone())
-                .filter(|u| !u.trim().is_empty()),
+            crate::config::InferenceEngine::LlamaCpp => {
+                if gpu_model.is_some_and(crate::config::is_legacy_gpu) {
+                    Some(LLAMA_SERVER_URL_LEGACY_GPU.to_string())
+                } else {
+                    Some(self.llama_server_url.clone())
+                        .filter(|u| !u.trim().is_empty())
+                }
+            }
             crate::config::InferenceEngine::Strata => {
                 let configured = self.strata_install_url.trim();
                 if configured.is_empty() {
@@ -308,11 +327,26 @@ fn default_remote_workdir() -> String {
 }
 
 fn default_llama_server_url() -> String {
-    "https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.0/llama-cpp-bin-linux-x86_64.tar.gz".to_string()
+    // 默认 CUDA 13.2 全 NVIDIA 卡版本（2026-11-25 用户更新）；
+    // P40/V100S 老卡由 configure_node 按 GPU 型号切换到
+    // lllama-cpp-bin-linux-x86_64.tar.gz（见 engine_install_url_for_gpu）。
+    "https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.0/llama-server-cuda-13.2-allnvidia.tar.gz".to_string()
 }
 
+/// P40/V100S 老 GPU 专用 llama.cpp 包（CUDA 13.2 包不支持这些卡，
+/// 2026-11-25 用户裁决）。
+pub const LLAMA_SERVER_URL_LEGACY_GPU: &str =
+    "https://github.com/zhuzhichaoTM/mangosteen/releases/download/v0.1.0/lllama-cpp-bin-linux-x86_64.tar.gz";
+
 fn default_llama_server_sha256() -> String {
-    "d1a8e2ca57f818f5e9523badb73242e8c4444e27860931d0a391fcbb83e9f195".to_string()
+    // llama-server-cuda-13.2-allnvidia.tar.gz SHA256（2026-11-25 用户提供）
+    "04241d33621ed0fe5c88bcfb5ddd5c516155bb139cf7cfa107ec394b71e7df6e".to_string()
+}
+
+/// 需要回退旧版 llama.cpp 包的老 GPU 型号（CUDA 13.2 包不兼容）。
+pub fn is_legacy_gpu(gpu_model: &str) -> bool {
+    let m = gpu_model.to_ascii_lowercase();
+    m.contains("p40") || m.contains("v100s")
 }
 
 fn default_github_proxy() -> String {
@@ -1384,7 +1418,10 @@ impl Config {
                 secret: SecretRef::None,
                 options: BTreeMap::from([(
                     "image_id".to_string(),
-                    "compshareImage-1k99rzcvdg6j".to_string(),
+                    // 默认镜像（2026-11-25 用户更新）：CUDA 13.2 环境；
+                    // P40/V100S 由 driver 的 image_id_for_gpu 切换到旧镜像
+                    // compshareImage-1k99rzcvdg6j。
+                    "compshareImage-1t4xyz67cfmh".to_string(),
                 )]),
                 priority: 1.0,
                 profile: None,
