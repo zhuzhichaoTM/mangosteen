@@ -540,7 +540,7 @@ pub fn ensure_llama_server(
          d=$(dirname $(find . -name llama-server -type f | head -1)); \
          cp -a \"$d\"/. {workdir}/bin/; \
          chmod +x {workdir}/bin/llama-server; \
-         test -f {workdir}/bin/libllama-server-impl.so || find {workdir}/bin -maxdepth 2 -name 'libllama-server-impl.so' -type f -exec cp -f {{}} {workdir}/bin/\\; || true; \
+         test -f {workdir}/bin/libllama-server-impl.so || find {workdir}/bin -maxdepth 3 -name 'libllama-server-impl.so' -type f -exec cp -f {{}} {workdir}/bin/ \\;; \
          rm -rf {workdir}/tmp; \
          test -f {workdir}/bin/libllama-server-impl.so || {{ echo '缺少 libllama-server-impl.so' >&2; exit 1; }}; \
          echo {installed}"

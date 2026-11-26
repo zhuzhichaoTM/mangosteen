@@ -1614,14 +1614,21 @@ fn bootstrap_deploy_target(
     // 幂等：已安装则秒回；失败仅告警降级（node-config 会再试 deploy 下载）。
     {
         let workdir = config.remote_workdir.trim_end_matches('/').to_string();
-        match mangosteen_device::llama_cpp::ensure_llama_server_from_archive(
-            &root,
-            &workdir,
-            &config.llama_server_url,
-            &config.github_proxy,
-            &config.llama_server_sha256,
-        ) {
-            Ok(path) => {
+        // 引擎感知下载（2026-11-26 修复）：Strata 等不支持 model_path 的
+        // 引擎不需要预下载 llama.cpp 包（模型由引擎自管），跳过下载避免
+        // 代理拼接失败导致部署失败。
+        let needs_llama_cpp = engine
+            .map(|e| e.capabilities().supports_model_path)
+            .unwrap_or(true);
+        if needs_llama_cpp {
+            match mangosteen_device::llama_cpp::ensure_llama_server_from_archive(
+                &root,
+                &workdir,
+                &config.llama_server_url,
+                &config.github_proxy,
+                &config.llama_server_sha256,
+            ) {
+                Ok(path) => {
                 // 安装产物归 deploy（node-config/引擎以 deploy 身份执行）
                 let chown_cmd =
                     format!("chown -R {DEPLOY_USER}:{DEPLOY_USER} {workdir} 2>/dev/null || true");
@@ -1644,6 +1651,7 @@ fn bootstrap_deploy_target(
                     "[cloud] ⚠ 实例 {} llama-server root 下载失败（{}），node-config 将以 deploy 身份重试",
                     instance.id, e
                 );
+            }
             }
         }
     }
@@ -3228,7 +3236,21 @@ pub fn configure_node(
     // 未配置 URL 的引擎由插件内逻辑要求节点/镜像预装。
     let plugin = mangosteen_device::builtin_plugin(engine);
     let engine_path = match plugin {
-        Some(p) => p.ensure_engine(target, workdir, engine_url)?,
+        Some(p) => {
+            // 引擎感知（2026-11-26 修复）：llama.cpp 需要 github_proxy + SHA256，
+            // 其它引擎走默认 ensure_engine（无代理/校验）。
+            if engine == mangosteen_core::config::InferenceEngine::LlamaCpp {
+                p.ensure_engine_with_proxy(
+                    target,
+                    workdir,
+                    engine_url,
+                    github_proxy,
+                    "",
+                )?
+            } else {
+                p.ensure_engine(target, workdir, engine_url)?
+            }
+        }
         None => {
             // 未插件化的引擎（vLLM/SGLang 等）：回落 llama.cpp 专用路径
             let url = engine_url.ok_or_else(|| MnError::Network {
@@ -3356,6 +3378,10 @@ pub fn download_model_node_inner(
 }
 
 /// 兼容旧调用：按“配置 → 下载”顺序执行，不负责启动引擎。
+///
+/// 引擎下载已下沉到 [`EnginePlugin::download_engine`]（2026-11-26 用户裁决）：
+/// 编排层不直接调 `llama_cpp::ensure_llama_server_from_archive`，
+/// 各引擎插件自行决定下载逻辑（llama.cpp 发行包/Strata 官方脚本等）。
 pub fn prepare_node(
     target: &mangosteen_device::remote::SshTarget,
     workdir: &str,
@@ -3363,6 +3389,8 @@ pub fn prepare_node(
     engine_url: Option<&str>,
     github_proxy: &str,
 ) -> MnResult<()> {
+    // 引擎下载已在 configure_node 内完成（EnginePlugin::ensure_engine
+    // 各引擎自行实现：llama.cpp 发行包/Strata 官方脚本）。此处不再重复。
     configure_node(target, workdir, plan.engine.engine, engine_url, github_proxy)?;
     let _ = download_model_node(target, plan, None, None, None)?;
     Ok(())

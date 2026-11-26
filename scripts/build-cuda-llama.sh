@@ -109,10 +109,16 @@ mkdir -p "$OUT_DIR"
 cp -f "$BIN" "$OUT_DIR/llama-server"
 chmod 755 "$OUT_DIR/llama-server"
 
-# Copy runtime CUDA libraries when the build tree provides them. The binary
-# still relies on the node's CUDA driver; these are user-space toolkit libs.
-find "$BUILD_DIR" -type f \( -name 'libggml-cuda.so*' -o -name 'libggml.so*' -o -name 'libggml-base.so*' \) \
+# 复制全部运行时依赖（2026-11-26 用户裁决：全量可执行程序+依赖包）：
+# 当前软件包只有 libggml-base.so.1.0.0 / libggml.so.1.0.0 /
+# libggml-cuda.so.1.0.0 / llama-server，但 llama-server 还依赖
+# libllama-server-impl.so 等——必须全量拷贝 .so* 与可执行程序。
+find "$BUILD_DIR" -type f \( -name '*.so*' -o -name '*.a' \) \
   -exec cp -f {} "$OUT_DIR"/ \; 2>/dev/null || true
+# 递归查找并复制所有 .so 目录（ggml-cuda 等子目录）
+find "$BUILD_DIR" -type d -name 'lib*' -exec cp -a {} "$OUT_DIR"/ \; 2>/dev/null || true
+# 复制 ggml 插件目录（CUDA 后端）
+find "$BUILD_DIR" -type d -name 'ggml-*' -exec cp -a {} "$OUT_DIR"/ \; 2>/dev/null || true
 
 ok "llama-server: $OUT_DIR/llama-server"
 

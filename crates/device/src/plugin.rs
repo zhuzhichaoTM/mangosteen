@@ -98,6 +98,21 @@ pub trait EnginePlugin: std::fmt::Debug + Send + Sync {
         Ok(None)
     }
 
+    /// 带代理和 SHA256 的引擎准备（2026-11-26 修复）：
+    /// llama.cpp 包下载需要 github_proxy 代理池 + SHA256 校验。
+    /// 默认实现转发 ensure_engine（忽略代理参数）。
+    fn ensure_engine_with_proxy(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        url: Option<&str>,
+        github_proxy: &str,
+        sha256: &str,
+    ) -> MnResult<Option<String>> {
+        let _ = (github_proxy, sha256);
+        self.ensure_engine(target, workdir, url)
+    }
+
     /// 在远端节点拉起引擎进程。
     ///
     /// `launch` 来自 [`Self::launch_config`]（args + 任务级密钥）。
@@ -293,6 +308,19 @@ impl EnginePlugin for LlamaCppEngine {
         workdir: &str,
         url: Option<&str>,
     ) -> MnResult<Option<String>> {
+        self.ensure_engine_with_proxy(target, workdir, url, "", "")
+    }
+
+    /// 引擎感知的 ensure_engine（带代理和 SHA256，2026-11-26 修复）：
+    /// llama.cpp 包下载需要 github_proxy 代理池 + SHA256 校验。
+    fn ensure_engine_with_proxy(
+        &self,
+        target: &crate::remote::SshTarget,
+        workdir: &str,
+        url: Option<&str>,
+        github_proxy: &str,
+        sha256: &str,
+    ) -> MnResult<Option<String>> {
         let url = url.filter(|u| !u.trim().is_empty());
         // 已存在且可执行 → 直接复用（幂等）
         let bin = format!("{}/bin/llama-server", workdir.trim_end_matches('/'));
@@ -306,7 +334,9 @@ impl EnginePlugin for LlamaCppEngine {
         }
         match url {
             Some(url) => {
-                crate::llama_cpp::ensure_llama_server_from_archive(target, workdir, url, "", "")?;
+                crate::llama_cpp::ensure_llama_server_from_archive(
+                    target, workdir, url, github_proxy, sha256,
+                )?;
                 Ok(Some(bin))
             }
             // 无 URL：沿用镜像/系统 PATH 里的 llama-server（历史行为）
